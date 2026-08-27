@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -7,6 +7,39 @@ import { beforeAll, describe, expect, it } from 'vitest';
 const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+const VALID_ENV = {
+  JIKU_CREDS: '/run/secrets/sentinel.creds',
+  JIKU_KEY_FILE: '/run/secrets/machine-user.json',
+  JIKU_PROJECT_ID: '307f1f77bcf86cd799439011',
+  JIKU_VERIFY_PROJECT_ID: '42',
+};
+
+const REQUIRED_VARIABLES = [
+  'JIKU_CREDS',
+  'JIKU_KEY_FILE',
+  'JIKU_PROJECT_ID',
+  'JIKU_VERIFY_PROJECT_ID',
+];
+
+/**
+ * Entorno explicito para el proceso hijo: solo PATH y HOME mas lo que el caso declara.
+ *
+ * Este archivo y `src/config/env.ts` son los unicos lugares del repo donde `process.env` puede
+ * aparecer legitimamente — aca porque probar el arranque real exige controlar el entorno del hijo.
+ * El test estructural de CA-1 escanea `src/`, no `test/`, asi que no hay conflicto. No lo
+ * "arregles" moviendolo a un helper que herede el entorno: heredarlo es el bug que evita.
+ *
+ * HOME va explicito y apunta a un directorio que no existe, para que el `loadConfig()` del SDK no
+ * levante el `~/.config/jiku/config.yaml` del desarrollador y cambie el resultado del test.
+ */
+function BASE_ENV_WITH(extra: Record<string, string>): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env['PATH'],
+    HOME: '/nonexistent-home-for-tests',
+    ...extra,
+  };
+}
 
 // El error que este archivo previene es el que pasa el typecheck y falla al arrancar:
 // tsc no reescribe los especificadores al emitir, asi que el mapeo `#` tiene que estar
@@ -29,12 +62,58 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
   // Asegura el arranque limpio, no la ausencia de un codigo de error puntual: un `imports`
   // ausente falla con ERR_PACKAGE_IMPORT_NOT_DEFINED y uno mal apuntado con
   // ERR_MODULE_NOT_FOUND. Las dos regresiones son la misma, y las dos rompen el arranque.
+  //
+  // Desde S-002 el arranque valida la configuracion, asi que el proceso necesita un entorno
+  // completo para llegar a salir con 0. El entorno se pasa EXPLICITO y no se hereda del host: si se
+  // heredara, el test pasaria o fallaria segun lo que el desarrollador tenga exportado en su shell,
+  // que es el fallo intermitente que la convencion `testing` prohibe.
   it('starts dist/index.js with the subpath import resolved', async () => {
     const { stdout, stderr } = await execFileAsync('node', ['dist/index.js'], {
       cwd: PROJECT_ROOT,
+      env: BASE_ENV_WITH(VALID_ENV),
     });
 
     expect(stderr).toBe('');
     expect(stdout).toContain('jiku-mail-connector');
+  }, 30_000);
+
+  it('exits zero with a complete environment, resolving every subpath import', async () => {
+    const { stdout, stderr } = await execFileAsync('node', ['dist/index.js'], {
+      cwd: PROJECT_ROOT,
+      env: BASE_ENV_WITH(VALID_ENV),
+    });
+
+    expect(stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+    expect(stderr).not.toContain('ERR_PACKAGE_IMPORT_NOT_DEFINED');
+    expect(stdout).toContain('configuracion valida');
+  }, 30_000);
+
+  it('aborts with a non-zero exit code and the complete list when the environment is incomplete', async () => {
+    const result = spawnSync(process.execPath, ['dist/index.js'], {
+      cwd: PROJECT_ROOT,
+      env: BASE_ENV_WITH({ JIKU_INSTANCE: 'dev' }),
+      encoding: 'utf8',
+    });
+
+    expect(result.status).not.toBe(0);
+    for (const name of REQUIRED_VARIABLES) {
+      expect(result.stderr).toContain(name);
+    }
+    // El arranque corta antes de conectar, asi que un mapeo roto no puede disfrazarse de fallo
+    // de configuracion.
+    expect(result.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+    expect(result.stderr).not.toContain('ERR_PACKAGE_IMPORT_NOT_DEFINED');
+  }, 30_000);
+
+  it('never writes a secret path to either stream on a successful start', async () => {
+    const { stdout, stderr } = await execFileAsync('node', ['dist/index.js'], {
+      cwd: PROJECT_ROOT,
+      env: BASE_ENV_WITH(VALID_ENV),
+    });
+
+    for (const secret of [VALID_ENV.JIKU_CREDS, VALID_ENV.JIKU_KEY_FILE, VALID_ENV.JIKU_PROJECT_ID]) {
+      expect(stdout).not.toContain(secret);
+      expect(stderr).not.toContain(secret);
+    }
   }, 30_000);
 });

@@ -21,7 +21,10 @@
     "test:teardown": "vitest run && node scripts/verify-teardown.mjs"
   },
   "dependencies": {
-    "@gravadigital/jiku": "^1.0.0"
+    "@gravadigital/jiku": "^1.0.0",
+    "@t3-oss/env-core": "^0.13.11",
+    "dotenv": "^17.4.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",

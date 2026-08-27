@@ -13,7 +13,7 @@ stories: [S-002, S-003, S-004]
 **Tipo:** Evento
 **Status:** Draft
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-27
+**Última actualización:** 2026-08-27 (S-002: Paso 1 implementado)
 **Stories:** S-002, S-003, S-004
 
 ## Descripción
@@ -45,7 +45,7 @@ sequenceDiagram
     participant BUS as Bus NATS (auth-callout)
     participant CORE as Jiku core
 
-    MC->>MC: validar configuración (Zod, emitErrors)
+    MC->>MC: validar configuración (Zod, onValidationError)
     alt falta algo requerido
         MC-->>MC: exit ≠ 0 con la lista completa
     else configuración OK
@@ -84,8 +84,24 @@ sequenceDiagram
 **Tipo:** Interno
 
 **Acción:** `src/config/env.ts` — el **único** módulo que toca `process.env` — valida con
-`createEnv({ ..., emitErrors: true })` de `@t3-oss/env-core` + Zod. `emitErrors` agrega **todos** los
-issues y lanza una sola vez con la lista completa.
+`createEnv({ ..., onValidationError })` de `@t3-oss/env-core` + Zod. El handler recibe **todos** los
+issues en una sola invocación y lanza `ConfigValidationError` una sola vez con la lista completa.
+
+> **Corregido en S-002.** La opción `emitErrors: true` que este paso documentaba no existe en
+> `@t3-oss/env-core@0.13.11`; la API real es `onValidationError`. La agregación de issues que el paso
+> describe se mantiene igual — se verificó que con varias variables inválidas el handler se invoca una
+> vez con todas. Lo que no sirve es el handler *por defecto*: parte el reporte en un `console.error`
+> con el array crudo de issues y un `Error` genérico sin ningún nombre adentro, así que el conector
+> aporta el suyo (`src/config/errors.ts`), que nombra las variables y nunca interpola valores.
+
+**Variable del `projectId` de prueba:** se llama `JIKU_VERIFY_PROJECT_ID` (fijado en S-002). Es el
+proyecto de **Jiku** (entero) del modo de verificación, y no debe confundirse con `JIKU_PROJECT_ID`,
+que es el project de **Zitadel** (UUID).
+
+**Composición con el SDK:** la configuración del bus se lee con `loadConfig()` del SDK, invocado
+dentro de `src/config/index.ts`, y su resultado se compone con el `env` validado en un único
+`AppConfig`. El `env` se valida **antes** de llamar a `loadConfig()`, porque este último lee el
+filesystem y CA-2 exige fallar sin intentar nada antes.
 
 **Variables del alcance:**
 
@@ -94,7 +110,7 @@ issues y lanza una sola vez con la lista completa.
 | `JIKU_CREDS` | Sí | — |
 | `JIKU_KEY_FILE` | Sí | — |
 | `JIKU_PROJECT_ID` | Sí | — |
-| `projectId` de prueba | Sí | — |
+| `JIKU_VERIFY_PROJECT_ID` | Sí | — |
 | `JIKU_INSTANCE` | No | `dev` |
 | `JIKU_SERVERS` | No | `nats://localhost:4222` |
 | `JIKU_ISSUER` | No | `https://id.grava.io` |
