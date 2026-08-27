@@ -211,3 +211,19 @@ const DEVELOPMENT_TRANSPORT_TARGET = 'pino-pretty';
   `--omit=dev`, so the package **does not exist** in the final image. That is why it is only
   referenced when `nodeEnv === 'development'`, and why `createLogger` degrades if it fails to resolve
   anyway.
+
+---
+
+## RIGHT_TOKEN / WRONG_TOKEN / TEST_SUBJECT
+
+**Location:** `test/bus/auth-helpers.ts`
+
+**Value:** `'the-right-token'` / `'the-wrong-token'` / `'machine-user-abc'`
+
+**Description:** The token the authenticated test container accepts, one it rejects, and the `sub` the
+identity doubles declare.
+
+**Notes:**
+
+- Literals rather than random values on purpose: they make the tests readable, and there is nothing to
+  protect in an ephemeral container that lives as long as one test file.

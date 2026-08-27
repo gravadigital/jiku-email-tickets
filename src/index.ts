@@ -2,7 +2,10 @@ import 'dotenv/config';
 
 import { ConfigValidationError } from '#config/errors.js';
 import { loadAppConfig } from '#config/index.js';
-import { initLogger } from '#shared/logger.js';
+import { connectToBus } from '#infra/bus/connection.js';
+import { BusConnectError, KeyLoadError } from '#infra/bus/errors.js';
+import { buildServiceUser } from '#infra/bus/identity.js';
+import { getLogger, initLogger } from '#shared/logger.js';
 import { SERVICE_NAME } from '#shared/service-info.js';
 
 async function main(): Promise<void> {
@@ -29,17 +32,75 @@ async function main(): Promise<void> {
     'configuracion valida',
   );
 
-  // S-004 conecta al bus. En S-003 el arranque termina aca: el logger construido ES el entregable,
-  // y que el proceso salga con 0 es la prueba de que la validacion no corta un entorno valido.
+  // Paso 3: la identidad sale de la KEY, no del entorno. No hace ninguna llamada de red — el
+  // `userId` y el `subject()` se derivan del archivo — asi que un fallo aca es siempre del montaje
+  // de la key, nunca de Zitadel ni de la red.
+  const auth = await buildServiceUser(config);
+
+  // Pasos 4 y 5, en una sola llamada porque el SDK los encadena: pide el token a Zitadel ANTES de
+  // abrir el socket, deliberadamente, para que una identidad mal configurada falle diciendo cual de
+  // las dos credenciales fue el problema en vez de con un `Authorization Violation` que no nombra
+  // ninguna. El cliente resultante se conserva por toda la vida del proceso.
+  //
+  // El logger va POR PARAMETRO y no por `getLogger()` desde el modulo del bus: asi esas funciones
+  // se testean con un logger de captura sin tocar el singleton del proceso.
+  const client = await connectToBus({ config, auth, logger });
+
+  // La linea de arranque exitoso. Los tres campos son deliberados y ninguno es una credencial:
+  //
+  // - `userId` es la identidad PUBLICA en cada subject, y es lo que permite cruzar este log con el
+  //   de core cuando falta la fila en `users`.
+  // - `inboxPrefix` es un hash del `sub`, no un secreto, y es el dato que diagnostica la trampa
+  //   n.1 del bus —una reply publicada donde nadie escucha— sin adivinar. El SDK lo expone
+  //   explicitamente *"for diagnostics"*.
+  // - `instance` es el token de despliegue de cada subject.
+  //
+  // Y NO van: credsFile, keyFile, zitadelProjectId, servers ni el token, por lo mismo que la linea
+  // de S-002 no los lleva.
+  logger.info(
+    { instance: client.instance, userId: client.userId, inboxPrefix: client.inboxPrefix },
+    'conectado al bus',
+  );
+
+  // El proceso queda VIVO con la conexion abierta: S-005 hereda el cliente conectado. No se cierra
+  // el cliente ni se sale con 0.
+  //
+  // Tampoco se agrega manejo de senales ni apagado ordenado: el worker todavia no hace nada
+  // periodico, y el apagado ordenado tiene sentido cuando haya un tick en vuelo que perder (FG-2).
+  // Agregarlo ahora seria codigo sin ningun criterio que lo verifique.
 }
 
 main().catch((error: unknown) => {
-  // Este catch NO usa el logger, y la asimetria es deliberada: un fallo de validacion de
-  // configuracion ocurre ANTES de que el logger exista, asi que su reporte sale por stderr directo.
-  // Del Paso 2 en adelante se falla con logger; el Paso 1 falla sin el. Esta en la tabla de errores
-  // del flow y no es un descuido.
+  // Este catch NO usa el logger para ConfigValidationError, y la asimetria es deliberada: un fallo
+  // de validacion de configuracion ocurre ANTES de que el logger exista, asi que su reporte sale
+  // por stderr directo. Del Paso 2 en adelante se falla con logger; el Paso 1 falla sin el. Esta en
+  // la tabla de errores del flow y no es un descuido.
   if (error instanceof ConfigValidationError) {
     process.stderr.write(`${error.message}\n`);
+  } else if (error instanceof KeyLoadError || error instanceof BusConnectError) {
+    // Estos dos SI salen por el logger: ocurren despues de que se construyo, y el log estructurado
+    // es lo unico que hace diagnosticable un worker sin nadie mirando. El contexto lleva el
+    // diagnostico —QUE SISTEMA rechazo— porque los arreglos estan en lugares distintos y un
+    // "no pudo conectar" a secas obliga a revisar Zitadel, la red y los montajes a la vez.
+    //
+    // `fatal` y no `error`: el servicio no puede continuar (convencion `logging`).
+    //
+    // El contexto es PLANO: la redaccion de S-003 no tiene comodin profundo, asi que un contexto
+    // anidado dejaria un secreto en claro sin fallar ni avisar. Y no lleva `err`, que arrastraria
+    // el stack completo con la cadena de causas: los mensajes viajan ya extraidos en `causes`.
+    getLogger().fatal(
+      {
+        code: error.code,
+        ...(error instanceof BusConnectError
+          ? { diagnosis: error.diagnosis, sdkErrorClass: error.sdkErrorClass, causes: error.causes }
+          : // KeyLoadError NO aporta `causes`: su mensaje nombra la RUTA de la key, que es una ruta
+            // a un secreto y por lo tanto no va al log estructurado (ADR-006). El diagnostico que
+            // el operador necesita —"la key no se pudo cargar"— esta en el mensaje de la linea y en
+            // el `code`; la ruta la sabe, porque es la que configuro en JIKU_KEY_FILE.
+            { diagnosis: 'key_ilegible' }),
+      },
+      'el arranque fallo: el conector no pudo conectarse al bus',
+    );
   } else {
     // Fallback para lo no reconocido: tampoco puede asumir que el logger se construyo, porque el
     // fallo puede venir de loadAppConfig() o de la construccion misma del logger.

@@ -140,3 +140,120 @@ import { setupTestBus, type TestBusContext } from './helpers.js';
 let bus: TestBusContext;
 bus = await setupTestBus(inject('natsUrl'));
 ```
+
+---
+
+## KeyLoadError
+
+**Location:** `src/infra/bus/errors.ts`
+
+**Description:** The machine-user key could not be loaded. Collapses the SDK's four `fromKeyFile()`
+failure modes into one error, because all four have the same fix — check the mounted file — while the
+exact cause travels intact in `cause`.
+
+**Interface:**
+
+```ts
+class KeyLoadError extends AppError {
+  readonly code = 'BUS_KEY_LOAD_ERROR';
+  readonly httpStatus = 500;
+}
+```
+
+**Notes:**
+
+- The **path** goes in the message, which is what the operator reads to fix the deployment. It does
+  **not** go in `details`, because `details` ends up in the structured log context and a path to a
+  secret is information about that secret (ADR-006).
+- Never contains the file's contents at any level of the chain — asserted by a test using a sentinel
+  value, because what the SDK does not leak today it could leak in a minor.
+
+---
+
+## BusConnectError
+
+**Location:** `src/infra/bus/errors.ts`
+
+**Description:** The bus connection failed at startup. Exposes the diagnosis, the SDK error class and
+the cause-chain messages as **fields**, not only inside the message — the same shape as
+`ConfigValidationError` with its `variables`, so the log point and the tests assert on structure
+instead of on captured text.
+
+**Interface:**
+
+```ts
+class BusConnectError extends AppError {
+  readonly code = 'BUS_CONNECT_ERROR';
+  readonly httpStatus = 500;
+  readonly diagnosis: ConnectDiagnosis;
+  readonly sdkErrorClass: string;
+  readonly causes: string[];
+}
+```
+
+**Notes:**
+
+- `sdkErrorClass` comes from `constructor.name`, not from an `instanceof` per class: it is for the log
+  and does not depend on constructor identity across duplicate copies of the package.
+- `causes` keeps the SDK's own messages, which already spell out the likely causes. Dropping them on
+  wrapping would throw away the best available diagnosis.
+
+---
+
+## ConnectDiagnosis
+
+**Location:** `src/infra/bus/errors.ts`
+
+**Description:** Which system rejected the connection. A literal union rather than loose strings, so a
+`switch` at the log point is exhaustive for the typechecker.
+
+**Interface:**
+
+```ts
+type ConnectDiagnosis =
+  | 'key_ilegible'
+  | 'zitadel_no_entrego_token'
+  | 'rechazo_del_bus_por_subject'
+  | 'bus_inalcanzable'
+  | 'creds_ilegible'
+  | 'refresh_del_token_fallo'
+  | 'desconocido';
+```
+
+**Notes:**
+
+- Each value names a **different system and a different fix**. That is the whole point (ADR-006): a log
+  that says only "could not connect" forces checking Zitadel, the network, and both file mounts at once.
+- `'desconocido'` is a legitimate result and is **never mapped to another one**. A wrong diagnosis is
+  worse than an absent one: it sends the operator to the wrong system.
+
+---
+
+## diagnoseConnectFailure() / causeChain()
+
+**Location:** `src/infra/bus/errors.ts`
+
+**Signature:**
+
+```ts
+function diagnoseConnectFailure(error: unknown): ConnectDiagnosis;
+function causeChain(error: unknown): Error[];
+```
+
+**Notes:**
+
+- **Classifies by structure, never by the SDK's message text.** The SDK's own regex is
+  `/no servers available|CONNECTION_REFUSED|ECONNREFUSED|ENOTFOUND/i`, but `@nats-io/transport-node`
+  reports a closed port as `"connection refused"` — lowercase, with a space — which matches none of
+  them. Verified: a closed port lands in the SDK's **generic** branch while an unresolvable host lands
+  in the specific one, and both are "unreachable bus" to the connector. Reading the text would make a
+  closed port undiagnosable — or worse, send the operator to Zitadel for a network problem.
+- What it reads instead: `isJikuError()`, the transport error's `name`, and the `errno` `code`s along
+  the cause chain. Structured data, not prose.
+- `causeChain()` walks with **both** a depth cap and a visited set: a cyclic `cause` would otherwise
+  hang the startup at the one moment the process still has no logger to explain itself.
+- **The terminal branch returns `'desconocido'`, never a guess.** Closing it with
+  `'zitadel_no_entrego_token'` by elimination is tempting and wrong: a `TokenSource` can throw
+  anything, so there is no positive structural signal for it. The token failure is recognised
+  elsewhere — `connectToBus()` asks for the token *before* `connect()`, so its failure is attributed
+  by the call that produced it rather than by what is left over.

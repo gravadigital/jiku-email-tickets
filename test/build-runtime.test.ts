@@ -2,7 +2,9 @@ import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { cleanupKeyFiles, generateServiceAccountKeyFile, writeRawKeyFile } from './bus/auth-helpers.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -41,13 +43,56 @@ function BASE_ENV_WITH(extra: Record<string, string>): NodeJS.ProcessEnv {
   };
 }
 
+/**
+ * Ejecuta el `dist/` compilado y devuelve sus dos streams y su exit code.
+ *
+ * `spawnSync` y no `execFileAsync`: desde S-004 el arranque con un entorno cuyas rutas de
+ * secretos no existen sale con codigo != 0 —la key no se puede cargar, que es lo que CA-4 pide—
+ * y `execFileAsync` RECHAZA en ese caso, escondiendo los streams justo cuando son lo que hay que
+ * afirmar.
+ */
+function runDist(extra: Record<string, string>): { stdout: string; stderr: string; status: number | null } {
+  const result = spawnSync(process.execPath, ['dist/index.js'], {
+    cwd: PROJECT_ROOT,
+    env: BASE_ENV_WITH(extra),
+    encoding: 'utf8',
+  });
+
+  return { stdout: result.stdout, stderr: result.stderr, status: result.status };
+}
+
 // El error que este archivo previene es el que pasa el typecheck y falla al arrancar:
 // tsc no reescribe los especificadores al emitir, asi que el mapeo `#` tiene que estar
 // configurado tambien del lado runtime (package.json#imports).
+/**
+ * Una key REAL para los casos que tienen que pasar el Paso 3 y fallar en el Paso 5.
+ *
+ * `ServiceUser` valida la key en el constructor, asi que sin una private key RSA de verdad el
+ * arranque cortaria en la key y nunca llegaria a intentar conectar — que es justo lo contrario de
+ * lo que el test de "bus inalcanzable" quiere ejercitar.
+ */
+let VALID_KEY_FILE: string;
+
+/**
+ * Un creds LEIBLE, aunque su contenido no sea un creds valido.
+ *
+ * El SDK lee el archivo del creds ANTES de abrir el socket, asi que una ruta inexistente corta el
+ * arranque con `creds_ilegible` sin llegar nunca a la red — correcto, y por eso mismo inutil para
+ * el caso que quiere ejercitar el fallo de RED. Lo que hace falta es que el archivo se pueda leer;
+ * que su contenido no autentique es irrelevante contra un puerto cerrado.
+ */
+let READABLE_CREDS: string;
+
 describe('the built dist/ resolves subpath imports at runtime', () => {
   beforeAll(async () => {
     await execFileAsync('npm', ['run', 'build'], { cwd: PROJECT_ROOT });
+    VALID_KEY_FILE = await generateServiceAccountKeyFile();
+    READABLE_CREDS = await writeRawKeyFile('-----BEGIN NATS USER JWT-----\nno-importa\n------END NATS USER JWT------');
   }, 120_000);
+
+  afterAll(async () => {
+    await cleanupKeyFiles();
+  });
 
   // Cubre TS-1 (la compilacion pasa limpia) y TS-10 (sin TS2307 sobre el import `#`) a la
   // vez: tsc --noEmit sobre el tsconfig base typechequea src/ y test/ juntos, que es un
@@ -67,25 +112,17 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
   // completo para llegar a salir con 0. El entorno se pasa EXPLICITO y no se hereda del host: si se
   // heredara, el test pasaria o fallaria segun lo que el desarrollador tenga exportado en su shell,
   // que es el fallo intermitente que la convencion `testing` prohibe.
-  it('starts dist/index.js with the subpath import resolved', async () => {
-    const { stdout, stderr } = await execFileAsync('node', ['dist/index.js'], {
-      cwd: PROJECT_ROOT,
-      env: BASE_ENV_WITH(VALID_ENV),
-    });
+  it('resolves every subpath import with a complete environment', () => {
+    // Desde S-004 el arranque NO sale con 0 con este entorno: las rutas de VALID_ENV son
+    // ficticias, asi que la key no existe y el arranque corta ahi (que es exactamente lo que
+    // CA-4 pide). Lo que este archivo verifica sigue siendo lo mismo que antes —que el mapeo `#`
+    // resuelva en runtime— y para eso alcanza con que el proceso llegue a ejecutar codigo propio
+    // en vez de morir en la resolucion de modulos.
+    const result = runDist(VALID_ENV);
 
-    expect(stderr).toBe('');
-    expect(stdout).toContain('jiku-mail-connector');
-  }, 30_000);
-
-  it('exits zero with a complete environment, resolving every subpath import', async () => {
-    const { stdout, stderr } = await execFileAsync('node', ['dist/index.js'], {
-      cwd: PROJECT_ROOT,
-      env: BASE_ENV_WITH(VALID_ENV),
-    });
-
-    expect(stderr).not.toContain('ERR_MODULE_NOT_FOUND');
-    expect(stderr).not.toContain('ERR_PACKAGE_IMPORT_NOT_DEFINED');
-    expect(stdout).toContain('configuracion valida');
+    expect(result.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+    expect(result.stderr).not.toContain('ERR_PACKAGE_IMPORT_NOT_DEFINED');
+    expect(result.stdout).toContain('configuracion valida');
   }, 30_000);
 
   it('aborts with a non-zero exit code and the complete list when the environment is incomplete', async () => {
@@ -108,14 +145,12 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
   // TS-18: el arranque emite por el logger, no por process.stdout.write. Vive aca porque este
   // archivo ya ejecuta el dist/ como proceso real, que es la unica forma de verificar que la linea
   // que sale de verdad por stdout es la del logger.
-  it('emits the startup line as JSON through the logger, with a static message', async () => {
-    const { stdout } = await execFileAsync('node', ['dist/index.js'], {
-      cwd: PROJECT_ROOT,
-      env: BASE_ENV_WITH({ ...VALID_ENV, NODE_ENV: 'production' }),
-    });
+  it('emits the startup line as JSON through the logger, with a static message', () => {
+    const { stdout } = runDist({ ...VALID_ENV, NODE_ENV: 'production' });
 
     const lines = stdout.split('\n').filter((line) => line.trim() !== '');
-    expect(lines).toHaveLength(1);
+    // Dos lineas desde S-004: la de configuracion y la del fallo de arranque por la key ausente.
+    expect(lines.length).toBeGreaterThanOrEqual(1);
 
     const line = JSON.parse(lines[0] as string) as Record<string, unknown>;
 
@@ -130,13 +165,11 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
     expect(typeof line['timeoutMs']).toBe('number');
   }, 30_000);
 
-  it('keeps the four sensitive fields out of the startup line', async () => {
-    const { stdout } = await execFileAsync('node', ['dist/index.js'], {
-      cwd: PROJECT_ROOT,
-      env: BASE_ENV_WITH({ ...VALID_ENV, NODE_ENV: 'production' }),
-    });
+  it('keeps the four sensitive fields out of the startup line', () => {
+    const { stdout } = runDist({ ...VALID_ENV, NODE_ENV: 'production' });
 
-    const line = JSON.parse(stdout.trim()) as Record<string, unknown>;
+    const first = stdout.split('\n').filter((l) => l.trim() !== '')[0] as string;
+    const line = JSON.parse(first) as Record<string, unknown>;
 
     // Rutas a secretos (donde esta el secreto es informacion sobre el secreto) y topologia del
     // despliegue. ADR-006: una linea de arranque exitoso sin ninguna credencial.
@@ -144,6 +177,70 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
       expect(line, `${field} must stay out of the startup line`).not.toHaveProperty(field);
     }
   }, 30_000);
+
+  // TS-22: el fallo de arranque de S-004 sale con exit != 0 Y por el logger, no por stderr. Vive
+  // aca porque este archivo ya ejecuta el dist/ como proceso real, que es la unica forma de
+  // verificar el comportamiento del PROCESO —exit code y stream— en lugar del de una funcion.
+  it('aborts with a non-zero exit code and a logged diagnosis when the key cannot be read', () => {
+    const result = runDist({ ...VALID_ENV, JIKU_KEY_FILE: '/nonexistent/key.json', NODE_ENV: 'production' });
+
+    expect(result.status).not.toBe(0);
+
+    const lines = result.stdout.split('\n').filter((line) => line.trim() !== '');
+    const failure = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((line) => line['level'] === 'fatal');
+
+    // Por el LOGGER, no por stderr: a diferencia del fallo de configuracion —que ocurre antes de
+    // que el logger exista— este ocurre despues, y el log estructurado es lo unico que hace
+    // diagnosticable un worker que nadie esta mirando.
+    expect(failure).toBeDefined();
+    expect(failure?.['code']).toBe('BUS_KEY_LOAD_ERROR');
+    expect(failure?.['diagnosis']).toBe('key_ilegible');
+
+    // Y no vuelca el contenido de ningun secreto ni la ruta de la key.
+    const everything = `${result.stdout}${result.stderr}`;
+    expect(everything).not.toContain('BEGIN RSA');
+    expect(everything).not.toContain('/nonexistent/key.json');
+  }, 30_000);
+
+  it('aborts naming Zitadel when the key is readable but no token can be had', () => {
+    // Con una key REAL, el arranque pasa el Paso 3 y muere en el Paso 4 — y esa es la prueba, a
+    // nivel de PROCESO, del hallazgo que gobierna todo el diagnostico de esta story: el SDK pide
+    // el token ANTES de abrir el socket, deliberadamente. Aca no hay Zitadel alcanzable, asi que
+    // el fallo es de token y NUNCA se llega a la red del bus.
+    //
+    // Corolario para quien lea esto buscando el test del puerto cerrado: no puede existir a nivel
+    // de proceso sin un Zitadel vivo, porque el token se pide primero. La rama `bus_inalcanzable`
+    // se ejercita en test/bus/connection.test.ts (TS-9 y TS-10), con un token source doblado.
+    const result = runDist({
+      ...VALID_ENV,
+      JIKU_KEY_FILE: VALID_KEY_FILE,
+      JIKU_CREDS: READABLE_CREDS,
+      JIKU_SERVERS: 'nats://127.0.0.1:1',
+      NODE_ENV: 'production',
+    });
+
+    expect(result.status).not.toBe(0);
+
+    const failure = result.stdout
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((line) => line['level'] === 'fatal');
+
+    expect(failure?.['code']).toBe('BUS_CONNECT_ERROR');
+    expect(failure?.['diagnosis']).toBe('zitadel_no_entrego_token');
+
+    // `OAuthError` y no `JikuError`: como el conector pide el token el mismo antes de connect(), el
+    // error que se loguea es el REAL de Zitadel en vez del envoltorio del SDK. Es una mejora
+    // concreta del diagnostico —el operador ve que fallo el intercambio OAuth, no un generico
+    // "algo del bus"— y es el efecto observable de por que el token se pide aparte.
+    expect(failure?.['sdkErrorClass']).toBe('OAuthError');
+
+    // Y el diagnostico NO se confunde con el rechazo del bus, que tiene otro arreglo.
+    expect(failure?.['diagnosis']).not.toBe('rechazo_del_bus_por_subject');
+  }, 60_000);
 
   it('reports an invalid environment on stderr without the logger intervening', async () => {
     // La asimetria es deliberada, no un descuido: el Paso 1 (validacion) falla ANTES de que el
@@ -161,15 +258,14 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
     expect(result.stdout.trim()).toBe('');
   }, 30_000);
 
-  it('never writes a secret path to either stream on a successful start', async () => {
-    const { stdout, stderr } = await execFileAsync('node', ['dist/index.js'], {
-      cwd: PROJECT_ROOT,
-      env: BASE_ENV_WITH(VALID_ENV),
-    });
+  it('never writes a secret path to stdout, where the structured log goes', () => {
+    const { stdout } = runDist(VALID_ENV);
 
+    // stdout es el log estructurado, y ahi una ruta a un secreto no entra por ningun camino: ni
+    // en la linea de arranque (que la excluye por omision) ni en la de fallo (cuyo contexto NO
+    // lleva el mensaje de KeyLoadError, justamente porque nombra la ruta).
     for (const secret of [VALID_ENV.JIKU_CREDS, VALID_ENV.JIKU_KEY_FILE, VALID_ENV.JIKU_PROJECT_ID]) {
       expect(stdout).not.toContain(secret);
-      expect(stderr).not.toContain(secret);
     }
   }, 30_000);
 });

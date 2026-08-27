@@ -140,3 +140,150 @@ getLogger().warn({ messageId }, 'mail descartado');
 - A second `initLogger()` call does **not** replace the instance: one instance, and every module
   derives from it (`logger.child()`).
 - `resetLoggerForTests()` is only for tests, so one case can discard the singleton another built.
+
+---
+
+## buildServiceUser()
+
+**Location:** `src/infra/bus/identity.ts`
+
+**Description:** Builds the connector's identity from the machine-user key file that Zitadel produced,
+wrapping the SDK's `ServiceUser.fromKeyFile()` and translating its four failure modes into a single
+`KeyLoadError`. Reads no environment and calls no logger: everything arrives by parameter.
+
+**Signature:**
+
+```ts
+function buildServiceUser(config: AppConfig): Promise<ServiceUser>;
+```
+
+**Usage example:**
+
+```ts
+// src/index.ts — after initLogger(), before connecting
+const auth = await buildServiceUser(config);
+
+// The user-id that goes in every subject, derived from the key and never from the environment:
+auth.userId;              // synchronous, no network call
+await auth.subject();      // the same value
+```
+
+**Notes:**
+
+- **Makes no network call.** `userId` and `subject()` come straight from the key file, so the identity
+  is available before any token exists. Verified with an unreachable issuer.
+- **Four failure modes, not two.** `ServiceUser` validates in its **constructor** — it reads, parses,
+  checks the shape and loads the private key — so a missing file, malformed JSON, a JSON that is not a
+  machine-user key, and a `key` that OpenSSL cannot read all surface through this one call. All four
+  become `KeyLoadError` with the SDK's `JikuError` intact in `cause`.
+- **The SDK's message is chained by `cause`, never interpolated into ours.** That is what keeps the
+  "never dumps the key contents" guarantee **structural** instead of dependent on the SDK continuing
+  to behave well.
+- **Do not pass `scopes`.** The SDK's default is `['openid', 'profile']` and `profile` is mandatory:
+  without it the auth-callout's event carries no name, `core` discards it, the connector's `users` row
+  is never created, and every later request fails with `caller_not_authorized` — three services away
+  from the cause.
+
+---
+
+## connectToBus()
+
+**Location:** `src/infra/bus/connection.ts`
+
+**Description:** Opens the process's **single** bus connection and retains it for the lifetime of the
+process. The only place in the codebase that calls the SDK's `connect()`, asserted by a source scan.
+Registers `onTokenError` and translates any connection failure into a `BusConnectError` carrying a
+structural diagnosis.
+
+**Signature:**
+
+```ts
+interface ConnectToBusOptions {
+  readonly config: AppConfig;
+  readonly auth: TokenSource;
+  readonly logger: Logger;
+  readonly creds?: string | null | undefined;   // tests only
+}
+
+function connectToBus(options: ConnectToBusOptions): Promise<Client>;
+function connectInvocationCount(): number;      // tests only
+function resetBusForTests(): void;              // tests only
+```
+
+**Usage example:**
+
+```ts
+const client = await connectToBus({ config, auth, logger });
+
+logger.info(
+  { instance: client.instance, userId: client.userId, inboxPrefix: client.inboxPrefix },
+  'conectado al bus',
+);
+```
+
+**Notes:**
+
+- **One connection per process, never one per operation.** Connecting costs a round trip to Zitadel
+  plus the handshake that runs the auth-callout. The SDK says the same of its `Client`: *"should be
+  long-lived: one per process, not one per request"*.
+- **A second call does not open a second connection**: it returns the retained client and logs a
+  `warn`. Returning rather than throwing keeps the invariant that matters while still leaving a trace
+  to fix the caller — throwing would turn a wiring slip into a crash at an arbitrary point.
+- **`userId` and `inboxPrefix` are never passed.** The SDK derives the first from the token's `sub`
+  (*"LEAVE IT UNSET"*) and always sets the second to `_INBOX.<hash(sub)>`. Any other inbox prefix makes
+  replies land where nobody listens and the request time out **with no visible error**.
+- **`credsFile` goes as a path, not as contents** — the SDK reads it at connect time, so that byte
+  never needs to be in the connector's memory. The `creds` option is for tests pointing at a plain NATS.
+- Registering `onTokenError` also closes a redaction hole: its documented default is a `console.warn`,
+  which is **outside Pino and therefore not redacted**.
+- **It asks for the token itself before calling `connect()`**, which is not duplicated work (the SDK
+  caches it) but the only way to attribute a token failure **positively**. Left to fail inside
+  `connect()`, that error is structurally indistinguishable from an unclassifiable one, and
+  attributing it by elimination would turn every unknown connection failure into "check Zitadel".
+- `capturedConnectOptions()` is a **diagnostic seam for tests**, not a mock: a missing `onTokenError`
+  key, or a stray `userId`, has no other observable symptom — the SDK would silently fall back to its
+  unredacted default.
+
+---
+
+## reportTokenRefreshFailure()
+
+**Location:** `src/infra/bus/connection.ts`
+
+**Description:** The `onTokenError` callback's body: logs a failed background token refresh at `error`
+level with its diagnosis, the SDK error class and the cause chain — and leaves the process alive.
+
+**Signature:**
+
+```ts
+function reportTokenRefreshFailure(logger: Logger, error: unknown): void;
+```
+
+**Notes:**
+
+- **Never terminates the process.** A failure **at startup** is fatal; a failure of the background
+  refresh is not. The live token keeps working and what breaks is the next reconnect (NFR-R04).
+- The log context is **flat, one level deep**, because S-003's redaction has no deep wildcard: a
+  three-level context would leave a secret in the clear without failing or warning.
+
+---
+
+## closeBus()
+
+**Location:** `src/infra/bus/connection.ts`
+
+**Description:** Drains and closes the retained connection, clearing it so a later call can reconnect.
+
+**Signature:**
+
+```ts
+function closeBus(): Promise<void>;
+```
+
+**Notes:**
+
+- Uses `client.close()`, which **drains** — in-flight replies are delivered before the socket goes away.
+- **Never use `await using`.** `Symbol.asyncDispose` exists on the `Client`, but the syntax needs Node
+  24 and is a **syntax error** on Node 22, this service's runtime.
+- Production does not call it in this scope: the process stays alive with the connection open and S-005
+  inherits it. It exists for tests and for the ordered shutdown that arrives with FG-2's tick.

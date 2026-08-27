@@ -13,7 +13,7 @@ stories: [S-002, S-003, S-004]
 **Tipo:** Evento
 **Status:** Draft
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-27 (S-003: Paso 2 implementado)
+**Última actualización:** 2026-08-27 (S-004: Pasos 3, 4, 5 y 7 implementados; Paso 6 verificado)
 **Stories:** S-002, S-003, S-004
 
 ## Descripción
@@ -206,6 +206,41 @@ subject sale de `auth.userId`, **derivado de la key y nunca del entorno** (invar
 
 **Ref:** S-004; ADR-005; NFR-S03
 
+> **Implementado en S-004** — `src/infra/bus/identity.ts` (`buildServiceUser()`), con dos
+> divergencias verificadas contra `@gravadigital/jiku@1.0.0`:
+>
+> **1. `ServiceUser` valida la key en el CONSTRUCTOR, y tiene cuatro modos de fallo, no dos.** El
+> paso —y CA-4— mencionan el archivo ausente y el JSON mal formado. Los verificados son cuatro, y
+> los cuatro salen por la misma llamada porque el constructor lee, parsea, valida la forma y carga
+> la private key:
+>
+> | Entrada | `cause` del `JikuError` |
+> |---|---|
+> | Archivo inexistente | `Error` con `code: 'ENOENT'` |
+> | JSON mal formado | `SyntaxError` de `JSON.parse` |
+> | JSON válido sin `key`/`keyId`/`userId` | — (mensaje del SDK) |
+> | `key` que no es una private key leíble | `Error` con `code: 'ERR_OSSL_UNSUPPORTED'` |
+>
+> Los cuatro se traducen a un único `KeyLoadError`, porque los cuatro tienen el mismo arreglo:
+> revisar el archivo montado. La causa exacta viaja intacta en `cause`. **Ninguno de los cuatro
+> filtra el contenido de la key** — verificado con un archivo cuyo contenido era
+> `-----BEGIN RSA PRIVATE KEY-----SUPERSECRETVALUE`. Se afirma igual con un test, porque lo que hoy
+> no filtra puede filtrar en un minor y CA-4 es exactamente sobre eso: la garantía se mantiene
+> **estructural** encadenando por `cause` en vez de interpolar el mensaje del SDK en el propio.
+>
+> **2. La identidad no necesita red, y por eso CA-2 es afirmable en un test unitario.**
+> `serviceUser.userId` y `await serviceUser.subject()` salen de la key directamente. Verificado con
+> un `issuer` inalcanzable: ambos resuelven igual. El token recién se pide al conectar.
+>
+> **Nota sobre `scopes`, que parece una omisión y no lo es:** el código **no pasa `scopes`** a
+> propósito. El default del SDK ya es `['openid', 'profile']`, y `profile` es **obligatorio** aunque
+> parezca innecesario para un servicio: el auth-callout publica un evento que `core` convierte en la
+> fila de `users`, y `core` **exige un nombre** en ese evento. El nombre llega por el endpoint de
+> userinfo, que sólo lo devuelve si se pidió `profile`. Un token con `openid` solo produce un evento
+> sin nombre, `core` lo descarta, **la fila no se crea**, y todo pedido posterior se rechaza con
+> `caller_not_authorized` — un fallo silencioso que aparece **tres servicios más allá** de su causa.
+> Optimizarlo a `['openid']` rompería el Paso 6.
+
 ---
 
 ### Paso 4: Obtener el access token
@@ -221,6 +256,33 @@ vida. El conector **no implementa nada** del intercambio.
 como **getter, no como string**.
 
 **Ref:** S-004; ADR-005; NFR-S02
+
+> **Implementado en S-004** (por el SDK; el conector no codea nada del intercambio), con una
+> divergencia que **cambia la forma de la tabla de errores**:
+>
+> **El SDK pide el token ANTES de abrir el socket, deliberadamente.** De su propio código:
+> *"Fail before connecting if no token can be had. A NATS authorization violation says nothing about
+> which of the two credentials was the problem."*
+>
+> Consecuencia: donde el flujo veía **un** fallo de conexión, hay **dos**, con arreglos en lugares
+> distintos — *Zitadel no entregó el token* (`jiku: obtaining an access token`) y *el bus rechazó el
+> token* (`jiku: the bus refused the credentials`). El conector los distingue como
+> `zitadel_no_entrego_token` y `rechazo_del_bus_por_subject`. Es el criterio de ADR-006 —decir qué
+> sistema rechazó— aplicado un nivel más adentro de lo que el ADR lo escribió.
+>
+> Efecto observable, verificado ejecutando el `dist/`: con una key válida y un bus apuntado a un
+> puerto cerrado, el arranque **no falla por red** sino por token, porque nunca llega a la red. No es
+> un bug: es el orden que el SDK eligió.
+>
+> **Por eso el conector pide el token él mismo, antes de `connect()`.** No duplica trabajo —el SDK
+> cachea el token, así que no cuesta un round-trip de más— y no es una preferencia de estilo: es lo
+> único que permite atribuir el fallo **positivamente**. Si se deja fallar adentro de `connect()`, el
+> error llega como un `JikuError` envolviendo lo que sea que el `TokenSource` haya lanzado (un fetch
+> fallido, un `OAuthError`, un `TypeError`), y por estructura es indistinguible de un fallo
+> inclasificable. La alternativa habría sido atribuirlo **por descarte** —"si no es red ni creds ni
+> autorización, debe ser Zitadel"— y eso es exactamente adivinar: convertiría cualquier fallo de
+> conexión desconocido en "revisá Zitadel", que es el diagnóstico equivocado que ADR-006 existe para
+> evitar.
 
 ---
 
@@ -238,6 +300,35 @@ conectar** y NATS **no revalida** después. `onTokenError` queda registrado.
 credencial**.
 
 **Ref:** S-004; ADR-002; C-14, NFR-P05
+
+> **Implementado en S-004** — `src/infra/bus/connection.ts` (`connectToBus()`), el **único** lugar
+> del código que invoca `connect()`, afirmado por un test que escanea `src/`. Tres notas:
+>
+> **1. La clasificación del fallo NO puede leer el texto del mensaje del SDK, y esto es lo más fácil
+> de "simplificar" mal.** El regex de `connectError()` del SDK es
+> `/no servers available|CONNECTION_REFUSED|ECONNREFUSED|ENOTFOUND/i`, pero
+> `@nats-io/transport-node` reporta un puerto cerrado como `"connection refused"` — **minúscula y con
+> espacio** — que no matchea ninguna de las cuatro alternativas. Verificado: **un puerto cerrado cae
+> en la rama genérica del SDK (`jiku: connecting to ...`) mientras un host irresoluble cae en la
+> específica**, y las dos son "bus inalcanzable" para el conector. Por eso `diagnoseConnectFailure()`
+> clasifica por **estructura** — `isJikuError()`, el `name` del error del transporte, y los `code` de
+> `errno` de la cadena de `cause` — y nunca por `String(error).includes(...)`. Si alguien "arregla"
+> esto leyendo el mensaje, el diagnóstico de un puerto cerrado empieza a mandar a revisar Zitadel.
+>
+> **2. Hay un quinto modo de fallo que ni la story ni este flujo enumeraban: el creds ilegible.** El
+> SDK lee `credsFile` **antes** de abrir el socket y lo envuelve en
+> `jiku: the sentinel creds file "..." is unreadable`. Su arreglo está en el **montaje del archivo**,
+> no en Zitadel ni en la red, así que se diagnostica aparte (`creds_ilegible`) en lugar de colapsarlo
+> en "bus inalcanzable".
+>
+> **3. `onTokenError` no es opcional en la práctica, y registrarlo cierra un agujero de S-003.** Su
+> default documentado es *"a warning on the console"* — un `console.warn` **fuera de Pino y por lo
+> tanto sin `redact`**, en un servicio cuyo único borde es el log. Registrarlo no es sólo el Paso 7:
+> es cerrar un escape a la redacción.
+>
+> **Lo que NO se pasa, y es deliberado:** `userId` (el `d.ts` dice *"LEAVE IT UNSET"*; se deriva del
+> `sub`) y `inboxPrefix` (lo fija el SDK siempre). Hay un test de escaneo que lo afirma sobre el
+> objeto de opciones de `connect()`.
 
 ---
 
@@ -260,6 +351,14 @@ próxima autenticación, y reconectar lo resuelve.
 
 **Ref:** S-004 CA-9, CA-16 de S-005; ADR-005
 
+> **Verificado en S-004, no implementado** — y la distinción es el punto entero de este paso. El
+> conector no codea nada para que ocurra: la fila la crea Jiku sola. Lo que S-004 aporta es la
+> **verificación por escaneo de fuentes** de que no hay ningún camino que la cree o la pida —
+> ninguna invocación de `client.command(`, ningún literal `'users.*'`, ningún `INSERT` — más el
+> `scopes` sin tocar del Paso 3, que es la precondición real de que el evento llegue con nombre.
+>
+> **Los tests no cubren este paso**, y no pueden: el auth-callout no existe en un NATS pelado.
+
 ---
 
 ### Paso 7: Refresh del token en background
@@ -276,6 +375,14 @@ sigue sirviendo; lo que se rompe es el próximo reconnect.
 
 **Ref:** S-004; C-15, NFR-R04
 
+> **Implementado en S-004** — el callback registrado en `connectToBus()` loguea `error` con el
+> diagnóstico `refresh_del_token_fallo`, la clase del SDK y la cadena de causas, y **no termina el
+> proceso**: no llama a `process.exit()`, no lanza y no cierra el cliente.
+>
+> Detalle verificado del SDK que explica por qué esto no puede matar al worker aunque falle en
+> bucle: el timer del refresh se crea con `setInterval(...).unref()`, así que ni siquiera mantiene
+> vivo el event loop por su cuenta.
+
 ## Manejo de Errores
 
 | Paso | Error | Código | Response | Comportamiento |
@@ -283,15 +390,35 @@ sigue sirviendo; lo que se rompe es el próximo reconnect.
 | 1 | Faltan variables requeridas | — | Lista **completa** en un solo mensaje | **No arranca**, exit ≠ 0. No conecta a nada |
 | 1 | Valor con forma inválida | — | Entra en la lista agregada, **sin volcar el valor** | **No arranca**, exit ≠ 0 |
 | 2 | Falla el transporte de desarrollo | — | — | Se degrada a JSON en stdout: un worker sin logs es indiagnosticable |
-| 3 | Key inexistente o JSON mal formado | — | "la key no se pudo cargar", **sin volcar su contenido** | **No arranca**, exit ≠ 0 |
-| 4 | Zitadel rechaza la firma o es inalcanzable | — | Clase del SDK + `hint()` | **No arranca**, exit ≠ 0 |
-| 5 | Machine user **sin** rol `internal-app` | `Authorization Violation` / `JikuPermissionDenied` | Log: **rechazo del bus por subject** — problema de **Zitadel**, no del payload | **No arranca**, exit ≠ 0 |
-| 5 | Bus inalcanzable (red) | — | Clase del SDK + `hint()` | **No arranca**: el proceso no queda vivo en un estado inútil |
+| 3 | Key ilegible — los **cuatro** modos (ausente, JSON inválido, forma equivocada, `key` no leíble) | `BUS_KEY_LOAD_ERROR` | Log `fatal` con `diagnosis: key_ilegible`, **sin volcar su contenido ni su ruta** | **No arranca**, exit ≠ 0 |
+| 4 | Zitadel no entregó el token (firma rechazada, issuer inalcanzable, reloj) | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: zitadel_no_entrego_token`, la clase del SDK y la cadena de causas | **No arranca**, exit ≠ 0 |
+| 5 | Machine user **sin** rol `internal-app` (o Access Token Type ≠ JWT, o sin `JIKU_PROJECT_ID`) | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: rechazo_del_bus_por_subject` — **el arreglo está en Zitadel**, no en el payload ni en `core` | **No arranca**, exit ≠ 0 |
+| 5 | Bus inalcanzable (host irresoluble o puerto cerrado) | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: bus_inalcanzable` | **No arranca**: el proceso no queda vivo en un estado inútil |
+| 5 | Creds del sentinel ilegible | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: creds_ilegible` — el arreglo está en el **montaje del archivo** | **No arranca**, exit ≠ 0 |
+| 5 | Cualquier otro fallo de conexión | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: desconocido`, la clase del SDK y la cadena de causas, **sin mapearse a otra causa** | **No arranca**, exit ≠ 0 |
 | 6 | Se pierde el evento del auth-callout | — | — | El conector queda sin fila en `users` hasta su próxima autenticación. Reconectar lo resuelve. **Dependencia declarada del producto, no un bug del conector** |
-| 7 | Falla el refresh del token | — | Log `error` con clase y `hint()` | **El proceso NO muere** (NFR-R04). El token vigente sigue sirviendo |
+| 7 | Falla el refresh del token | — | Log `error` con `diagnosis: refresh_del_token_fallo`, la clase del SDK y la cadena de causas | **El proceso NO muere** (NFR-R04). El token vigente sigue sirviendo |
 
 **Regla que gobierna la tabla:** un fallo **al arrancar** es fatal; un fallo del refresh **en
 background** no lo es. Son dos momentos distintos y las dos reglas conviven.
+
+> **Corregido en S-004: la tabla prometía un `hint()` que estos errores no tienen.** Las filas 4, 5
+> y 7 decían "clase del SDK + `hint()`", pero **`hint()` sólo existe en `JikuFailure`**, que es la
+> clase de los fallos de **comando** (S-005). Los fallos de **conexión** llegan como `JikuError` a
+> secas — verificado en los seis escenarios — y no tienen `hint()`. Lo que el log emite en su lugar
+> es el **diagnóstico del conector**, el nombre de la clase del SDK y la **cadena de causas**, cuyos
+> mensajes ya traen las causas probables redactadas por el propio SDK. El `hint()` se consulta si
+> existe, sin asumirlo.
+>
+> **Corregido en S-004: `JikuPermissionDenied` no es la clase del rechazo de conexión.** La fila 5
+> la nombraba; esa clase es la del rechazo de **publicación** de un comando. El rechazo del
+> handshake llega como `JikuError` envolviendo un `AuthorizationError` de `@nats-io/nats-core`, y es
+> por esa **estructura** —no por el texto— que el conector lo reconoce.
+>
+> **Agregado en S-004:** las filas de *creds ilegible* y *desconocido*, que la tabla no tenía. La
+> segunda es deliberada y no un cajón de sastre: un diagnóstico equivocado es **peor** que uno
+> ausente, porque manda a revisar el sistema equivocado, que es el fallo exacto que ADR-006 existe
+> para evitar.
 
 ## Resultado
 
@@ -314,8 +441,19 @@ exitoso en stdout **sin ninguna credencial**.
 - **Las cinco precondiciones de este flujo son manuales y no verificables por código** (machine user,
   rol `internal-app`, key JSON, creds, red al bus). Son de U-02, no del software. Lo que el conector
   aporta es que **cada fallo diga cuál de los sistemas lo produjo**.
-- **Los tests no cubren este flujo de punta a punta:** `Client.fromConnection()` **saltea el handshake
-  de auth**, así que no prueba nada sobre Zitadel, el rol ni el prefijo de inbox. La verificación real
-  sólo ocurre contra un despliegue.
+- **Los tests no cubren este flujo de punta a punta, y S-004 sólo mejoró parcialmente eso.** La nota
+  original decía que `Client.fromConnection()` saltea el handshake de auth y por lo tanto no prueba
+  nada sobre Zitadel, el rol ni el prefijo de inbox. Sigue siendo cierto para ese helper — pero S-004
+  agregó un contenedor NATS levantado con `--auth`, que **sí** produce un `Authorization Violation`
+  real y por lo tanto ejercita de verdad la traducción del rechazo. Lo que sigue **sin** estar
+  cubierto, y ninguna documentación debe afirmar que lo está: **el auth-callout, el rol
+  `internal-app`, el claim de roles del token y el prefijo de inbox derivado del `sub`**. Nada de eso
+  existe en un NATS pelado, que sólo compara un string. La verificación real sólo ocurre contra un
+  despliegue.
+- **Nota de infraestructura de tests, para que no se redescubra:** el test de reconexión necesita que
+  el puerto del **host** esté fijo. `restart()` de testcontainers levanta el contenedor con un mapeo
+  de puerto nuevo, y el cliente NATS sigue reintentando contra el endpoint original — así que con el
+  puerto efímero por default el reconnect **no puede ocurrir nunca** y el test expira sin haber
+  probado nada.
 - El rol `internal-app` concede **los dos planos completos** para un conector que usa 1 comando y
   ninguna consulta. Acotarlo modificaría el producto (G-03): fuera de alcance v1, **no descartado**.
