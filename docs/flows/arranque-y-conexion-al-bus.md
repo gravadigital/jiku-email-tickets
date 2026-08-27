@@ -13,7 +13,7 @@ stories: [S-002, S-003, S-004]
 **Tipo:** Evento
 **Status:** Draft
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-27 (S-002: Paso 1 implementado)
+**Última actualización:** 2026-08-27 (S-003: Paso 2 implementado)
 **Stories:** S-002, S-003, S-004
 
 ## Descripción
@@ -116,6 +116,7 @@ filesystem y CA-2 exige fallar sin intentar nada antes.
 | `JIKU_ISSUER` | No | `https://id.grava.io` |
 | `JIKU_TIMEOUT` | No | `15000` (**piso**, no baja) |
 | `LOG_LEVEL` | No | `info` |
+| `NODE_ENV` | No | `production` (agregada en S-003 — ver la nota del Paso 2) |
 
 Las variables de **IMAP y del Mapa de Tickets no se declaran todavía** (FG-2 y FG-3).
 
@@ -138,6 +139,57 @@ tomado de `LOG_LEVEL`, `pino-pretty` sólo con `NODE_ENV === 'development'` y JS
 
 **Por qué antes de conectar:** el arranque y **cada fallo de conexión** ya tienen que salir por un
 logger que redacta. Un logger agregado después dejaría sin cubrir el tramo más sensible.
+
+> **Implementado en S-003.** El paso quedó como lo describe la acción, con cuatro divergencias
+> respecto de lo que el documento predecía. Se registran porque las cuatro se descubrieron
+> verificando contra la versión instalada y le ahorran el descubrimiento a quien venga después.
+>
+> **1. La firma es `createLogger(config, destination?, transportTarget?)`, no una constante de
+> módulo.** El catálogo `logging` muestra `export const logger = pino({...})`. Acá el logger se
+> construye con una factory y el singleton se inicializa explícitamente desde `src/index.ts` con
+> `initLogger(config)`; `getLogger()` lo devuelve y **falla claro** si se lo usa antes. La razón es
+> que el `AppConfig` se resuelve de forma asíncrona: construir el singleton en el import obligaría a
+> disparar la carga de configuración como efecto de importar el módulo, y eso rompe la propiedad de
+> S-002 de que importar `#config/index.js` no valida nada por su cuenta. Los dos parámetros
+> opcionales son para tests (ver punto 3).
+>
+> **2. `NODE_ENV` no existía en el schema y se agregó acá.** El paso asume poder discriminar el
+> formato por `NODE_ENV`, pero S-002 declaró nueve variables y ninguna era esa. Eso es un choque real
+> entre dos criterios: CA-2 exige discriminar por entorno y CA-5 prohíbe que el logger lea
+> `process.env` por su cuenta. Se resolvió **declarando `NODE_ENV` en `envSchema`** como
+> `z.enum(['development', 'test', 'production']).default('production')` y propagándola a `AppConfig`
+> como `nodeEnv`, que el logger recibe por parámetro como todo lo demás. No se resolvió leyendo
+> `process.env.NODE_ENV` en el logger porque eso rompería la propiedad verificable de S-002 (el
+> `grep process.env src/` devuelve un solo archivo), que es más valiosa que la comodidad. **El
+> default es `production`, no `development`, y es deliberado:** el modo caro y bonito se pide
+> explícitamente; un despliegue que se olvidó de declararla emite JSON, que es lo correcto, y el
+> error inverso —producción intentando cargar un `pino-pretty` que `--omit=dev` dejó afuera de la
+> imagen— es peor. El schema pasó de nueve variables a diez y `AppConfig` de nueve campos a diez.
+>
+> **3. `transport` y `destination` NO son incompatibles en `pino@10.3.1`, pero el transporte gana.**
+> Se esperaba que pasar los dos lanzara. Verificado: no lanza, y el `destination` queda sin recibir
+> nada. Eso es peor que un error, porque un test que inyecta un sink leería vacío y **pasaría en
+> verde** — el peor modo de falla para una suite cuyo trabajo es detectar un secreto sin censurar.
+> Por eso el transporte se construye sin destino, y el destino gana en el camino sin transporte. El
+> tercer parámetro (`transportTarget`) existe para que la degradación del punto 4 sea afirmable en
+> CI: con `pino-pretty` instalado como devDependency el target siempre resuelve, así que sin ese
+> parámetro el `catch` quedaría sin cobertura automatizada.
+>
+> **4. Los comodines de `redact.paths` son de UN SOLO NIVEL y no hay comodín profundo.** Verificado
+> contra `pino@10.3.1`: `'*.token'` cubre `{ auth: { token } }` pero **no** cubre `{ token }` en la
+> raíz ni `{ a: { b: { token } } }` a dos niveles, y **`'**.token'` no redacta nada** — no falla, no
+> avisa, deja el secreto en claro. Es exactamente la clase de detalle donde una suposición razonable
+> produce una lista que parece proteger y no protege. Por eso cada campo va **duplicado** en
+> `src/shared/log-redaction.ts` (la forma en raíz y la forma con comodín) y la duplicación está
+> comentada para que nadie la "limpie". El índice con comodín (`'attachments[*].content'`) sí está
+> soportado, en las dos formas. Los contextos de tres niveles o más quedan fuera de alcance
+> declarado: los puntos de log del conector son planos o de un nivel, y una story que anide más tiene
+> que agregar la ruta explícita.
+>
+> **También se agregaron `keyFile` y `credsFile` a la lista de redacción**, que el plan no preveía:
+> son rutas a archivos de secretos, y dónde está el secreto también es información sobre el secreto.
+> Es el mismo criterio por el que la línea de arranque los excluye deliberadamente; la diferencia es
+> que ahí se resuelve por omisión y acá por redacción, que cubre el log que los incluya por error.
 
 **Ref:** S-003; convención `logging`; NFR-O01, NFR-S06
 

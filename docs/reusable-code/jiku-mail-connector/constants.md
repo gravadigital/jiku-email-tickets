@@ -115,3 +115,99 @@ const TEST_USER_ID = 'test-machine-user';
 ```ts
 const TEST_INSTANCE = 'test';
 ```
+
+---
+
+## REDACT_PATHS
+
+**Location:** `src/shared/log-redaction.ts`
+
+**Description:** The list of `redact` paths the logger censors. It lives in its own file, separate
+from the logger, so the question "what is protected today?" has a one-file answer — readable at a
+glance by whoever audits, and directly assertable by a test.
+
+It covers two groups with different status: what exists and must be protected now (tokens, generic
+credentials, machine-user key content, NATS creds content, paths to secret files), and what does not
+exist yet but is already declared (mail body and attachment content), so FG-2 and FG-3 **inherit** the
+rule instead of having to remember to add it.
+
+**Interface:**
+
+```ts
+const REDACT_PATHS: readonly string[];
+```
+
+**Usage example:**
+
+```ts
+import { REDACT_CENSOR, REDACT_PATHS } from '#shared/log-redaction.js';
+
+const options: pino.LoggerOptions = {
+  redact: { paths: [...REDACT_PATHS], censor: REDACT_CENSOR },
+};
+```
+
+**Notes:**
+
+- **`redact.paths` wildcard semantics, verified against `pino@10.3.1` — read before touching the
+  list.** `*` matches **exactly one** level: `'*.token'` covers `{ auth: { token } }` but **not**
+  `{ token }` at the root nor `{ a: { b: { token } } }` two levels deep. **There is no deep
+  wildcard** — `'**.token'` redacts nothing: it does not fail, does not warn, it just leaves the
+  secret in the clear. That is why every field appears **twice** (root form and wildcard form). The
+  duplication is the price of the syntax, not an oversight. Do **not** "clean it up".
+- Array index wildcards (`'attachments[*].content'`) **are** supported, in both forms.
+- A path pointing at an object censors the **whole node**: `'key'` over
+  `{ key: { keyId, key, userId } }` leaves `key: '[REDACTED]'` entirely.
+- Contexts three or more levels deep are out of declared scope: the connector's log call sites are
+  flat or one level, and a future story that nests deeper must add the explicit path.
+- **`'key'` and `'*.key'` are deliberately broad — accepted risk, do not re-litigate.** `key` is a
+  generic name and may collide with a legitimate field called `key`. The cost of a collision is an
+  innocuous field showing as `[REDACTED]` — annoying, and recoverable by renaming the context field.
+  The cost of **not** covering it is an RSA private key in the clear in the log, since the SDK's
+  `ServiceAccountKey.key` **is** the private key. The asymmetry is total.
+- **It deliberately does NOT include `messageId`, `projectId`, `slug`, `instance` or `id`.** ADR-006
+  explicitly requires those to be logged — they are the trace that makes a lost ticket
+  reconstructible. Redacting them makes the log useless, which is the opposite failure and no less
+  serious.
+- It does not copy the catalog's `req.headers.*` paths: the service exposes no HTTP (ADR-001), so they
+  can never occur and only add noise to a list meant to be audited.
+
+---
+
+## REDACT_CENSOR
+
+**Location:** `src/shared/log-redaction.ts`
+
+**Description:** The replacement value for every redacted path: `'[REDACTED]'`.
+
+**Interface:**
+
+```ts
+const REDACT_CENSOR = '[REDACTED]';
+```
+
+**Notes:**
+
+- The literal is what CA-3 and CA-4 name, and the redaction tests assert on it. Changing it breaks
+  seven tests by design — they assert on the serialized line, not on the input object.
+
+---
+
+## DEVELOPMENT_TRANSPORT_TARGET
+
+**Location:** `src/shared/logger.ts`
+
+**Description:** The transport target used only in development: `'pino-pretty'`.
+
+**Interface:**
+
+```ts
+const DEVELOPMENT_TRANSPORT_TARGET = 'pino-pretty';
+```
+
+**Notes:**
+
+- `pino-pretty` is a **devDependency** and the Dockerfile's production stage installs with
+  `--omit=dev`, so the package **does not exist** in the final image. That is why it is only
+  referenced when `nodeEnv === 'development'`, and why `createLogger` degrades if it fails to resolve
+  anyway.

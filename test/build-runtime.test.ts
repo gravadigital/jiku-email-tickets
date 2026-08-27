@@ -105,6 +105,62 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
     expect(result.stderr).not.toContain('ERR_PACKAGE_IMPORT_NOT_DEFINED');
   }, 30_000);
 
+  // TS-18: el arranque emite por el logger, no por process.stdout.write. Vive aca porque este
+  // archivo ya ejecuta el dist/ como proceso real, que es la unica forma de verificar que la linea
+  // que sale de verdad por stdout es la del logger.
+  it('emits the startup line as JSON through the logger, with a static message', async () => {
+    const { stdout } = await execFileAsync('node', ['dist/index.js'], {
+      cwd: PROJECT_ROOT,
+      env: BASE_ENV_WITH({ ...VALID_ENV, NODE_ENV: 'production' }),
+    });
+
+    const lines = stdout.split('\n').filter((line) => line.trim() !== '');
+    expect(lines).toHaveLength(1);
+
+    const line = JSON.parse(lines[0] as string) as Record<string, unknown>;
+
+    expect(line['msg']).toBe('configuracion valida');
+    expect(line['service']).toBe('jiku-mail-connector');
+    expect(line['level']).toBe('info');
+    expect(line['instance']).toBe('dev');
+    expect(line['logLevel']).toBe('info');
+    // Estructurado quiere decir consultable: el timeout va como numero, no como el String() que el
+    // process.stdout.write de S-002 necesitaba.
+    expect(line['timeoutMs']).toBe(15_000);
+    expect(typeof line['timeoutMs']).toBe('number');
+  }, 30_000);
+
+  it('keeps the four sensitive fields out of the startup line', async () => {
+    const { stdout } = await execFileAsync('node', ['dist/index.js'], {
+      cwd: PROJECT_ROOT,
+      env: BASE_ENV_WITH({ ...VALID_ENV, NODE_ENV: 'production' }),
+    });
+
+    const line = JSON.parse(stdout.trim()) as Record<string, unknown>;
+
+    // Rutas a secretos (donde esta el secreto es informacion sobre el secreto) y topologia del
+    // despliegue. ADR-006: una linea de arranque exitoso sin ninguna credencial.
+    for (const field of ['credsFile', 'keyFile', 'zitadelProjectId', 'servers']) {
+      expect(line, `${field} must stay out of the startup line`).not.toHaveProperty(field);
+    }
+  }, 30_000);
+
+  it('reports an invalid environment on stderr without the logger intervening', async () => {
+    // La asimetria es deliberada, no un descuido: el Paso 1 (validacion) falla ANTES de que el
+    // logger exista, asi que su reporte sale por stderr directo. Del Paso 2 en adelante se falla
+    // con logger.
+    const result = spawnSync(process.execPath, ['dist/index.js'], {
+      cwd: PROJECT_ROOT,
+      env: BASE_ENV_WITH({ JIKU_INSTANCE: 'dev' }),
+      encoding: 'utf8',
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('la configuracion es invalida');
+    // Sin linea JSON de arranque: el logger no llego a construirse.
+    expect(result.stdout.trim()).toBe('');
+  }, 30_000);
+
   it('never writes a secret path to either stream on a successful start', async () => {
     const { stdout, stderr } = await execFileAsync('node', ['dist/index.js'], {
       cwd: PROJECT_ROOT,

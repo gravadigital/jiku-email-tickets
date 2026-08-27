@@ -43,6 +43,16 @@ export const envSchema = {
     .transform((ms) => Math.max(ms, MIN_TIMEOUT_MS)),
 
   LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
+
+  // El default es `production`, NO `development`, y es deliberado aunque vaya contra lo que hace la
+  // mayoria de los proyectos Node: el modo caro y bonito (`pino-pretty`) se pide EXPLICITAMENTE, no
+  // se obtiene por olvido. Un despliegue que se olvido de declarar NODE_ENV emite JSON, que es lo
+  // correcto; el error inverso —un contenedor de produccion intentando cargar un `pino-pretty` que
+  // `--omit=dev` dejo afuera de la imagen— es peor. No lo "corrijas" a development.
+  //
+  // La consume el logger (S-003), que la recibe por parametro: NODE_ENV se declara aca porque el
+  // logger no puede leer process.env por su cuenta (convencion `env-config`).
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('production'),
 };
 
 export type Env = z.infer<z.ZodObject<typeof envSchema>>;

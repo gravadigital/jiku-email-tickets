@@ -19,6 +19,7 @@ const EXPECTATIONS: Record<string, string> = {
   JIKU_ISSUER: 'se esperaba una URL valida del issuer de Zitadel',
   JIKU_TIMEOUT: 'se esperaba un entero positivo de milisegundos',
   LOG_LEVEL: 'se esperaba uno de: trace, debug, info, warn, error, fatal, silent',
+  NODE_ENV: 'se esperaba uno de: development, test, production',
 };
 
 const UNKNOWN_EXPECTATION = 'no paso la validacion declarada en el schema';

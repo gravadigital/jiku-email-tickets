@@ -22,6 +22,7 @@ export interface AppConfig {
   timeoutMs: number;
   verifyProjectId: number;
   logLevel: (typeof LOG_LEVELS)[number];
+  nodeEnv: 'development' | 'test' | 'production';
 }
 
 /**
@@ -62,5 +63,9 @@ export async function loadAppConfig(): Promise<AppConfig> {
     // El SDK no conoce ninguna de estas dos.
     verifyProjectId: env.JIKU_VERIFY_PROJECT_ID,
     logLevel: env.LOG_LEVEL,
+
+    // La consume el logger para decidir formato (JSON vs pino-pretty). Llega por parametro, no por
+    // lectura del entorno: el logger no toca process.env.
+    nodeEnv: env.NODE_ENV,
   };
 }

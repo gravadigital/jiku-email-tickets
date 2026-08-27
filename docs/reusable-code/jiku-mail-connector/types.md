@@ -94,6 +94,7 @@ interface AppConfig {
   timeoutMs: number;
   verifyProjectId: number;
   logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'silent';
+  nodeEnv: 'development' | 'test' | 'production';
 }
 ```
 
@@ -101,6 +102,16 @@ interface AppConfig {
 `Env` is inferred from the schema, while `AppConfig` *composes* `Env` with the SDK's `LoadedConfig`.
 It is the contract three later stories consume, so an inferred type that changed silently would break
 their tests. `credsFile` and `keyFile` are **paths** to read-only mounted files, never contents.
+
+`nodeEnv` was added by S-003 and its default is **`production`**, not `development`: the logger uses
+it to pick the format, and the expensive pretty mode must be asked for explicitly rather than obtained
+by omission. `logLevel` and `nodeEnv` are the two fields the logger consumes; it receives them as
+parameters because it must not read `process.env` itself.
+
+**Five of the ten fields must never reach a log line:** `credsFile` and `keyFile` (paths to secrets —
+where a secret lives is information about the secret), plus `zitadelProjectId` and `servers`
+(deployment topology). The startup line in `src/index.ts` deliberately carries only `instance`,
+`logLevel` and `timeoutMs`.
 
 ---
 

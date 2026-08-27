@@ -168,7 +168,7 @@ describe('loadAppConfig', () => {
     });
   });
 
-  it('exposes exactly the nine documented fields', async () => {
+  it('exposes exactly the ten documented fields', async () => {
     loadConfigMock.mockResolvedValue(sdkResult());
     const { loadAppConfig } = await import('#config/index.js');
 
@@ -181,6 +181,8 @@ describe('loadAppConfig', () => {
         'issuer',
         'keyFile',
         'logLevel',
+        // nodeEnv lo agrega S-003: lo consume el logger para elegir formato (JSON vs pino-pretty).
+        'nodeEnv',
         'servers',
         'timeoutMs',
         'verifyProjectId',

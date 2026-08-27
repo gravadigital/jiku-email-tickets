@@ -4,9 +4,9 @@
 
 **Location:** `src/config/schema.ts`
 
-**Description:** Zod shapes of the nine environment variables in scope, with their defaults and the
+**Description:** Zod shapes of the ten environment variables in scope, with their defaults and the
 timeout floor. It is the source of truth for the `Env` type, which is inferred from it rather than
-declared alongside it. Four variables are required and five carry a default.
+declared alongside it. Four variables are required and six carry a default.
 
 **Interface:**
 
@@ -25,6 +25,7 @@ const envSchema = {
   JIKU_TIMEOUT: z.coerce.number().int().positive().default(MIN_TIMEOUT_MS)
     .transform((ms) => Math.max(ms, MIN_TIMEOUT_MS)),
   LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('production'),
 };
 
 type Env = z.infer<z.ZodObject<typeof envSchema>>;
@@ -48,3 +49,10 @@ const env = loadEnv({ JIKU_CREDS: '/run/secrets/sentinel.creds', /* ... */ });
 - `JIKU_CREDS` and `JIKU_KEY_FILE` are validated as non-empty **paths**. That the file exists and
   parses is deliberately out of this layer's scope.
 - No IMAP or ticket-map variable is declared yet: those arrive with FG-2 and FG-3.
+- **`NODE_ENV` was added by S-003, and its default is `production` on purpose** — counter to what most
+  Node projects do. The logger reads it (via `AppConfig.nodeEnv`) to pick JSON vs `pino-pretty`, and
+  the expensive mode must be requested explicitly: a deployment that forgot to declare it emits JSON,
+  which is correct, whereas the inverse error — a production container trying to load a `pino-pretty`
+  that `--omit=dev` left out of the image — is worse. Do not "fix" it to `development`.
+- `NODE_ENV` is **not** required, and making it so would break existing deployments and tests without
+  gaining anything. Because it has a default it never appears in the missing-variables report.

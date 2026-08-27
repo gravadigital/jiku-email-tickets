@@ -95,9 +95,27 @@ describe('envSchema', () => {
   it('declares no IMAP or ticket-map variable in this scope', () => {
     const declared = Object.keys(envSchema);
 
-    expect(declared).toHaveLength(9);
+    // Diez desde S-003, que agrego NODE_ENV: el logger necesita discriminar el formato por entorno
+    // y no puede leer process.env por su cuenta (CA-5), asi que la variable se declara aca.
+    expect(declared).toHaveLength(10);
     expect(declared.some((key) => key.startsWith('IMAP_'))).toBe(false);
     expect(declared.some((key) => key.includes('TICKET'))).toBe(false);
+  });
+
+  it('defaults NODE_ENV to production, not to development', () => {
+    // El default es deliberado y contraintuitivo: el modo caro y bonito (pino-pretty) se pide
+    // EXPLICITAMENTE, no se obtiene por olvido. Un despliegue que se olvido de declarar NODE_ENV
+    // emite JSON, que es lo correcto; el error inverso —produccion intentando cargar un pino-pretty
+    // que --omit=dev dejo afuera de la imagen— es peor.
+    expect(schema.parse(VALID_ENV).NODE_ENV).toBe('production');
+  });
+
+  it('accepts the three declared environments and rejects anything else', () => {
+    for (const nodeEnv of ['development', 'test', 'production']) {
+      expect(schema.safeParse({ ...VALID_ENV, NODE_ENV: nodeEnv }).success, nodeEnv).toBe(true);
+    }
+
+    expect(schema.safeParse({ ...VALID_ENV, NODE_ENV: 'staging' }).success).toBe(false);
   });
 
   it('rejects an issuer that is not a url', () => {
