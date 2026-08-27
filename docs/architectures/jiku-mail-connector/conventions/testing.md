@@ -113,10 +113,17 @@ the boundary, never in the middle.**
 The SDK exposes `Client.fromConnection(nc, ...)` for exactly this: point the client at a test
 NATS instead of going through Zitadel and the auth-callout.
 
+The NATS client is imported from the SDK's `/nats` subpath, **never from the `nats` package**.
+`nats` is not a dependency of this service and must not become one
+([ADR-002](../../../adrs/ADR-002-sdk-oficial-del-bus.md)): the SDK depends on
+`@nats-io/nats-core` and `@nats-io/transport-node`, and re-exports that client precisely so
+there is **one copy** of the library in the dependency tree. Two copies mean two sets of error
+classes, and `error instanceof PermissionViolationError` then fails against the copy that threw.
+
 ```ts
 // test/bus/helpers.ts
 import { inject } from 'vitest';
-import { connect as natsConnect } from 'nats';        // test-only direct use
+import { connect as natsConnect } from '@gravadigital/jiku/nats';   // NOT from 'nats'
 import { Client } from '@gravadigital/jiku';
 
 export async function setupTestBus(): Promise<TestBusContext> {
@@ -270,6 +277,11 @@ non-obvious ones that must be covered, because getting them wrong is silent:
   database.
 - **Do not mock the bus.** Integration tests use the real NATS container via
   `Client.fromConnection()`.
+- **Import the NATS client from `@gravadigital/jiku/nats`, never from `nats`.** Declaring
+  `nats` directly is forbidden by
+  [ADR-002](../../../adrs/ADR-002-sdk-oficial-del-bus.md): the subpath guarantees a single copy
+  of the library in the tree, and with two copies `instanceof` fails against the copy that
+  threw. This holds in test code exactly as it holds in production code.
 - **Double only at the boundary:** IMAP through the `MailSource` interface, the presigned
   `PUT` through a `fetch` stub. Never mock this service's own domain functions.
 - **Every SDK error class handled in production code has a test** that asserts the diagnosis

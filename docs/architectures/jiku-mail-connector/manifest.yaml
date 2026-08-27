@@ -8,6 +8,7 @@ conventions:
   - validation
   - error-handling
   - testing
+  - module-imports
   - dockerfile
 
 modules:

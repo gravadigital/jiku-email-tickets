@@ -17,8 +17,9 @@
 - **[Validacion de inputs (Zod)](../../../.claude/conventions/node/validation.md)** — Input validation with Zod
 - **[Manejo de errores](../../../.claude/conventions/node/error-handling.md)** — Error modeling, propagation, and canonical error shape
 - **[Testing (Vitest + NATS de Testcontainers, sin base de datos)](./conventions/testing.md)** — Unit and integration testing with Vitest against a real NATS container; no database anywhere, IMAP and the presigned PUT are doubled at the boundary **(custom del servicio — reemplaza la del catálogo)**
+- **[Imports absolutos de módulos (subpath `#` nativo de Node)](./conventions/module-imports.md)** — How absolute intra-project imports are declared and resolved, on both the compilation and the runtime side, using Node's native subpath imports **(custom del servicio)**
 - **[Dockerfile (Node)](../../../.claude/conventions/node/dockerfile.md)** — Multi-stage Dockerfile for Node.js services — test, builder, and production stages
 
 ---
 
-**Total:** 7 convenciones activas (1 custom del servicio: `testing`).
+**Total:** 8 convenciones activas (2 custom del servicio: `testing`, `module-imports`).
