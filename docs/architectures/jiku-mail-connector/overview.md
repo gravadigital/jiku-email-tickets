@@ -1,0 +1,60 @@
+# jiku-mail-connector — Overview
+
+## Proposito
+
+Worker que hace poll de la casilla IMAP de tickets, normaliza cada mail, lo rutea a un proyecto de
+Jiku por el slug del subaddress, y publica los comandos de creacion de requisito y subida de
+adjuntos al bus de Jiku. Sin persistencia propia: la idempotencia es el flag `\Seen` de IMAP.
+
+## Tipo de servicio
+
+worker en node
+
+## Modulos del dominio
+
+- **ingesta** — Poll IMAP con cap por tick y sin solapamiento, los mails mas nuevos primero.
+  Normalizacion del mail (headers, cuerpo, adjuntos) a una forma interna. Marcado de `\Seen`.
+- **ruteo** — Resolucion del slug del subaddress contra el Mapa de Tickets (KV en memoria, cargado
+  al arrancar). Un mail sin slug mapeado se descarta con motivo logueado.
+- **publicacion** — Los dos comandos de escritura al bus via el SDK: `files.request-upload` y
+  `requirements.new`. El `PUT` del byte del adjunto a la URL prefirmada que devuelve `core`.
+
+## Notas adicionales
+
+**Instancia unica obligatoria.** Sin idempotencia ni coordinacion, dos instancias sobre la misma
+casilla duplicarian tickets (NFR-SC03).
+
+**Restriccion dura de red.** El conector va dentro de la red del bus de Jiku, que no esta expuesta al
+ingress. No puede desplegarse afuera y alcanzar NATS.
+
+**El SDK `@gravadigital/jiku` v1.0.0 es la dependencia central.** Reemplaza el cliente NATS propio,
+la obtencion del token de Zitadel (RFC 7523) y su refresh en background, y el prefijo de inbox. Las
+siete clases de error del SDK son lo que distingue *que sistema rechazo* en el log.
+
+**El conector no expone nada.** Ni HTTP, ni puerto, ni suscripcion a subjects de otros. Por eso no
+hay especificacion OpenAPI en `docs/apis/` para este producto — un `/health` de relleno seria un
+contrato falso.
+
+**Sin base de datos propia.** No hay documento en `docs/db-schemas/`, ni migraciones, ni cliente de
+PostgreSQL. Las entidades que el conector crea (Requisito, Archivo, Adjunto) son de Jiku y las
+escribe `core`.
+
+**El logging es la preocupacion transversal mas importante.** No hay nadie mirando: el cliente mando
+un mail y se fue. Un ticket perdido no tiene sintoma. Cada mail deja al menos una linea con su
+`Message-Id` y su resultado. Nunca se loguean credenciales, trafico IMAP crudo, el cuerpo del mail ni
+el contenido de un adjunto.
+
+**Diferido a operaciones:** CI/CD, build y registry de la imagen (no hereda el workflow de Jiku, que
+usa GitHub Actions); entorno de staging; rotacion de la key del machine user; gestion de secretos mas
+alla de env + archivos montados. **Fuera de alcance v1:** healthchecks, metricas exportadas y
+alertas.
+
+**Hueco conocido del catalogo de convenciones.** Los tres integradores centrales de este servicio no
+tienen convencion que los cubra: el poll IMAP (cap y no-solapamiento), el uso del SDK de Jiku
+(conexion unica por proceso, token como getter, mapeo de clases de error) y el scheduling por cron.
+Quedan como candidatos a convencion custom cuando el patron se estabilice en la implementacion.
+
+---
+
+**Manifest:** [manifest.yaml](./manifest.yaml)
+**Indice de arquitectura:** [index.md](./index.md)

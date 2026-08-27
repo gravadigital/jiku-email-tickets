@@ -1,0 +1,16 @@
+service: jiku-mail-connector
+type: worker
+language: node
+
+conventions:
+  - logging
+  - env-config
+  - validation
+  - error-handling
+  - testing
+  - dockerfile
+
+modules:
+  - ingesta
+  - ruteo
+  - publicacion
