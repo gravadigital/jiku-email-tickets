@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+
+    "outDir": "./dist",
+    "paths": {
+      "#config/*": ["./src/config/*"],
+      "#domain/*": ["./src/domain/*"],
+      "#infra/*": ["./src/infra/*"],
+      "#shared/*": ["./src/shared/*"]
+    },
+
+    "sourceMap": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Este config es el de typecheck: cubre src/ y test/ juntos, asi que no declara rootDir
+    // (test/ queda fuera de src/). El emitido lo hace tsconfig.build.json, que si lo declara.
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+}
