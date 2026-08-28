@@ -593,3 +593,31 @@ cross-copy reason as the bus's diagnosis) maps to `credenciales_invalidas`; the 
 network `errno` codes (`ECONNREFUSED`, `ENOTFOUND`, etc.) map to `host_inalcanzable`.
 
 ---
+
+## TickCounters
+
+**Location:** `src/domain/ingesta/tick.ts`
+
+**Description:** The five counters a tick emits in a single log line, always — with success or
+failure. All in-memory, no persistence (ADR-001). `creados`/`descartados` are literal `0` until
+FG-3 fills them in; this story's `runTick()` counts any `normalize()` failure (including
+`MissingMessageIdError`) as `fallidos`, with no separate branch by error class.
+
+**Signature:**
+
+```ts
+interface TickCounters {
+  ingestados: number;
+  parseados: number;
+  creados: number;
+  descartados: number;
+  fallidos: number;
+}
+```
+
+**Notes:** Must be declared **outside** the `try` block of the function that uses it — that is what
+lets a `finally` emit the line even if the code inside the `try` throws (the story's single
+riskiest structural requirement: written the "natural" way, with counters inside the `try` and
+emission at the end of the happy path, this silently fails to fire on error).
+
+---

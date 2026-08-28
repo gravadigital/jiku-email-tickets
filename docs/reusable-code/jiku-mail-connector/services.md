@@ -533,3 +533,89 @@ const uids = await withMailSource({ config, logger }, async (source) => {
   to this adapter.
 
 ---
+
+## runTick()
+
+**Location:** `src/domain/ingesta/tick.ts`
+
+**Description:** The tick's inner loop: applies the cap (`config.poll.maxPerTick`), processes the
+batch in strict UID-descending order and sequentially (`for...of`, never `Promise.all`), marks
+`\Seen` one at a time immediately after each successful download (before normalizing), isolates
+any per-message failure without aborting the batch, and always emits the five counters — even if
+`searchUnseen()` itself throws — because `TickCounters` lives outside the `try` and the emission is
+in the `finally`. Receives an already-open `MailSource` (S-009); does not construct one.
+
+**Signature:**
+
+```ts
+interface TickCounters {
+  ingestados: number;
+  parseados: number;
+  creados: number;
+  descartados: number;
+  fallidos: number;
+}
+
+function runTick(
+  mailSource: MailSource,
+  config: AppConfig,
+  logger: Logger,
+  normalize?: typeof normalizeMail, // test-only, defaults to the real normalize()
+): Promise<void>;
+```
+
+**Usage example:**
+
+```ts
+await withMailSource({ config, logger }, (mailSource) => runTick(mailSource, config, logger));
+```
+
+**Notes:**
+
+- `normalize` is inject­able **only** for tests: `mailparser` is tolerant of malformed bytes (it
+  never throws, it just produces `messageId: undefined`, which is already the
+  `MissingMessageIdError` path) — there is no real `.eml` fixture that forces a genuine parse
+  failure distinct from "no Message-Id". Same pattern as `imapFlowCtor` in `infra/imap/client.ts`.
+- `creados`/`descartados` are literal `0` until FG-3: this story does not distinguish
+  `MissingMessageIdError` from any other `normalize()` failure — both count as `fallidos`.
+- A mail that fails to download is skipped with `warn` and never marked `\Seen` (retried next
+  tick). A mail that downloads but fails to normalize stays `\Seen` and is lost — no compensation.
+- The normalized `IncomingMail` is discarded immediately after logging its result: never
+  accumulated in an array, never published (this story's pipeline ends at normalization).
+
+---
+
+## runIngestaTick()
+
+**Location:** `src/domain/ingesta/tick.ts`
+
+**Description:** The `ingesta` module's entry point: composes `withMailSource()` (S-009) with
+`runTick()` (above). If `withMailSource` throws **before** invoking the callback (e.g.
+`connect()`/`getMailboxLock()` failed), `runTick` never ran and its `finally` never emitted
+anything — so this function emits the metrics line itself, with all five counters at zero, and
+logs the failure at `error` level without ever leaking the password or user. The distinction
+between "the callback started" and "it never did" is a closure flag set right before invoking
+`runTick`, not a check on the exception's type — an `instanceof ImapConnectError` check would miss
+a `getMailboxLock()` failure, which does not raise that class. Never rethrows in a way that would
+kill the process: the worker stays alive and retries on the next cron tick.
+
+**Signature:**
+
+```ts
+function runIngestaTick(config: AppConfig, logger: Logger, imapFlowCtor?: ImapFlowCtor): Promise<void>;
+```
+
+**Usage example:**
+
+```ts
+await runIngestaTick(config, logger); // production; a scheduler (S-011) invokes this per cron tick
+```
+
+**Notes:**
+
+- `imapFlowCtor` is test-only, forwarded straight to `withMailSource` — lets a test simulate a
+  connect/lock failure without touching real IMAP.
+- Never emits the metrics line twice: if `runTick`'s callback did start, its own `finally` already
+  emitted the (possibly partial) counters, and this function's `catch` skips its own emission.
+
+---

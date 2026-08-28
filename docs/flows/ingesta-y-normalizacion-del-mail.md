@@ -13,7 +13,8 @@ stories: [S-007, S-008, S-009, S-010, S-011]
 **Tipo:** Evento (scheduled)
 **Status:** Draft
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-28 (S-009 implementada: Pasos 2 y 3, y el puerto `MailSource`)
+**Última actualización:** 2026-08-28 (S-010 implementada: Pasos 3 a 5 completos — `runTick()` y
+`runIngestaTick()` en `src/domain/ingesta/tick.ts`. Falta S-011 para el Paso 1, el scheduler)
 **Stories:** S-007, S-008, S-009, S-010, S-011
 
 ## Descripción
@@ -76,10 +77,9 @@ sequenceDiagram
             else descarga OK
                 TICK->>IMAP: markSeen(uid)  ← de a uno, ANTES de normalizar
                 TICK->>NORM: normalize(raw)
-                alt el parseo falla
-                    TICK->>LOG: warn { messageId? } — fallidos += 1, QUEDA \Seen, continue
-                else sin Message-Id
-                    TICK->>LOG: warn 'descartado: sin Message-Id'
+                alt normalize() lanza (sin Message-Id u otro fallo de parseo — MISMO catch, sin rama)
+                    Note over NORM: sin Message-Id: normalize() ya emitió su warn 'mail descartado' (motivo: sin_message_id)
+                    TICK->>LOG: warn 'mail no se pudo normalizar' { messageId? } — fallidos += 1, QUEDA \Seen, continue
                 else normalizado
                     TICK->>LOG: info { messageId, resultado: 'normalizado' }
                     TICK->>TICK: el IncomingMail SE DESCARTA (no se acumula)
@@ -171,9 +171,9 @@ mail a la vez, sin paralelismo (Arq-14).
    próximo tick lo reintenta.
 3. `markSeen(uid)` **inmediatamente después de la descarga exitosa**, de a uno — **nunca en lote al
    final del tick**.
-4. `normalize(raw)` → produce un `IncomingMail`:
-   - `messageId` — **el único campo obligatorio**. Sin él, el mail se **descarta con warn** que dice
-     que fue por eso.
+4. `normalize(raw)` → produce un `IncomingMail`, o **lanza**:
+   - `messageId` — **el único campo obligatorio**. Sin él, `normalize()` ya emitió su propio `warn`
+     (`'mail descartado'`, `motivo: 'sin_message_id'`) y lanza `MissingMessageIdError`.
    - `referenceIds` — unión deduplicada de `In-Reply-To` y `References`, en orden de aparición. **El
      tick no decide nada con ese dato.**
    - `recipient` — primer `Delivered-To`, con `To` como fallback. **Crudo**, sin extraer slug. Vacío
@@ -186,8 +186,11 @@ mail a la vez, sin paralelismo (Arq-14).
    - `attachments[]` — `filename`, `mimeType` (**declarado, no verificado**), `size`, `content`,
      `contentDisposition`, `contentId`. **Todas** las partes con contenido de archivo, sin filtrar por
      disposición: una imagen inline es un adjunto normal. **Sin checksum** (es de FG-4).
-   - Si el parseo **lanza**: `counters.fallidos += 1`, se loguea con su `Message-Id` si se alcanzó a
-     extraer, `continue`. **Queda `\Seen` y se pierde** — no se reintenta y no hay compensación.
+   - **Cualquier fallo de `normalize()` cae en el MISMO `catch`** — incluido `MissingMessageIdError`:
+     el tick de esta story **no distingue por clase de error**, sólo cuenta. `counters.fallidos += 1`,
+     se loguea `'mail no se pudo normalizar'` con su `Message-Id` si se alcanzó a extraer (para
+     `MissingMessageIdError` nunca hay uno que extraer), `continue`. **Queda `\Seen` y se pierde** — no
+     se reintenta y no hay compensación.
 5. `counters.parseados += 1`, `logger.info({ messageId, resultado: 'normalizado' }, ...)`
 6. **El objeto se descarta.** No se acumula en ningún array del tick: no hay consumidor.
 
@@ -225,6 +228,17 @@ emisión al final del camino feliz— este requisito **falla en silencio**.
 | Red cortada a mitad | `error` | Tick termina por el fallo | Los ya `\Seen` no se reprocesan; los `\Unseen` sí | REQ-002 CA-13 |
 
 **En los seis casos la línea de métricas se emite igual.**
+
+**Cómo se garantiza esto en el código (dos funciones, dos `finally`):** `runTick()` corre el batch y
+emite la línea de métricas en su propio `finally` — corre siempre que el batch haya empezado, con
+éxito o con fallo a mitad de camino. Pero si la conexión nunca llega a abrirse (falla `connect()` o
+`getMailboxLock()`), `runTick()` nunca arranca y ese `finally` nunca corre. Por eso `runIngestaTick()`
+(el punto de entrada del módulo) tiene su **propio** `catch`, que emite la línea con los cinco
+contadores en `0` **sólo si el batch nunca llegó a empezar** — nunca duplica la línea si `runTick()` sí
+corrió. La distinción entre "el batch empezó" y "nunca empezó" se decide con una bandera que se marca
+justo antes de invocar `runTick()`, **no** inspeccionando el tipo de excepción: un `getMailboxLock()`
+que falla no lanza la misma clase que un `connect()` fallido, y basarse en el tipo de error dejaría ese
+camino sin línea de métricas.
 
 **No hay compensación de ningún tipo:** ni desmarcado, ni reintento, ni carpeta de fallidos. El
 marcado `\Seen` **no se revierte nunca**. La idempotencia de este flujo **no es una tabla: es el flag
