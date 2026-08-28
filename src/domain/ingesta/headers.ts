@@ -66,7 +66,13 @@ export function pickRecipient(parsed: Pick<ParsedMail, 'headers' | 'to'>): strin
 const DISPLAY_NAME_EMAIL = /<([^>]+)>/;
 
 /**
- * Aisla la direccion del formato con nombre `Nombre <mail@dominio>` (CA-10).
+ * Aisla la direccion de cualquier header con forma `Nombre <mail@dominio>` (CA-10).
+ *
+ * No es especifica de `From`: se usa igual sobre `From` (`ingesta/normalize.ts`, para
+ * `senderEmail`) y sobre `recipient` (`ruteo/route-mail.ts`, S-013), que es exactamente la misma
+ * operacion de aislamiento sobre otro header. De ahi el nombre neutral al insumo -- se renombro
+ * desde `extractSenderEmail` cuando `ruteo` empezo a necesitarla (S-013): mantener el nombre viejo
+ * hubiera hecho que su uso sobre `recipient` mintiera sobre lo que hace.
  *
  * Preserva el casing original. Pura, nunca lanza.
  *
@@ -75,7 +81,7 @@ const DISPLAY_NAME_EMAIL = /<([^>]+)>/;
  * matcheo pero el grupo faltara (no deberia ocurrir con `[^>]+`), se cae al `from` completo en vez
  * de aplastarlo con `!`.
  */
-export function extractSenderEmail(from: string | undefined): string {
+export function extractAddress(from: string | undefined): string {
   if (!from) return '';
   const displayNameMatch = from.match(DISPLAY_NAME_EMAIL);
   const address = displayNameMatch?.[1] ?? from;
