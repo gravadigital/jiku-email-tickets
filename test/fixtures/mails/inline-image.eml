@@ -1,0 +1,26 @@
+Message-Id: <inline-image-001@fixtures.local>
+From: cliente@cliente.com
+To: soporte@grava.io
+Subject: Firma con imagen inline
+Content-Type: multipart/mixed; boundary="INLINE-BOUNDARY"
+MIME-Version: 1.0
+
+--INLINE-BOUNDARY
+Content-Type: text/plain; charset=utf-8
+
+Saludos,
+Equipo de soporte
+--INLINE-BOUNDARY
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="documento.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQgZmFrZSBwZGYgY29udGVudCBmb3IgZml4dHVyZSBwdXJwb3NlcyBvbmx5
+--INLINE-BOUNDARY
+Content-Type: image/png
+Content-Disposition: inline; filename="logo.png"
+Content-ID: <logo>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=
+--INLINE-BOUNDARY--

@@ -4,9 +4,10 @@ This document lists all reusable code available in this service. Each category h
 detailed documentation.
 
 Created by S-001 (bootstrap), extended by S-002 (typed configuration), S-003 (structured logging with
-redaction), S-004 (identity and the single bus connection) and S-005 (publishing `requirements.new`
-and translating its errors). The service is a `worker` in Node.js with no HTTP surface and no
-database, so several categories do not apply and stay empty until a story creates them.
+redaction), S-004 (identity and the single bus connection), S-005 (publishing `requirements.new` and
+translating its errors) and S-008 (pure mail normalization). The service is a `worker` in Node.js
+with no HTTP surface and no database, so several categories do not apply and stay empty until a story
+creates them.
 
 ## Components
 
@@ -14,7 +15,24 @@ N/A (Backend service)
 
 ## Utils/Helpers
 
-No utils/helpers documented yet.
+**Total: 6**
+
+- **cleanSubject()** (`src/domain/ingesta/subject.ts`) - Strips `Re:`/`Fwd:`/`RV:` prefixes
+  iteratively and case-insensitively. An all-prefix subject is left as `''`, a valid state.
+- **mergeReferenceIds()** (`src/domain/ingesta/headers.ts`) - Deduplicated union of `In-Reply-To`
+  and `References`, in order of appearance, tolerating `references` as `string`, `string[]` or
+  `undefined`.
+- **pickRecipient()** (`src/domain/ingesta/headers.ts`) - First `Delivered-To`, `To` as fallback,
+  `''` if neither. Deliberately does **not** join multiple `Delivered-To` values with `', '`.
+- **extractSenderEmail()** (`src/domain/ingesta/headers.ts`) - Isolates the address from a
+  `Nombre <mail>` display-name `From` header.
+- **toPlainText()** (`src/domain/ingesta/body.ts`) - Plain text part when present, or the HTML part
+  converted with `html-to-text` when that is the only one. Requires `skipHtmlToText: true` at parse
+  time or its branch selection breaks silently.
+- **trimQuotedText()** (`src/domain/ingesta/body.ts`) - Best-effort trim of quoted thread text by
+  five markers. Ported unchanged from the service in production; never reinvented.
+
+See full details in [utils.md](./utils.md)
 
 ## Middlewares
 
@@ -63,7 +81,7 @@ See full details in [services.md](./services.md)
 
 ## Test Helpers
 
-**Total: 8**
+**Total: 9**
 
 - **setupTestBus** (`test/bus/helpers.ts`) - Opens a NATS connection against the suite's shared
   container and builds a bus `Client` with `Client.fromConnection()`, returning a context with
@@ -94,12 +112,15 @@ See full details in [services.md](./services.md)
   bus** with a **wildcard** subject and answers a prefabricated envelope. Exposes the observed subjects
   and payloads, a **message counter** (which is what proves "no retry"), a mute mode for provoking
   `JikuTimeout`, and `stop()`. Never rebuild the subject by hand — see its notes.
+- **testLoggerWithCapture** (`test/ingesta/test-logger.ts`) - A minimal valid `AppConfig` plus a real
+  `createLogger()` wired to `createLogCapture()`, for tests that call `normalize(raw, logger)` and
+  assert on what was logged.
 
 See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 15**
+**Total: 18**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -137,6 +158,14 @@ See full details in [test-helpers.md](./test-helpers.md)
   failed the command contract. Carries the invalid field **paths**, never their values.
 - **CoreResponder** (`test/bus/responder.ts`) - What `respondTo()` returns: observed subjects and
   payloads, the message counter, and `stop()`.
+- **IncomingMail** (`src/domain/ingesta/types.ts`) - The stable working form a raw mail is normalized
+  to: `messageId`, `referenceIds`, `recipient`, `senderEmail`, `subject`, `body`, `attachments`. Only
+  `messageId` is mandatory.
+- **MailAttachment** (`src/domain/ingesta/types.ts`) - One attachment mapped without filtering by
+  `Content-Disposition`. No `checksum` field (FG-4 territory).
+- **MissingMessageIdError** (`src/domain/ingesta/errors.ts`) - Thrown by `normalize()` for a mail
+  without `Message-Id`. `code: 'SIN_MESSAGE_ID'` mirrors the closed-catalog discard reason
+  `sin_message_id` from ADR-006.
 
 See full details in [types.md](./types.md)
 

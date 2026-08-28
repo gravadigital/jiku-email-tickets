@@ -330,3 +330,33 @@ interface DockerfileLine {
   whole file conflates them.
 - Do not grow this into a real `Dockerfile` parser. It reads a ~90-line file written by this same
   team, and a line scanner with `startsWith` is enough and stays readable.
+
+---
+
+## testLoggerWithCapture
+
+**Location:** `test/ingesta/test-logger.ts`
+
+**Description:** Builds a minimal valid `AppConfig` and a real `createLogger()` instance wired to an
+in-memory `createLogCapture()`, for tests that call `normalize(raw, logger)` and need to assert on
+what would have been logged. Local to `test/ingesta/`, following the same criterion as the existing
+per-suite `configWith()` helpers in `test/bus/` and `test/publicacion/` — not promoted to
+`test/shared/` because each suite already keeps its own.
+
+**Signature:**
+
+```ts
+function testLoggerWithCapture(): { logger: Logger; capture: LogCapture }
+```
+
+**Usage example:**
+
+```ts
+import { normalize } from '#domain/ingesta/normalize.js';
+
+import { testLoggerWithCapture } from './test-logger.js';
+
+const { logger, capture } = testLoggerWithCapture();
+await normalize(rawMail, logger);
+const warnLine = capture.lines().find((line) => line['level'] === 'warn');
+```

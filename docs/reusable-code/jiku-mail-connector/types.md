@@ -447,3 +447,82 @@ interface CoreResponder {
   stop(): Promise<void>;
 }
 ```
+
+---
+
+## IncomingMail
+
+**Location:** `src/domain/ingesta/types.ts`
+
+**Description:** The stable working form a raw RFC 822 mail is normalized to. Only `messageId` is
+mandatory; every other field has a valid empty state (`''` or `[]`) and normalizing never fails
+because one of them is empty. No Zod schema by design: the real boundary is `mailparser`, which
+already returns a typed structure, and this is an internal output shape nobody deserializes.
+
+**Interface:**
+
+```ts
+interface IncomingMail {
+  readonly messageId: string;
+  readonly referenceIds: string[];
+  readonly recipient: string;
+  readonly senderEmail: string;
+  readonly subject: string;
+  readonly body: string;
+  readonly attachments: MailAttachment[];
+}
+```
+
+**Notes:** `senderEmail` is read by no consumer in v1 and must never reach a log line.
+`subject`/`recipient`/`senderEmail` are deliberately **not** in `REDACT_PATHS` — ADR-006 requires
+`messageId`/`projectId`/`slug` to be loggable, and the slug comes from `recipient`; protection for
+these three is by omission at each log call site, not by redaction.
+
+---
+
+## MailAttachment
+
+**Location:** `src/domain/ingesta/types.ts`
+
+**Description:** One mail attachment, mapped from `mailparser`'s output without filtering by
+`Content-Disposition` — an inline image is treated the same as a regular attachment in v1.
+
+**Interface:**
+
+```ts
+interface MailAttachment {
+  readonly filename: string;
+  readonly mimeType: string; // declared by the mail, never verified against content
+  readonly size: number;
+  readonly content: Buffer;
+  readonly contentDisposition: string;
+  readonly contentId?: string;
+}
+```
+
+**Notes:** No `checksum` field — `mailparser` exposes one (MD5) but it is deliberately not
+propagated; adding one is out of scope (FG-4). `content` is redacted by `REDACT_PATHS`
+(`attachments[*].content`); `filename`, `mimeType` and `size` are safe to log in clear.
+
+---
+
+## MissingMessageIdError
+
+**Location:** `src/domain/ingesta/errors.ts`
+
+**Description:** Thrown by `normalize()` when the mail has no `Message-Id` header. This is a
+**discard** with a known reason, distinct from a parse failure — the caller (the tick, S-010) counts
+`descartados` vs. `fallidos` differently, and distinguishing them by error **class** is what lets it
+do so without parsing text.
+
+**Signature:**
+
+```ts
+class MissingMessageIdError extends AppError {
+  readonly code = 'SIN_MESSAGE_ID';
+  readonly httpStatus = 500;
+}
+```
+
+**Notes:** `code` mirrors the literal `sin_message_id`, one of the five closed-catalog discard
+reasons ADR-006 enumerates. Do not invent a variant spelling.

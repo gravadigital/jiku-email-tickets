@@ -1,0 +1,14 @@
+Message-Id: <quoted-reply-001@fixtures.local>
+From: cliente@cliente.com
+To: soporte@grava.io
+Subject: Re: Falla en el login
+In-Reply-To: <original-001@fixtures.local>
+References: <original-001@fixtures.local>
+Content-Type: text/plain; charset=utf-8
+MIME-Version: 1.0
+
+Se soluciona reiniciando el servicio.
+
+El lunes escribió:
+> No arranca el login desde ayer
+> Probamos de todo

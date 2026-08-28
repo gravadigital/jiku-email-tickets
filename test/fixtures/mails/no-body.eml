@@ -1,0 +1,14 @@
+Message-Id: <no-body-001@fixtures.local>
+From: cliente@cliente.com
+To: soporte@grava.io
+Subject: Solo adjunto
+Content-Type: multipart/mixed; boundary="NOBODY-BOUNDARY"
+MIME-Version: 1.0
+
+--NOBODY-BOUNDARY
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="documento.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQgZmFrZSBwZGYgY29udGVudCBmb3IgZml4dHVyZSBwdXJwb3NlcyBvbmx5
+--NOBODY-BOUNDARY--
