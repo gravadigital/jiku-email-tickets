@@ -37,7 +37,7 @@ describe('src/ mail source boundary properties', () => {
   });
 
   // TS-21
-  it('domain/ingesta never imports imapflow nor an internal infra/imap symbol outside the port', () => {
+  it('domain/ingesta never imports imapflow directly', () => {
     const ingestaFiles = FILES.filter((file) => INGESTA_DIR_PREFIX.test(file.relativePath));
     expect(ingestaFiles.length).toBeGreaterThan(0);
 
@@ -45,6 +45,24 @@ describe('src/ mail source boundary properties', () => {
       expect(file.code, `${file.relativePath} must not import imapflow`).not.toMatch(
         /from\s*'imapflow'/,
       );
+    }
+  });
+
+  /**
+   * `tick.ts` (S-010) es la UNICA excepcion deliberada al resto de este boundary: es el punto de
+   * entrada del modulo `ingesta` y compone `withMailSource()` (S-009) con `runTick()` — la Story
+   * Plan de S-010 (Integration Points, "Como se integran") lo exige explicitamente ("el punto de
+   * entrada del modulo... es el que conecta ambas piezas"). El resto de `domain/ingesta`
+   * (`ports.ts`, `normalize.ts`, `types.ts`, etc.) sigue siendo dominio puro: ninguno de ESOS
+   * archivos importa nada de `infra/imap`, solo el compositor.
+   */
+  it('no domain/ingesta file other than tick.ts imports from infra/imap', () => {
+    const ingestaFiles = FILES.filter(
+      (file) => INGESTA_DIR_PREFIX.test(file.relativePath) && !file.relativePath.endsWith('tick.ts'),
+    );
+    expect(ingestaFiles.length).toBeGreaterThan(0);
+
+    for (const file of ingestaFiles) {
       expect(file.code, `${file.relativePath} must not import from infra/imap`).not.toMatch(
         /from\s*'#infra\/imap/,
       );

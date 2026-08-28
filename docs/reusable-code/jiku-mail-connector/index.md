@@ -5,9 +5,10 @@ detailed documentation.
 
 Created by S-001 (bootstrap), extended by S-002 (typed configuration), S-003 (structured logging with
 redaction), S-004 (identity and the single bus connection), S-005 (publishing `requirements.new` and
-translating its errors), S-008 (pure mail normalization) and S-009 (the `MailSource` port and its
-`imapflow` adapter). The service is a `worker` in Node.js with no HTTP surface and no database, so
-several categories do not apply and stay empty until a story creates them.
+translating its errors), S-008 (pure mail normalization), S-009 (the `MailSource` port and its
+`imapflow` adapter) and S-010 (the tick: cap, order, marking and failure isolation). The service is a
+`worker` in Node.js with no HTTP surface and no database, so several categories do not apply and stay
+empty until a story creates them.
 
 ## Components
 
@@ -40,7 +41,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 13**
+**Total: 15**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -80,6 +81,13 @@ N/A (no HTTP surface - ADR-001)
   `logger: false` unconditional), takes the `INBOX` lock, builds a `MailSource` bound to that
   client, runs the caller's callback, and closes lock/connection in a `finally` — one cycle shared
   across `searchUnseen`/`fetch`/`markSeen`, not one connection per operation.
+- **runTick()** (`src/domain/ingesta/tick.ts`) - The tick's inner loop: cap, UID-descending
+  sequential order, mark `\Seen` right after each successful download, isolate per-message
+  failures, and always emit the five `TickCounters` — even when `searchUnseen()` itself throws.
+- **runIngestaTick()** (`src/domain/ingesta/tick.ts`) - The `ingesta` module's entry point:
+  composes `withMailSource()` with `runTick()`, and guarantees the metrics line is emitted even if
+  the connection never opened — a closure flag (not the exception's type) tells whether the
+  callback started.
 
 See full details in [services.md](./services.md)
 
@@ -124,7 +132,7 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 21**
+**Total: 22**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -179,6 +187,9 @@ See full details in [test-helpers.md](./test-helpers.md)
   `message`/`details` never carry the password or user.
 - **diagnoseImapConnectFailure()** (`src/infra/imap/errors.ts`) - Classifies an `imapflow` connect
   failure into `'credenciales_invalidas' | 'host_inalcanzable' | 'desconocido'`.
+- **TickCounters** (`src/domain/ingesta/tick.ts`) - The five counters (`ingestados`, `parseados`,
+  `creados`, `descartados`, `fallidos`) a tick emits in one line, always. Must live outside the
+  `try` so a `finally` can emit it even when the tick fails.
 
 See full details in [types.md](./types.md)
 
