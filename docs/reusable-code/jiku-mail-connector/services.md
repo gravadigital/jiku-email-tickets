@@ -619,3 +619,160 @@ await runIngestaTick(config, logger); // production; a scheduler (S-011) invokes
   emitted the (possibly partial) counters, and this function's `catch` skips its own emission.
 
 ---
+
+## triggerTick()
+
+**Location:** `src/domain/ingesta/scheduler.ts`
+
+**Description:** The no-overlap guard (S-011) — the riskiest piece of the whole feature group. If
+`tickInFlight` is `true`, logs `warn` with the literal message `'tick salteado: hay uno en curso'`
+and returns without invoking the tick — the skipped trigger is **never** enqueued, it is lost; the
+next cron trigger is the only next opportunity. If `false`, marks the flag `true`, invokes the
+injected tick function, and releases the flag in a `finally` — **always**, whether the tick
+resolves or throws. A flag that never releases stops ingestion forever, silently, in a worker with
+no healthcheck (ADR-006): there is no symptom.
+
+Deliberately does **not** use `node-cron`'s own `noOverlap` option: the module-level boolean has to
+be explicit and visible in this module's code, not hidden behind a library option, and `noOverlap`
+does not expose the same log point CA-5 requires verbatim.
+
+**Signature:**
+
+```ts
+function triggerTick(
+  config: AppConfig,
+  logger: Logger,
+  runTick?: (config: AppConfig, logger: Logger) => Promise<void>, // defaults to runIngestaTick
+): Promise<void>;
+```
+
+**Usage example:**
+
+```ts
+// production, invoked once per cron.schedule() callback:
+cron.schedule(config.poll.cron, () => triggerTick(config, logger));
+
+// test, injecting a controllable double instead of the real tick:
+await triggerTick(config, logger, fakeTick);
+```
+
+**Notes:**
+
+- Never rethrows the tick function's exception in a way that would kill the process or the cron —
+  logs it at `error` and moves on. In production this never triggers: `runIngestaTick` (S-010)
+  already absorbs its own failures.
+- The in-flight promise is tracked in a module-level variable so `waitForCurrentTick()` (below) can
+  await it from the ordered shutdown path.
+- No test of this function waits on `node-cron`'s real clock (CA-13): the guard is invoked directly
+  with an injected tick double whose promise the test controls manually.
+
+---
+
+## waitForCurrentTick()
+
+**Location:** `src/domain/ingesta/scheduler.ts`
+
+**Description:** Returns a promise that resolves when the in-flight tick (if any) finishes, or
+immediately if none is running. Does not distinguish "never ran one" from "the last one already
+finished" — both resolve immediately. This is what makes the ordered shutdown possible without
+depending on `cron.stop()` to wait for anything — verified against `node-cron`'s types: in
+in-process mode, `stop()` only prevents future triggers, it never awaits an invocation of `func`
+already in flight.
+
+**Signature:**
+
+```ts
+function waitForCurrentTick(): Promise<void>;
+```
+
+**Usage example:**
+
+```ts
+scheduledTask?.stop();
+await waitForCurrentTick(); // never cancels the tick, only waits for it
+await closeBus();
+```
+
+---
+
+## scheduleTick()
+
+**Location:** `src/domain/ingesta/scheduler.ts`
+
+**Description:** Decides between the two `POLL_ENABLED` branches (Step 8 of the startup flow).
+`true`: calls `cron.schedule(config.poll.cron, () => triggerTick(config, logger, runTick))` and
+returns the `ScheduledTask` — `config.poll.cron` arrives already validated by `cron.validate()` in
+the schema (S-007), so this function never repeats that validation. `false`: logs
+`'poll deshabilitado: no se schedula ningún tick'` and returns `undefined` without ever calling
+`cron.schedule()`. Neither branch fires an immediate tick — the first one always waits for the
+cron's own first trigger, a property of `node-cron` itself, not of this function.
+
+**Signature:**
+
+```ts
+function scheduleTick(
+  config: AppConfig,
+  logger: Logger,
+  runTick?: (config: AppConfig, logger: Logger) => Promise<void>, // defaults to runIngestaTick
+  cronScheduleFn?: typeof import('node-cron').schedule, // defaults to the real cron.schedule
+): ScheduledTask | undefined;
+```
+
+**Usage example:**
+
+```ts
+const scheduledTask = scheduleTick(config, logger); // production
+```
+
+**Notes:**
+
+- `cronScheduleFn` is injectable so tests never register a real cron job or mock `node-cron` at the
+  module level — same pattern as `imapFlowCtor` in `infra/imap/client.ts`.
+- The process stays alive in both branches, but only because of the bus connection's open handle
+  (inherited from `connectToBus()`), never because of code added in this function (CA-4).
+
+---
+
+## createShutdownHandler()
+
+**Location:** `src/shared/shutdown.ts`
+
+**Description:** Builds the `SIGTERM`/`SIGINT` handler for the ordered shutdown (CA-8/CA-9). In
+order: `scheduledTask?.stop()` (if the poll was enabled) → `await waitForCurrentTick()` (waits
+**unconditionally**, never cancels an in-flight tick — canceling it mid `fetch`/`markSeen` is
+exactly the silent data loss this design avoids) → `await closeBus()` → `exit(0)`, always after
+`closeBus()` resolves, never before. All four dependencies are received by parameter (no
+`node:process` or bus-connection import inside this module), so the handler is testable by calling
+it directly — no real OS signal sent to the test process, no real timer.
+
+**Signature:**
+
+```ts
+interface ShutdownDeps {
+  scheduledTask: { stop(): void | Promise<void> } | undefined;
+  waitForCurrentTick: () => Promise<void>;
+  closeBus: () => Promise<void>;
+  exit: (code: number) => void;
+}
+
+function createShutdownHandler(deps: ShutdownDeps): () => Promise<void>;
+```
+
+**Usage example:**
+
+```ts
+const shutdown = createShutdownHandler({ scheduledTask, waitForCurrentTick, closeBus, exit: process.exit });
+process.on('SIGTERM', () => void shutdown());
+process.on('SIGINT', () => void shutdown());
+```
+
+**Notes:**
+
+- Works identically when `scheduledTask` is `undefined` (the poll was disabled): there is no task
+  to stop, but the bus still has to close.
+- No timeout of its own around the tick wait: a tick in flight is never canceled, by design — a
+  timeout that aborted it would reintroduce exactly the silent loss the design avoids. If the
+  process is killed anyway (`SIGKILL`), that is an already-accepted scenario (S-010 CA-13), not
+  something this handler needs to guard against.
+
+---

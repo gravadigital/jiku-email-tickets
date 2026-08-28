@@ -621,3 +621,28 @@ riskiest structural requirement: written the "natural" way, with counters inside
 emission at the end of the happy path, this silently fails to fire on error).
 
 ---
+
+## ShutdownDeps
+
+**Location:** `src/shared/shutdown.ts`
+
+**Description:** The four dependencies `createShutdownHandler()` (S-011) takes by parameter, so the
+ordered-shutdown module never imports `node:process` or the bus connection module directly and
+stays trivially testable — every dependency is a double in a test, the real thing in production.
+
+**Signature:**
+
+```ts
+interface ShutdownDeps {
+  scheduledTask: { stop(): void | Promise<void> } | undefined;
+  waitForCurrentTick: () => Promise<void>;
+  closeBus: () => Promise<void>;
+  exit: (code: number) => void;
+}
+```
+
+**Notes:** `scheduledTask` is `undefined` when `POLL_ENABLED` was `false` — there was no
+`cron.schedule()` call to produce a `ScheduledTask` to stop. The shutdown handler still runs its
+full sequence in that case: no task to stop, but the bus still needs to close.
+
+---

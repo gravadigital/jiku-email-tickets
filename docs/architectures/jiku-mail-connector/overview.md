@@ -14,6 +14,14 @@ worker en node
 
 - **ingesta** — Poll IMAP con cap por tick y sin solapamiento, los mails mas nuevos primero.
   Normalizacion del mail (headers, cuerpo, adjuntos) a una forma interna. Marcado de `\Seen`.
+  **Estado (S-011):** **implementado** de punta a punta — el poll (S-007), el adaptador IMAP
+  (S-009), el tick con cap/orden/marcado/aislamiento de fallos (S-010), y el scheduler con el guard
+  de no solapamiento y el apagado ordenado (S-011). El proceso schedula el tick con `cron.schedule()`
+  segun `POLL_CRON` (o queda vivo sin schedular nada si `POLL_ENABLED=false`), nunca corre un tick
+  inmediato al arrancar, saltea un disparo si hay uno en curso (con `warn`, sin encolar), libera su
+  indicador de solapamiento **siempre** —incluso si el tick lanza—, y responde a `SIGTERM`/`SIGINT`
+  esperando el tick en vuelo antes de cerrar el bus y salir con codigo `0`. **Pendiente de FG-3:** el
+  ruteo y la publicacion — hoy el mail normalizado se descarta al final del tick.
 - **ruteo** — Resolucion del slug del subaddress contra el Mapa de Tickets (KV en memoria, cargado
   al arrancar). Un mail sin slug mapeado se descarta con motivo logueado.
 - **publicacion** — Los dos comandos de escritura al bus via el SDK: `files.request-upload` y
@@ -67,10 +75,14 @@ la key del machine user (Zitadel la entrega **una sola vez** y **no hay procedim
 gestion de secretos mas alla de env + archivos montados. **Fuera de alcance v1:** healthchecks,
 metricas exportadas y alertas.
 
-**Hueco conocido del catalogo de convenciones.** Los tres integradores centrales de este servicio no
-tienen convencion que los cubra: el poll IMAP (cap y no-solapamiento), el uso del SDK de Jiku
-(conexion unica por proceso, token como getter, mapeo de clases de error) y el scheduling por cron.
-Quedan como candidatos a convencion custom cuando el patron se estabilice en la implementacion.
+**Hueco conocido del catalogo de convenciones.** Dos de los tres integradores centrales de este
+servicio no tienen convencion que los cubra: el uso del SDK de Jiku (conexion unica por proceso,
+token como getter, mapeo de clases de error) y el manejo de senales del apagado ordenado. **El poll
+IMAP (cap y no-solapamiento) y el scheduling por cron ya se estabilizaron** con el cierre de S-011 —
+guard de no solapamiento, apagado ordenado y las dos ramas de `POLL_ENABLED` completos y cubiertos
+por tests— y son candidatos concretos a convencion custom via
+`/product-change-technical-definition`. No se escribe la convencion en esta story: se registra el
+estado para que la proxima que toque este patron sepa que ya dejo de ser exploratorio.
 
 ---
 

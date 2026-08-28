@@ -13,7 +13,7 @@ stories: [S-002, S-003, S-004, S-006, S-007, S-011]
 **Tipo:** Evento
 **Status:** Draft
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-28 (S-007 implementada: el Paso 1 ya declara y exige las siete variables de IMAP/poll. S-011 agregará el Paso 8 — schedular el tick — más el apagado ordenado)
+**Última actualización:** 2026-08-28 (S-011 implementada: el Paso 8 — schedular el tick y el apagado ordenado — ya está implementado, no pendiente)
 **Stories:** S-002, S-003, S-004, S-006, S-007, S-011
 
 ## Descripción
@@ -402,6 +402,35 @@ sigue sirviendo; lo que se rompe es el próximo reconnect.
 > bucle: el timer del refresh se crea con `setInterval(...).unref()`, así que ni siquiera mantiene
 > vivo el event loop por su cuenta.
 
+### Paso 8: Schedular el tick
+
+**Origen:** jiku-mail-connector
+**Destino:** (interno)
+**Tipo:** Interno
+
+**Acción:** `src/index.ts` decide entre las dos ramas de `config.poll.enabled`, ya validado en el
+Paso 1 junto con `POLL_CRON` (validado con `cron.validate()` en el schema, nunca inválido en este
+paso):
+
+- **Rama `true`:** llama a `scheduleTick(config, logger)` (`src/domain/ingesta/scheduler.ts`), que
+  invoca `cron.schedule(config.poll.cron, () => triggerTick(config, logger))` y devuelve la tarea
+  programada. El proceso queda vivo con un tick scheduleado.
+- **Rama `false`:** loguea `logger.info({}, 'poll deshabilitado: no se schedula ningún tick')` y
+  **no** llama a `cron.schedule()` en ningún camino. El proceso queda vivo igual — **no** por código
+  de este paso, sino por el handle abierto de la conexión al bus, heredado del Paso 5.
+
+**Sin tick inmediato:** en ningún camino corre un tick antes del primer disparo real del cron — es
+una propiedad de `node-cron`, no código adicional de este paso.
+
+**Apagado ordenado:** los handlers de `SIGTERM`/`SIGINT` se registran **antes** de invocar
+`scheduleTick()` (para no dejar una ventana sin apagado ordenado instalado). Al recibir la señal:
+`scheduledTask?.stop()` (si existía) → `await waitForCurrentTick()` (espera el tick en vuelo **sin
+cancelarlo nunca**) → `await closeBus()` → `process.exit(0)`.
+
+**Ref:** S-007 (`poll.cron`, `poll.enabled`), S-010 (el tick que se schedula), S-011
+
+---
+
 ## Manejo de Errores
 
 | Paso | Error | Código | Response | Comportamiento |
@@ -441,8 +470,9 @@ background** no lo es. Son dos momentos distintos y las dos reglas conviven.
 
 ## Resultado
 
-**Éxito:** un proceso vivo con **exactamente una** conexión al bus, y una línea de log de arranque
-exitoso en stdout **sin ninguna credencial**.
+**Éxito:** un proceso vivo con **exactamente una** conexión al bus, una línea de log de arranque
+exitoso en stdout **sin ninguna credencial**, y el tick scheduleado **o explícitamente sin
+ninguno** — las dos son estados finales válidos según `POLL_ENABLED`.
 
 **Estado final:**
 - Proceso: vivo, con una conexión conservada por toda su vida
@@ -450,6 +480,11 @@ exitoso en stdout **sin ninguna credencial**.
 - Fila del conector en `users` de Jiku: creada por Jiku sola, `identity_type: service`, `email` en
   `NULL`
 - Logs: estructurados en stdout (JSON en producción). **Ningún archivo escrito**
+- Tick: **scheduleado** con `cron.schedule()` según `POLL_CRON` (rama `POLL_ENABLED=true`), o
+  **explícitamente sin ninguno** con el mensaje de deshabilitado ya logueado (rama
+  `POLL_ENABLED=false`)
+- Apagado: `SIGTERM`/`SIGINT` ya cableados — el worker sale ordenadamente y con código `0` cuando
+  se le pide, esperando cualquier tick en vuelo antes de cerrar el bus
 
 ## Notas
 

@@ -108,6 +108,7 @@ lugar distinto.
 | 3 | **Creds del sentinel del bus** montado y alcanzable, y **`JIKU_PROJECT_ID`** configurado | …no arranca. Sin `JIKU_PROJECT_ID` el token **no lleva el claim de roles** y el bus rechaza sin nombrar la causa |
 | 4 | **Una instancia de Jiku desplegada y alcanzable**, con al menos un `projectId` real para la prueba (`JIKU_VERIFY_PROJECT_ID`) | …**arranca igual** —el worker no consulta a `core`— pero `verify` falla con `nada_respondio` o `core_rechazo_por_forma` |
 | 5 | **Red al bus:** el conector va **dentro** de la red del bus, que **no está expuesta al ingress** | …no arranca. `diagnosis: bus_inalcanzable` |
+| 6 | **La casilla acepta subaddress** (`+slug`, p. ej. `tickets+alfa@grava.io`) y tiene **IMAP habilitado**. En Gmail hace falta **App Password**, no la contraseña de la cuenta | …arranca igual —el conector no verifica la casilla al arrancar— pero la ingesta **no funciona**: sin IMAP habilitado el `connect()` del tick falla en cada disparo del cron, y sin subaddress el slug del proyecto destino no se puede extraer (FG-3) |
 
 Tres aclaraciones que no son obvias:
 
@@ -161,6 +162,13 @@ Tres cosas de la configuración de la casilla que conviene saber antes de desple
   conector en un servicio que no necesita la casilla.
 - **Un `POLL_CRON` mal formado impide el arranque**, no falla más tarde al schedular. Es deliberado:
   un cron inválido dejaría un worker vivo que nunca ingesta nada y **sin síntoma**.
+- **La casilla tiene que aceptar subaddress (`+slug`) y tener IMAP habilitado**, y ninguna de las
+  dos es verificable por el conector al arrancar. En Gmail hace falta generar un **App Password**
+  específico —**nunca** la contraseña de la cuenta— desde la configuración de seguridad de la
+  cuenta, y habilitar IMAP en la configuración de Gmail (**Configuración → Ver toda la
+  configuración → Reenvío y POP/IMAP → Habilitar IMAP**). Sin esto el arranque **no falla**, pero
+  la ingesta tampoco funciona: es una precondición operativa de U-02, no algo que el software pueda
+  detectar de antemano.
 
 Los dos montajes, y son los únicos:
 
