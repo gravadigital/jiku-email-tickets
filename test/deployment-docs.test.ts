@@ -43,7 +43,7 @@ describe('README deployment section', () => {
   });
 
   // TS-29
-  it('lists the five deployment preconditions', () => {
+  it('lists the six deployment preconditions', () => {
     // 1. Machine user en Zitadel con Access Token Type = JWT y rol internal-app.
     expect(deployment).toContain('internal-app');
     expect(deployment).toContain('JWT');
@@ -60,6 +60,20 @@ describe('README deployment section', () => {
 
     // 5. Red al bus, que no esta expuesta al ingress.
     expect(deployment).toContain('ingress');
+
+    // 6 (S-011, CA-14). La casilla acepta subaddress y tiene IMAP habilitado.
+    expect(deployment).toMatch(/subaddress/i);
+    expect(deployment).toMatch(/IMAP habilitado/i);
+  });
+
+  // TS-20/CA-14 (S-011): las tres precondiciones de la casilla, ancladas por palabra clave para
+  // que una reescritura futura no las borre en silencio.
+  it('documents the three mailbox preconditions: subaddress, IMAP enabled, and App Password', () => {
+    expect(deployment).toMatch(/subaddress/i);
+    expect(deployment).toMatch(/IMAP habilitado/i);
+    expect(deployment).toMatch(/App Password/i);
+    // Nunca la contraseña de la cuenta: es la distincion que evita el error mas comun al desplegar.
+    expect(deployment).toMatch(/no.*la contrase[ñn]a de la cuenta/i);
   });
 
   it('says who resolves the preconditions and that none of them is code', () => {

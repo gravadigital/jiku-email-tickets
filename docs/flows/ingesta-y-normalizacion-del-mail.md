@@ -2,7 +2,7 @@
 id: ingesta-y-normalizacion-del-mail
 title: Ingesta y normalización del mail
 type: event
-status: Draft
+status: Active
 created: 2026-08-27
 last_updated: 2026-08-28
 stories: [S-007, S-008, S-009, S-010, S-011]
@@ -11,10 +11,10 @@ stories: [S-007, S-008, S-009, S-010, S-011]
 # Ingesta y Normalización del Mail
 
 **Tipo:** Evento (scheduled)
-**Status:** Draft
+**Status:** Active
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-28 (S-010 implementada: Pasos 3 a 5 completos — `runTick()` y
-`runIngestaTick()` en `src/domain/ingesta/tick.ts`. Falta S-011 para el Paso 1, el scheduler)
+**Última actualización:** 2026-08-28 (S-011 implementada: el Paso 1 — el scheduler — ya está
+completo. El flujo queda documentado de punta a punta)
 **Stories:** S-007, S-008, S-009, S-010, S-011
 
 ## Descripción

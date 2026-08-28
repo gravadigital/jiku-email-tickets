@@ -6,9 +6,10 @@ detailed documentation.
 Created by S-001 (bootstrap), extended by S-002 (typed configuration), S-003 (structured logging with
 redaction), S-004 (identity and the single bus connection), S-005 (publishing `requirements.new` and
 translating its errors), S-008 (pure mail normalization), S-009 (the `MailSource` port and its
-`imapflow` adapter) and S-010 (the tick: cap, order, marking and failure isolation). The service is a
-`worker` in Node.js with no HTTP surface and no database, so several categories do not apply and stay
-empty until a story creates them.
+`imapflow` adapter), S-010 (the tick: cap, order, marking and failure isolation) and S-011 (the
+no-overlap scheduler guard, `cron.schedule()` wiring, and the ordered shutdown on `SIGTERM`/`SIGINT`).
+The service is a `worker` in Node.js with no HTTP surface and no database, so several categories do
+not apply and stay empty until a story creates them.
 
 ## Components
 
@@ -41,7 +42,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 15**
+**Total: 18**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -88,6 +89,22 @@ N/A (no HTTP surface - ADR-001)
   composes `withMailSource()` with `runTick()`, and guarantees the metrics line is emitted even if
   the connection never opened — a closure flag (not the exception's type) tells whether the
   callback started.
+- **triggerTick()** (`src/domain/ingesta/scheduler.ts`) - The no-overlap guard (S-011): skips a
+  trigger with a `warn` when a tick is already in flight (never enqueues it), otherwise runs the
+  injected tick function and releases the module-level `tickInFlight` flag in a `finally` — even if
+  the tick throws. The riskiest piece of the whole feature group: a flag that never releases stops
+  ingestion forever, silently.
+- **waitForCurrentTick()** (`src/domain/ingesta/scheduler.ts`) - Resolves immediately if no tick is
+  in flight, or when the current one finishes. What makes the ordered shutdown possible without
+  relying on `cron.stop()` to wait for anything — it does not.
+- **scheduleTick()** (`src/domain/ingesta/scheduler.ts`) - The two `POLL_ENABLED` branches: calls
+  `cron.schedule()` with `config.poll.cron` and returns the `ScheduledTask`, or logs the disabled
+  message and returns `undefined` without scheduling anything. Never fires an immediate tick — the
+  first one always waits for the cron's first real trigger.
+- **createShutdownHandler()** (`src/shared/shutdown.ts`) - Builds the `SIGTERM`/`SIGINT` handler:
+  stops the scheduled task (if any), awaits any in-flight tick without ever canceling it, closes the
+  bus, and exits with code `0`. All four dependencies are injected, so the ordering is testable by
+  calling the handler directly — no real OS signal, no real timer.
 
 See full details in [services.md](./services.md)
 
@@ -132,7 +149,7 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 22**
+**Total: 23**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -190,6 +207,10 @@ See full details in [test-helpers.md](./test-helpers.md)
 - **TickCounters** (`src/domain/ingesta/tick.ts`) - The five counters (`ingestados`, `parseados`,
   `creados`, `descartados`, `fallidos`) a tick emits in one line, always. Must live outside the
   `try` so a `finally` can emit it even when the tick fails.
+- **ShutdownDeps** (`src/shared/shutdown.ts`) - The four injected dependencies of the ordered
+  shutdown handler (`scheduledTask`, `waitForCurrentTick`, `closeBus`, `exit`), all received by
+  parameter so `createShutdownHandler()` never imports `node:process` or the bus connection module
+  directly.
 
 See full details in [types.md](./types.md)
 
