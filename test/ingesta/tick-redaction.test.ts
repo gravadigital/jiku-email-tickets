@@ -22,6 +22,19 @@ function fixture(name: string): Buffer {
   return readFileSync(`${FIXTURES_DIR}${name}`);
 }
 
+/**
+ * `with-attachments.eml` trae `To: soporte@grava.io`, que con `routeMail()` cableado en el tick
+ * (S-014) resuelve como `sin_slug` (no matchea el subaddress). Esta suite no es sobre ruteo (es
+ * CA-17/CA-18: nada sensible se filtra en un ciclo con adjuntos) y su intencion original era un mail
+ * EXITOSO, asi que se reescribe el recipient a un slug mapeado (`alfa`, ya declarado en
+ * `BASE_CONFIG.ruteo.ticketMap` de este archivo) sin tocar el fixture compartido por otras suites.
+ */
+function withResolvableRecipient(raw: Buffer): Buffer {
+  return Buffer.from(
+    raw.toString('utf8').replace('To: soporte@grava.io', 'To: tickets+alfa@grava.io'),
+  );
+}
+
 const TEST_PASSWORD = 'app-password-de-prueba';
 const TEST_USER = 'tickets@ejemplo.com';
 
@@ -64,7 +77,7 @@ describe('tick — un ciclo completo no filtra nada sensible por stdout (CA-17)'
       },
       async fetch(uid: number): Promise<RawMessage> {
         if (uid === 1) throw new Error('descarga fallida'); // TS-25 tambien cubre el warn de fetch
-        return { uid, source: fixture('with-attachments.eml') };
+        return { uid, source: withResolvableRecipient(fixture('with-attachments.eml')) };
       },
       async markSeen(): Promise<void> {
         // no-op
@@ -103,7 +116,7 @@ describe('tick — todas las lineas estan estructuradas y a stdout (CA-17)', () 
         return [1];
       },
       async fetch(uid: number): Promise<RawMessage> {
-        return { uid, source: fixture('with-attachments.eml') };
+        return { uid, source: withResolvableRecipient(fixture('with-attachments.eml')) };
       },
       async markSeen(): Promise<void> {
         // no-op
@@ -126,7 +139,7 @@ describe('tick — nunca loguea metadatos de adjunto en este alcance (CA-18)', (
         return [1];
       },
       async fetch(uid: number): Promise<RawMessage> {
-        return { uid, source: fixture('with-attachments.eml') };
+        return { uid, source: withResolvableRecipient(fixture('with-attachments.eml')) };
       },
       async markSeen(): Promise<void> {
         // no-op
