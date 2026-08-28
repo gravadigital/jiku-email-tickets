@@ -180,20 +180,52 @@ it.each([
 The mail source is an interface; tests provide a fake that yields fixture messages.
 
 ```ts
-// src/ingesta/ports.ts  (production interface)
+// src/domain/ingesta/ports.ts  (production interface)
+export interface RawMessage {
+  readonly uid: number;
+  readonly source: Buffer;
+}
+
 export interface MailSource {
-  fetchUnseen(max: number): Promise<RawMessage[]>;
+  searchUnseen(): Promise<number[]>;
+  fetch(uid: number): Promise<RawMessage>;
   markSeen(uid: number): Promise<void>;
 }
 ```
+
+**Three operations, not the two this convention documented before S-009.** An earlier draft of
+this contract read `fetchUnseen(max: number): Promise<RawMessage[]>` plus `markSeen`, and that
+shape turned out not to be implementable against the tick's real requirements — it cannot satisfy
+all three at once:
+
+- The `warn` for deferred messages needs the **total** count of `\Unseen` messages
+  (`found − cap`). A method that already truncates to `max` loses the total, and the deferred
+  counter becomes unobservable.
+- Marking `\Seen` has to happen **one UID at a time, immediately after each download** — never in
+  a batch at the end of the tick. A `Promise<RawMessage[]>` resolves the whole batch before the
+  caller can mark anything, so the first `markSeen` would land after the *last* download: exactly
+  the batch marking the design rejects.
+- A message whose download fails must be **skipped without being marked**, so the next tick
+  retries it. With the batch already resolved, one failed download rejects the entire promise and
+  aborts the tick for every other message in it.
+
+Splitting `fetchUnseen` into `searchUnseen()` (returns the untruncated total) plus `fetch(uid)` and
+`markSeen(uid)` (both per-UID) is what lets the tick apply the cap itself, count what it deferred,
+and mark one UID right after downloading it — none of which the two-method shape could express.
 
 ```ts
 // test/fixtures/mail-source.ts
 export function fakeMailSource(messages: RawMessage[]): MailSource & { seen: number[] } {
   const seen: number[] = [];
+  const byUid = new Map(messages.map((message) => [message.uid, message]));
   return {
     seen,
-    fetchUnseen: async (max) => messages.slice(0, max),
+    searchUnseen: async () => messages.map((message) => message.uid),
+    fetch: async (uid) => {
+      const message = byUid.get(uid);
+      if (message === undefined) throw new Error(`no fixture message for uid ${uid}`);
+      return message;
+    },
     markSeen: async (uid) => { seen.push(uid); },
   };
 }

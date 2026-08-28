@@ -473,3 +473,63 @@ function coreMessageOf(error: unknown): string | undefined;
   the two cases CA-9 and CA-13 ask to log "with its `hint()`". The honest thing is to **omit** the
   field; what travels instead is `code` + `errorMessage`, and that is the real diagnostic data there.
   **Do not invent text to paper over the absence.**
+
+---
+
+## withMailSource()
+
+**Location:** `src/infra/imap/client.ts`
+
+**Description:** Opens ONE IMAP connection (TLS and `logger: false` unconditional), takes the
+`INBOX` lock, builds a `MailSource` bound to that single client, invokes the caller's callback with
+it, and closes the lock/connection in a `finally` — regardless of success or failure. The whole
+cycle (`searchUnseen` → N × `fetch`/`markSeen`) shares one connection; it is not opened and closed
+per operation.
+
+**Signature:**
+
+```ts
+interface WithMailSourceOptions {
+  readonly config: AppConfig;
+  readonly logger: Logger;
+  /** Test-only: defaults to the real `ImapFlow`. */
+  readonly imapFlowCtor?: ImapFlowCtor;
+}
+
+function withMailSource<T>(
+  options: WithMailSourceOptions,
+  callback: (source: MailSource) => Promise<T>,
+): Promise<T>;
+```
+
+**Usage example:**
+
+```ts
+const uids = await withMailSource({ config, logger }, async (source) => {
+  const unseen = await source.searchUnseen();
+  for (const uid of unseen) {
+    const message = await source.fetch(uid);
+    // ... normalize + publish ...
+    await source.markSeen(message.uid);
+  }
+  return unseen;
+});
+```
+
+**Notes:**
+
+- `imapFlowCtor` is a **function**, not a `new`-able class — same pattern as
+  `createLogger(config, destination, transportTarget)`: tests inject a plain factory function
+  returning a double, never mocking the `imapflow` module globally.
+- `secure: true` and `logger: false` are literal, unconditional — never derived from `config` or an
+  env var (verified by a source-scan property test, not just by reading the code).
+- `INBOX` is the module constant `'INBOX'`, never a configurable value.
+- `search()` and `messageFlagsAdd()` are called with `{ uid: true }` explicitly: without it,
+  `imapflow` interprets the range as sequence numbers, not UIDs, which would silently break
+  `fetch`/`markSeen` on the UIDs `searchUnseen()` returned.
+- A connect failure is translated to `ImapConnectError` (see types.md) — never the raw `imapflow`
+  error, so the password/user never leak through message text.
+- Does not apply `maxPerTick` and does not know about it: the cap belongs to the tick (S-010), not
+  to this adapter.
+
+---
