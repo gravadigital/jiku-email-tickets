@@ -49,10 +49,23 @@ un mail y se fue. Un ticket perdido no tiene sintoma. Cada mail deja al menos un
 `Message-Id` y su resultado. Nunca se loguean credenciales, trafico IMAP crudo, el cuerpo del mail ni
 el contenido de un adjunto.
 
+**El servicio esta empaquetado (S-006).** El `Dockerfile` multi-stage (`test`/`builder`/`production`)
+existe en la raiz, en su **variante worker**: corre como usuario no-root, instala con
+`npm ci --omit=dev`, no hornea ningun secreto —la key del machine user y el creds del sentinel se
+montan **read-only** en runtime— y su `CMD` arranca el worker, nunca el modo de verificacion (que si
+viaja en la imagen, para correrlo a mano). **Sus dos ausencias son decisiones declaradas y llevan su
+comentario en el archivo:** sin `EXPOSE`, porque el conector no expone HTTP; y sin `HEALTHCHECK`,
+porque el unico check disponible siempre pasa y una señal verde que no prueba nada es peor que
+ninguna (ADR-006). Las cinco precondiciones de despliegue —que el conector **no puede resolver**, y
+ante cuya ausencia lo unico que hace es fallar de forma legible— estan en el `README.md`.
+
 **Diferido a operaciones:** CI/CD, build y registry de la imagen (no hereda el workflow de Jiku, que
-usa GitHub Actions); entorno de staging; rotacion de la key del machine user; gestion de secretos mas
-alla de env + archivos montados. **Fuera de alcance v1:** healthchecks, metricas exportadas y
-alertas.
+usa GitHub Actions) — el `Dockerfile` deja la etapa `test` lista y documentada, pero **el
+`docker build` no corre la suite**: levanta un NATS con Testcontainers y necesitaria Docker dentro
+del build, asi que quien la corre es el pipeline. Tambien diferidos: entorno de staging; rotacion de
+la key del machine user (Zitadel la entrega **una sola vez** y **no hay procedimiento definido**);
+gestion de secretos mas alla de env + archivos montados. **Fuera de alcance v1:** healthchecks,
+metricas exportadas y alertas.
 
 **Hueco conocido del catalogo de convenciones.** Los tres integradores centrales de este servicio no
 tienen convencion que los cubra: el poll IMAP (cap y no-solapamiento), el uso del SDK de Jiku

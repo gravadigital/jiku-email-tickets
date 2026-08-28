@@ -255,3 +255,78 @@ await responder.stop();
   sleeps, which the convention forbids for waiting on a condition.
 - Always `stop()` it: with `fileParallelism: false` and a shared bus, a live subscription from an
   earlier test is exactly the cross-contamination that sequential execution exists to avoid.
+
+---
+
+## runImage() / inImage()
+
+**Location:** `test/docker-image.test.ts`
+
+**Description:** Runs the built `production` image as a real container. `runImage()` passes an
+**explicit** environment (one `-e` per variable) and optional extra `docker run` arguments such as
+read-only mounts; `inImage()` runs a shell command inside the image for filesystem inspections.
+
+**Signature:**
+
+```ts
+function runImage(env: Record<string, string>, extraArgs?: readonly string[]): RunResult;
+function inImage(shellCommand: string): RunResult;
+
+interface RunResult {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly status: number | null;
+}
+```
+
+**Notes:**
+
+- **`spawnSync`, never `execFileAsync`.** Most of these runs exit non-zero — the bus is unreachable
+  from the test — and `execFileAsync` *rejects* in that case, hiding the streams that are exactly what
+  has to be asserted. Same reasoning as `runDist()` in `build-runtime.test.ts`, one level up.
+- **The environment is explicit and inherits nothing.** A test that inherits the host environment
+  passes or fails according to what the developer has exported, which is the intermittent failure the
+  `testing` convention forbids. A container only sees what it is given, so the isolation is even
+  stronger than with a child process.
+- **Never a `docker run` without a guarantee of termination.** The image's `CMD` leaves the worker
+  *alive* if the connection succeeds; point `JIKU_SERVERS` at a closed port
+  (`nats://127.0.0.1:1`) so the process dies on its own instead of hanging the suite.
+- Every run carries `--rm` (no orphan containers) and an explicit timeout.
+
+---
+
+## parseDockerfile() / directiveLines() / stageBlock() / stageInstructions()
+
+**Location:** `test/dockerfile.test.ts`
+
+**Description:** Classifies each `Dockerfile` line as comment / directive / continuation, and slices
+the file into per-stage blocks so assertions can target one stage.
+
+**Signature:**
+
+```ts
+function parseDockerfile(contents: string): DockerfileLine[];
+function directiveLines(lines: readonly DockerfileLine[], directive: string): DockerfileLine[];
+function stageBlock(lines: readonly DockerfileLine[], stage: string): DockerfileLine[];
+function stageInstructions(lines: readonly DockerfileLine[], stage: string): string;
+
+interface DockerfileLine {
+  readonly raw: string;
+  readonly text: string;
+  readonly isComment: boolean;
+  readonly directive: string | null;
+}
+```
+
+**Notes:**
+
+- **This is not over-engineering a `grep`.** Every *absence* assertion has to ignore comment lines,
+  because the comments the packaging story **requires** (CA-3: an unexplained absence is
+  indistinguishable from an oversight) name `EXPOSE`, `HEALTHCHECK`, `npm install`, `python3` and
+  `.env.defaults` in order to explain why they are not there. A naive whole-file search fails *because
+  the documentation is correct* — the worst possible incentive.
+- **`stageBlock()` exists because several properties are per-stage, not global.** `npm ci` without
+  `--omit=dev` is correct in `test` and `builder` and a defect in `production`; asserting over the
+  whole file conflates them.
+- Do not grow this into a real `Dockerfile` parser. It reads a ~90-line file written by this same
+  team, and a line scanner with `startsWith` is enough and stays readable.

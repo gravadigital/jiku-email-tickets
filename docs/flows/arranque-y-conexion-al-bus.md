@@ -5,7 +5,7 @@ type: event
 status: Draft
 created: 2026-08-27
 last_updated: 2026-08-27
-stories: [S-002, S-003, S-004]
+stories: [S-002, S-003, S-004, S-006]
 ---
 
 # Arranque y Conexión al Bus
@@ -13,14 +13,15 @@ stories: [S-002, S-003, S-004]
 **Tipo:** Evento
 **Status:** Draft
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-27 (S-004: Pasos 3, 4, 5 y 7 implementados; Paso 6 verificado)
-**Stories:** S-002, S-003, S-004
+**Última actualización:** 2026-08-27 (S-006: el `CMD` del contenedor es ahora un trigger real y verificado — la imagen ejecuta este flujo, no el de publicación)
+**Stories:** S-002, S-003, S-004, S-006
 
 ## Descripción
 
 Flujo completo del arranque del `jiku-mail-connector`, desde la validación de su configuración hasta
 la conexión establecida con el bus NATS de Jiku. Se dispara al iniciar el proceso (`npm run start` o
-el `CMD` del contenedor). Cubre la validación fail-fast de la configuración, la construcción del
+el `CMD` del contenedor — desde S-006 ese `CMD` existe y es `node dist/index.js`, verificado sobre la
+imagen construida). Cubre la validación fail-fast de la configuración, la construcción del
 logger, la construcción de la identidad desde la key del machine user, el único `connect()` del
 proceso, y el **efecto lateral no provocado** de que Jiku cree la fila del conector en `users`.
 

@@ -63,7 +63,7 @@ See full details in [services.md](./services.md)
 
 ## Test Helpers
 
-**Total: 6**
+**Total: 8**
 
 - **setupTestBus** (`test/bus/helpers.ts`) - Opens a NATS connection against the suite's shared
   container and builds a bus `Client` with `Client.fromConnection()`, returning a context with
@@ -79,6 +79,17 @@ See full details in [services.md](./services.md)
   Zitadel.
 - **generateServiceAccountKeyFile / writeRawKeyFile** (`test/bus/auth-helpers.ts`) - Writes a
   `ServiceAccountKey` JSON with a **real** RSA private key, plus its invalid variants.
+- **runImage / inImage** (`test/docker-image.test.ts`) - Runs the built production image as a real
+  container with an **explicit** environment (one `-e` per variable, nothing inherited from the host),
+  and runs a shell command inside it for filesystem inspections. `spawnSync`, not `execFileAsync`:
+  most of these runs exit non-zero and `execFileAsync` would reject, hiding the very streams the
+  assertion needs.
+- **parseDockerfile / directiveLines / stageBlock / stageInstructions** (`test/dockerfile.test.ts`) -
+  Line classifier for the `Dockerfile` (comment / directive / continuation) plus per-stage slicing.
+  What makes it necessary: absence assertions must ignore comment lines, because the comments the
+  packaging story *requires* mention `EXPOSE`, `HEALTHCHECK` and `npm install` to explain why they are
+  not there. Per-stage slicing matters for the same reason: `npm ci` without `--omit=dev` is correct
+  in `test` and `builder` and a defect in `production`.
 - **respondTo** (`test/bus/responder.ts`) - The `core` double: subscribes to a command **on the real
   bus** with a **wildcard** subject and answers a prefabricated envelope. Exposes the observed subjects
   and payloads, a **message counter** (which is what proves "no retry"), a mute mode for provoking
