@@ -1,8 +1,10 @@
 import type { Logger } from 'pino';
 
 import type { AppConfig } from '#config/index.js';
+import { MissingMessageIdError } from '#domain/ingesta/errors.js';
 import { normalize as normalizeMail } from '#domain/ingesta/normalize.js';
 import type { MailSource } from '#domain/ingesta/ports.js';
+import { routeMail } from '#domain/ruteo/route-mail.js';
 import { type ImapFlowCtor, withMailSource } from '#infra/imap/client.js';
 
 /**
@@ -18,9 +20,12 @@ import { type ImapFlowCtor, withMailSource } from '#infra/imap/client.js';
 /**
  * Los cinco contadores que el tick emite en una unica linea, siempre — con exito o con fallo.
  *
- * `creados` y `descartados` son literales `0` en este alcance (FG-3 los llena): esta story no
- * distingue el descarte por `Message-Id` faltante de cualquier otro fallo de `normalize()`, los
- * cuenta todos como `fallidos` (ver Flow Context -> "Sobre `descartados` en este alcance").
+ * `creados` sigue en `0` literal en este alcance (S-015 lo completa: el alta todavia no publica
+ * nada). `descartados` ya cuenta los cinco motivos reales (S-014): los tres que decide `routeMail()`
+ * (`es_respuesta`, `sin_slug`, `slug_no_mapeado`) mas `sin_message_id` (via `MissingMessageIdError`,
+ * distinguido por CLASE en el `catch` de `normalize()`, nunca por texto — ADR-002). Solo
+ * `no_parseable` (cualquier otro fallo de `normalize()`) sigue contando como `fallidos`: es lo que
+ * salio mal, no un descarte esperado.
  */
 export interface TickCounters {
   ingestados: number;
@@ -110,19 +115,55 @@ export async function runTick(
       try {
         const mail = await normalize(raw.source, logger);
         counters.parseados += 1;
-        logger.info({ messageId: mail.messageId, resultado: 'normalizado' }, 'mail procesado');
-        // `mail` se descarta aca: no se acumula en ningun array del tick (CA-16, RF-32/RF-33). No
-        // hay consumidor: el pipeline termina en el mail normalizado.
-      } catch {
-        counters.fallidos += 1;
-        // `normalize()` ya emitio su propio warn con `motivo: 'sin_message_id'` para ese caso
-        // puntual (S-008) — no se re-loguea el mismo descarte con otro mensaje, solo se cuenta y
-        // se deja el propio rastro del tick.
-        logger.warn(
-          { messageId: extractMessageIdIfAny() },
-          'mail no se pudo normalizar',
-        );
-        // Queda \Seen. No hay compensacion de ningun tipo (CA-7, CA-13).
+
+        // El punto donde S-014 cablea `ingesta` + `ruteo`: `routeMail()` es sincrona y pura (nunca
+        // lanza, nunca loguea — Integration Points de la Story Plan), el tick decide que hacer con
+        // el resultado. NO se reimplementa su orden de evaluacion (CA-2): el tick solo reporta lo
+        // que el ruteo ya decidio.
+        const route = routeMail(mail, config.ruteo);
+
+        if (!route.ok) {
+          // Una sola linea `warn` agrupable por los cinco motivos (CA-3): mismo literal
+          // `'mail descartado'` que ya emite `normalize()` para `sin_message_id`. El `slug` viaja
+          // SOLO cuando esta presente en el resultado (unicamente `slug_no_mapeado` lo lleva,
+          // Integration Points) — nunca `slug: undefined` a mano (CA-4). NO se emite tambien la
+          // linea `'mail procesado'` para este mail: CA-3 exige UNA sola linea por descarte, y
+          // "normalizado" seria enganoso para un mail que en definitiva se descarta.
+          logger.warn(
+            {
+              messageId: mail.messageId,
+              motivo: route.motivo,
+              ...(route.slug !== undefined ? { slug: route.slug } : {}),
+            },
+            'mail descartado',
+          );
+          counters.descartados += 1;
+          // El mail (y el `RouteResult`) se descartan aca: no se acumulan en ningun array del tick
+          // (CA-11, CA-16). No publica, no responde, no mueve de carpeta, no persiste (CA-6) — el
+          // alcance de esta story termina en el reporte del descarte.
+        } else {
+          // Resuelto: por ahora no se hace nada mas con `route` (el alta es S-015; `creados` sigue
+          // en 0 — CA-13). La linea `'mail procesado'` marca que este mail SI se normalizo y
+          // resolvio, distinta de la linea de descarte de arriba.
+          logger.info({ messageId: mail.messageId, resultado: 'normalizado' }, 'mail procesado');
+        }
+      } catch (cause) {
+        // Distincion por CLASE, nunca por texto del mensaje (ADR-002, CA-9): `MissingMessageIdError`
+        // es un DESCARTE (la clase ya existe desde S-008, precisamente para esto), no un fallo de
+        // parseo. Cualquier otro error es `no_parseable`: eso si es "lo que salio mal" (CA-10).
+        if (cause instanceof MissingMessageIdError) {
+          counters.descartados += 1;
+          // `normalize()` ya emitio su propio warn con `motivo: 'sin_message_id'` para este caso
+          // puntual (S-008) — no se re-loguea el mismo descarte con otro mensaje (CA-3), solo se
+          // cuenta.
+        } else {
+          counters.fallidos += 1;
+          logger.warn(
+            { uid, messageId: extractMessageIdIfAny() },
+            'mail no se pudo normalizar',
+          );
+        }
+        // Queda \Seen en ambos casos. No hay compensacion de ningun tipo (CA-7, CA-13).
       }
     }
   } finally {
@@ -130,8 +171,8 @@ export async function runTick(
       {
         ingestados: counters.ingestados,
         parseados: counters.parseados,
-        creados: 0, // literal hasta FG-3
-        descartados: 0, // literal hasta FG-3
+        creados: 0, // literal hasta S-015
+        descartados: counters.descartados,
         fallidos: counters.fallidos,
       },
       'tick completado',

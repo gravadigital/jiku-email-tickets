@@ -94,12 +94,19 @@ function fakeMailSource(config: {
   };
 }
 
-/** Construye un mail RFC 822 valido y parseable con un Message-Id distinto por UID. */
+/**
+ * Construye un mail RFC 822 valido y parseable con un Message-Id distinto por UID.
+ *
+ * `To: tickets+alfa@grava.io` (S-014): `alfa` esta mapeado en `BASE_CONFIG.ruteo.ticketMap`, asi que
+ * este mail siempre resuelve via `routeMail()` — no se descarta. Los tests que usan este helper
+ * afirman mecanica de ingesta (orden, marcado, contadores), no ruteo; que resuelva es lo que
+ * preserva su intencion original tras cablear el ruteo en el tick.
+ */
 function mailWithId(uid: number): Buffer {
   return Buffer.from(
     `Message-Id: <uid-${uid}@fixtures.local>\r\n` +
       'From: "Juan Perez" <juan@cliente.com>\r\n' +
-      'To: soporte@grava.io\r\n' +
+      'To: tickets+alfa@grava.io\r\n' +
       'Subject: Consulta\r\n' +
       'Content-Type: text/plain; charset=utf-8\r\n' +
       'MIME-Version: 1.0\r\n\r\n' +
@@ -489,8 +496,8 @@ describe('runTick — the five counters, one line (CA-14)', () => {
     });
   });
 
-  // TS-20
-  it('descartados stays literal 0 even when normalize throws MissingMessageIdError', async () => {
+  // TS-20 (actualizado por S-014, CA-8: MissingMessageIdError ahora cuenta como descartados)
+  it('descartados counts a MissingMessageIdError, no longer fallidos', async () => {
     const { logger, capture } = testLoggerWithCapture();
     const source: MailSource = {
       async searchUnseen(): Promise<number[]> {
@@ -506,7 +513,7 @@ describe('runTick — the five counters, one line (CA-14)', () => {
 
     await runTick(source, configWithMax(50), logger);
 
-    expect(tickLine(capture)).toMatchObject({ fallidos: 1, descartados: 0 });
+    expect(tickLine(capture)).toMatchObject({ fallidos: 0, descartados: 1 });
   });
 });
 
@@ -582,5 +589,353 @@ describe('runTick — CA-16: the normalized mail is discarded, nothing is publis
 
     expect(source).not.toMatch(/from\s*'#domain\/publicacion/);
     expect(source).not.toMatch(/from\s*'@gravadigital\/jiku'/);
+  });
+});
+
+/**
+ * Suite de S-014: los cinco motivos de descarte, cableados en el tick via `routeMail()` (S-013), y
+ * la correccion del conteo de `MissingMessageIdError` (de `fallidos` a `descartados`, CA-8/CA-9).
+ * TS-1 a TS-14 de la Story Plan de S-014 (numeracion propia de esa tabla, distinta de la de S-010
+ * reutilizada arriba en este mismo archivo).
+ */
+
+/** Mail RFC 822 minimo, parseable, con Message-Id y recipient/subject/body configurables. */
+function mailTo(opts: {
+  uid: number;
+  recipient: string;
+  subject?: string;
+  body?: string;
+}): Buffer {
+  return Buffer.from(
+    `Message-Id: <s014-${opts.uid}@fixtures.local>\r\n` +
+      'From: "Cliente" <cliente@cliente.com>\r\n' +
+      `To: ${opts.recipient}\r\n` +
+      `Subject: ${opts.subject ?? 'Consulta'}\r\n` +
+      'Content-Type: text/plain; charset=utf-8\r\n' +
+      'MIME-Version: 1.0\r\n\r\n' +
+      `${opts.body ?? `Cuerpo del mail ${opts.uid}.`}\r\n`,
+  );
+}
+
+function sourceWithMails(mails: Map<number, Buffer>): MailSource & {
+  seen: number[];
+  fetchCalls: number[];
+} {
+  const base = fakeMailSource({ uidsUnseen: [...mails.keys()], sources: mails });
+  return base;
+}
+
+describe('runTick — es_respuesta se descarta sin slug en la linea (CA-1, CA-2, CA-3, CA-4, CA-7)', () => {
+  // TS-1
+  it('un mail con referenceIds no vacio se descarta como es_respuesta, sin slug', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source = fakeMailSource({
+      uidsUnseen: [1],
+      sources: new Map([[1, fixture('in-reply-to.eml')]]),
+    });
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
+    expect(discardLine).toMatchObject({
+      motivo: 'es_respuesta',
+      messageId: '<in-reply-to-001@fixtures.local>',
+    });
+    expect(discardLine).not.toHaveProperty('slug');
+    expect(tickLine(capture)).toMatchObject({ descartados: 1, fallidos: 0 });
+  });
+});
+
+describe('runTick — sin_slug se descarta sin slug en la linea (CA-1, CA-2, CA-3, CA-4, CA-7)', () => {
+  // TS-2
+  it('un mail sin forma de subaddress se descarta como sin_slug', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source = fakeMailSource({
+      uidsUnseen: [1],
+      sources: new Map([[1, mailTo({ uid: 1, recipient: 'soporte@grava.io' })]]),
+    });
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
+    expect(discardLine).toMatchObject({
+      motivo: 'sin_slug',
+      messageId: '<s014-1@fixtures.local>',
+    });
+    expect(discardLine).not.toHaveProperty('slug');
+    expect(tickLine(capture)).toMatchObject({ descartados: 1, fallidos: 0 });
+  });
+});
+
+describe('runTick — slug_no_mapeado incluye el slug en la linea (CA-1, CA-2, CA-3, CA-4, CA-7)', () => {
+  // TS-3
+  it('un mail a un slug no mapeado se descarta como slug_no_mapeado, con el slug', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source = fakeMailSource({
+      uidsUnseen: [1],
+      sources: new Map([[1, mailTo({ uid: 1, recipient: 'tickets+beta@grava.io' })]]),
+    });
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
+    expect(discardLine).toMatchObject({
+      motivo: 'slug_no_mapeado',
+      slug: 'beta',
+      messageId: '<s014-1@fixtures.local>',
+    });
+    expect(tickLine(capture)).toMatchObject({ descartados: 1, fallidos: 0 });
+  });
+
+  // TS-4
+  it('el slug se loguea literal en la salida cruda, no [REDACTED] (CA-5)', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source = fakeMailSource({
+      uidsUnseen: [1],
+      sources: new Map([[1, mailTo({ uid: 1, recipient: 'tickets+beta@grava.io' })]]),
+    });
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    const rawDiscardLine = capture.raw().find((line) => line.includes('mail descartado'));
+    expect(rawDiscardLine).toBeDefined();
+    expect(rawDiscardLine).toContain('"slug":"beta"');
+    expect(rawDiscardLine).not.toContain('"slug":"[REDACTED]"');
+  });
+});
+
+describe('runTick — los descartes cuentan como descartados, nunca fallidos (CA-7)', () => {
+  // TS-5
+  it('un tick de 10 mails con 3 descartes de motivos distintos cuenta descartados: 3, fallidos: 0', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const mails = new Map<number, Buffer>([
+      [10, fixture('in-reply-to.eml')], // es_respuesta
+      [9, mailTo({ uid: 9, recipient: 'soporte@grava.io' })], // sin_slug
+      [8, mailTo({ uid: 8, recipient: 'tickets+beta@grava.io' })], // slug_no_mapeado
+      [7, mailTo({ uid: 7, recipient: 'tickets+alfa@grava.io' })], // resuelto (alfa esta mapeado)
+      [6, mailTo({ uid: 6, recipient: 'tickets+alfa@grava.io' })],
+      [5, mailTo({ uid: 5, recipient: 'tickets+alfa@grava.io' })],
+      [4, mailTo({ uid: 4, recipient: 'tickets+alfa@grava.io' })],
+      [3, mailTo({ uid: 3, recipient: 'tickets+alfa@grava.io' })],
+      [2, mailTo({ uid: 2, recipient: 'tickets+alfa@grava.io' })],
+      [1, mailTo({ uid: 1, recipient: 'tickets+alfa@grava.io' })],
+    ]);
+    const source = sourceWithMails(mails);
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    expect(tickLine(capture)).toMatchObject({ descartados: 3, fallidos: 0, parseados: 10 });
+  });
+});
+
+describe('runTick — MissingMessageIdError pasa a descartados (CA-8)', () => {
+  // TS-6
+  it('un tick con 5 mails sin Message-Id cuenta descartados: 5, fallidos: 0', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source: MailSource = {
+      async searchUnseen(): Promise<number[]> {
+        return [5, 4, 3, 2, 1];
+      },
+      async fetch(uid: number): Promise<RawMessage> {
+        return { uid, source: fixture('no-message-id.eml') };
+      },
+      async markSeen(): Promise<void> {
+        // no-op
+      },
+    };
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    expect(tickLine(capture)).toMatchObject({
+      descartados: 5,
+      fallidos: 0,
+      ingestados: 5,
+      parseados: 0,
+    });
+  });
+});
+
+describe('runTick — la distincion es por clase, no por texto (CA-9)', () => {
+  // TS-7
+  it('un error con el mismo mensaje que MissingMessageIdError pero de otra clase sigue siendo fallido', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source = fakeMailSource({
+      uidsUnseen: [1],
+      sources: new Map([[1, mailWithId(1)]]),
+    });
+    const impostorNormalize = vi.fn(async () => {
+      throw new Error('El mail no tiene header Message-Id: se descarta.');
+    });
+
+    await runTick(source, BASE_CONFIG, logger, impostorNormalize);
+
+    expect(tickLine(capture)).toMatchObject({ fallidos: 1, descartados: 0 });
+  });
+});
+
+describe('runTick — no_parseable sigue siendo fallido, con el uid (CA-10)', () => {
+  // TS-8
+  it('un fallo de parseo generico (no MissingMessageIdError) sigue contando como fallido', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source = fakeMailSource({
+      uidsUnseen: [1],
+      sources: new Map([[1, mailWithId(1)]]),
+    });
+    const brokenNormalize = vi.fn(async () => {
+      throw new Error('parseo roto simulado');
+    });
+
+    await runTick(source, BASE_CONFIG, logger, brokenNormalize);
+
+    const warnLine = capture.lines().find((l) => l['msg'] === 'mail no se pudo normalizar');
+    expect(warnLine).toMatchObject({ uid: 1 });
+    expect(tickLine(capture)).toMatchObject({ fallidos: 1, descartados: 0 });
+  });
+});
+
+describe('runTick — un descarte no crea nada observable (CA-6)', () => {
+  // TS-9
+  it('un descarte por slug_no_mapeado no invoca ningun metodo de escritura fuera de markSeen', async () => {
+    const { logger } = testLoggerWithCapture();
+    const calls: string[] = [];
+    const source: MailSource = {
+      async searchUnseen(): Promise<number[]> {
+        calls.push('searchUnseen');
+        return [1];
+      },
+      async fetch(uid: number): Promise<RawMessage> {
+        calls.push('fetch');
+        return { uid, source: mailTo({ uid: 1, recipient: 'tickets+beta@grava.io' }) };
+      },
+      async markSeen(): Promise<void> {
+        calls.push('markSeen');
+      },
+    };
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    expect(calls).toEqual(['searchUnseen', 'fetch', 'markSeen']);
+  });
+});
+
+describe('runTick — el mail se descarta dentro de su propia iteracion (CA-11)', () => {
+  // TS-10
+  it('tick.ts no declara ningun array acumulador de RouteResult entre iteraciones', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('../../src/domain/ingesta/tick.ts', import.meta.url)),
+      'utf8',
+    );
+    const codeOnly = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+    expect(codeOnly).not.toMatch(/const\s+\w+\s*:\s*RouteResult\[\]/);
+    expect(codeOnly).not.toMatch(/\.push\(result\)/);
+    expect(codeOnly).not.toMatch(/\.push\(route\)/);
+  });
+});
+
+describe('runTick — el tick continua con el siguiente UID tras un descarte (CA-12)', () => {
+  // TS-11
+  it('el descarte del medio no interrumpe el batch: los 3 uids aparecen en fetchCalls y en seen', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const mails = new Map<number, Buffer>([
+      [3, mailTo({ uid: 3, recipient: 'tickets+alfa@grava.io' })],
+      [2, fixture('in-reply-to.eml')], // es_respuesta, descartado
+      [1, mailTo({ uid: 1, recipient: 'tickets+alfa@grava.io' })],
+    ]);
+    const source = sourceWithMails(mails);
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    expect(source.fetchCalls).toEqual([3, 2, 1]);
+    expect(source.seen).toEqual([3, 2, 1]);
+    expect(tickLine(capture)).toMatchObject({ ingestados: 3, parseados: 3, descartados: 1 });
+  });
+});
+
+describe('runTick — creados sigue en 0 aunque haya descartes reales (CA-13)', () => {
+  // TS-12
+  it('creados permanece en 0 explicito junto con descartados: 3', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const mails = new Map<number, Buffer>([
+      [10, fixture('in-reply-to.eml')],
+      [9, mailTo({ uid: 9, recipient: 'soporte@grava.io' })],
+      [8, mailTo({ uid: 8, recipient: 'tickets+beta@grava.io' })],
+      [7, mailTo({ uid: 7, recipient: 'tickets+alfa@grava.io' })],
+      [6, mailTo({ uid: 6, recipient: 'tickets+alfa@grava.io' })],
+      [5, mailTo({ uid: 5, recipient: 'tickets+alfa@grava.io' })],
+      [4, mailTo({ uid: 4, recipient: 'tickets+alfa@grava.io' })],
+      [3, mailTo({ uid: 3, recipient: 'tickets+alfa@grava.io' })],
+      [2, mailTo({ uid: 2, recipient: 'tickets+alfa@grava.io' })],
+      [1, mailTo({ uid: 1, recipient: 'tickets+alfa@grava.io' })],
+    ]);
+    const source = sourceWithMails(mails);
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    expect(tickLine(capture)).toMatchObject({ creados: 0, descartados: 3 });
+  });
+});
+
+describe('runTick — nunca se loguea el contenido del mail en un descarte (CA-14)', () => {
+  // TS-13
+  it('un descarte por slug_no_mapeado no filtra body, subject, senderEmail ni recipient', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source = fakeMailSource({
+      uidsUnseen: [1],
+      sources: new Map([
+        [
+          1,
+          mailTo({
+            uid: 1,
+            recipient: 'tickets+beta@grava.io',
+            subject: 'Datos de mi tarjeta',
+            body: 'mi tarjeta es 4111 1111 1111 1111',
+          }),
+        ],
+      ]),
+    });
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
+    expect(discardLine).not.toHaveProperty('body');
+    expect(discardLine).not.toHaveProperty('subject');
+    expect(discardLine).not.toHaveProperty('senderEmail');
+    expect(discardLine).not.toHaveProperty('recipient');
+
+    const raw = capture.raw();
+    expect(raw.some((line) => line.includes('4111 1111 1111 1111'))).toBe(false);
+    expect(raw.some((line) => line.includes('Datos de mi tarjeta'))).toBe(false);
+  });
+});
+
+describe('runTick — el orden de evaluacion del ruteo no se reimplementa (CA-2)', () => {
+  // TS-14: In-Reply-To poblado Y recipient con un slug tambien no-mapeado (`beta`, ausente de
+  // ticketMap) — el mail calificaria independientemente como slug_no_mapeado, pero routeMail()
+  // prioriza es_respuesta (Integration Points, orden de evaluacion paso 1 antes que paso 3). El
+  // tick no reimplementa ese orden, solo reporta lo que el ruteo decidio.
+  it('es_respuesta sobre un slug tambien no-mapeado reporta es_respuesta, sin slug', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const mailReplyToUnmappedSlug = Buffer.from(
+      'Message-Id: <s014-reply-unmapped@fixtures.local>\r\n' +
+        'From: "Cliente" <cliente@cliente.com>\r\n' +
+        'To: tickets+beta@grava.io\r\n' +
+        'Subject: Re: Consulta anterior\r\n' +
+        'In-Reply-To: <a@x>\r\n' +
+        'References: <a@x>\r\n' +
+        'Content-Type: text/plain; charset=utf-8\r\n' +
+        'MIME-Version: 1.0\r\n\r\n' +
+        'Gracias por la respuesta anterior.\r\n',
+    );
+    const source = fakeMailSource({
+      uidsUnseen: [1],
+      sources: new Map([[1, mailReplyToUnmappedSlug]]),
+    });
+
+    await runTick(source, BASE_CONFIG, logger);
+
+    const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
+    expect(discardLine).toMatchObject({ motivo: 'es_respuesta' });
+    expect(discardLine).not.toHaveProperty('slug');
   });
 });
