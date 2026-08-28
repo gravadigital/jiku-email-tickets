@@ -82,26 +82,29 @@ pickRecipient(parsedMail); // 'tickets+alfa@grava.io' (raw, no slug extracted)
 
 ---
 
-## extractSenderEmail
+## extractAddress
 
 **Location:** `src/domain/ingesta/headers.ts`
 
-**Description:** Isolates the email address from a `Nombre <mail@dominio>`-style `From` header,
+**Description:** Isolates the email address from any `Nombre <mail@dominio>`-style header,
 preserving the original casing. Returns the trimmed address as-is when `from` is already a bare
-address, and `''` when `from` is `undefined`. Pure, never throws.
+address, and `''` when `from` is `undefined`. Pure, never throws. Renamed from `extractSenderEmail`
+in S-013 when `ruteo` started reusing it on `recipient` (not just `From`) — the old name would have
+misdescribed its input there.
 
 **Signature:**
 
 ```ts
-function extractSenderEmail(from: string | undefined): string
+function extractAddress(from: string | undefined): string
 ```
 
 **Usage example:**
 
 ```ts
-import { extractSenderEmail } from '#domain/ingesta/headers.js';
+import { extractAddress } from '#domain/ingesta/headers.js';
 
-extractSenderEmail('Juan Pérez <juan@cliente.com>'); // 'juan@cliente.com'
+extractAddress('Juan Pérez <juan@cliente.com>'); // 'juan@cliente.com'
+extractAddress('Soporte Tickets <TICKETS+Alfa@grava.io>'); // 'TICKETS+Alfa@grava.io'
 ```
 
 ---

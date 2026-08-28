@@ -7,10 +7,11 @@ Created by S-001 (bootstrap), extended by S-002 (typed configuration), S-003 (st
 redaction), S-004 (identity and the single bus connection), S-005 (publishing `requirements.new` and
 translating its errors), S-008 (pure mail normalization), S-009 (the `MailSource` port and its
 `imapflow` adapter), S-010 (the tick: cap, order, marking and failure isolation), S-011 (the
-no-overlap scheduler guard, `cron.schedule()` wiring, and the ordered shutdown on `SIGTERM`/`SIGINT`)
-and S-012 (the Ticket Map with its two exclusive sources, the subaddress prefix and the placeholders).
-The service is a `worker` in Node.js with no HTTP surface and no database, so several categories do
-not apply and stay empty until a story creates them.
+no-overlap scheduler guard, `cron.schedule()` wiring, and the ordered shutdown on `SIGTERM`/`SIGINT`),
+S-012 (the Ticket Map with its two exclusive sources, the subaddress prefix and the placeholders) and
+S-013 (the pure `routeMail()` decision tree and the single-source `MotivoDescarte`/`RouteResult`
+types). The service is a `worker` in Node.js with no HTTP surface and no database, so several
+categories do not apply and stay empty until a story creates them.
 
 ## Components
 
@@ -27,8 +28,9 @@ N/A (Backend service)
   `undefined`.
 - **pickRecipient()** (`src/domain/ingesta/headers.ts`) - First `Delivered-To`, `To` as fallback,
   `''` if neither. Deliberately does **not** join multiple `Delivered-To` values with `', '`.
-- **extractSenderEmail()** (`src/domain/ingesta/headers.ts`) - Isolates the address from a
-  `Nombre <mail>` display-name `From` header.
+- **extractAddress()** (`src/domain/ingesta/headers.ts`) - Isolates the address from any
+  `Nombre <mail>` display-name header. Renamed from `extractSenderEmail` in S-013 to reuse it on
+  `recipient`, not just `From`.
 - **toPlainText()** (`src/domain/ingesta/body.ts`) - Plain text part when present, or the HTML part
   converted with `html-to-text` when that is the only one. Requires `skipHtmlToText: true` at parse
   time or its branch selection breaks silently.
@@ -43,7 +45,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 18**
+**Total: 19**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -106,6 +108,9 @@ N/A (no HTTP surface - ADR-001)
   stops the scheduled task (if any), awaits any in-flight tick without ever canceling it, closes the
   bus, and exits with code `0`. All four dependencies are injected, so the ordering is testable by
   calling the handler directly — no real OS signal, no real timer.
+- **routeMail()** (`src/domain/ruteo/route-mail.ts`) - Pure decision tree that resolves the project a
+  mail routes to, or the discard reason: `es_respuesta` first (before touching the slug), then
+  `sin_slug`, then `slug_no_mapeado`, then the happy path. Never throws, never logs.
 
 See full details in [services.md](./services.md)
 
@@ -150,7 +155,7 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 24**
+**Total: 26**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -217,6 +222,12 @@ See full details in [test-helpers.md](./test-helpers.md)
   shutdown handler (`scheduledTask`, `waitForCurrentTick`, `closeBus`, `exit`), all received by
   parameter so `createShutdownHandler()` never imports `node:process` or the bus connection module
   directly.
+- **MotivoDescarte** (`src/shared/motivo-descarte.ts`) - The closed catalog of the five ADR-006
+  discard reasons, as a string-literal union (never a `enum`), in the single place both `ingesta`
+  and `ruteo` can import from without either depending on the other.
+- **RouteResult** (`src/shared/motivo-descarte.ts`) - `routeMail()`'s return type: the resolved
+  project, or a discard `motivo` with `slug` present **only** when it is `'slug_no_mapeado'` (an
+  optional key, not a `string | undefined` value, so the key's absence is itself the guarantee).
 
 See full details in [types.md](./types.md)
 

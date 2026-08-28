@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 
 import { toPlainText, trimQuotedText } from '#domain/ingesta/body.js';
 import { MissingMessageIdError } from '#domain/ingesta/errors.js';
-import { extractSenderEmail, mergeReferenceIds, pickRecipient } from '#domain/ingesta/headers.js';
+import { extractAddress, mergeReferenceIds, pickRecipient } from '#domain/ingesta/headers.js';
 import { cleanSubject } from '#domain/ingesta/subject.js';
 import type { IncomingMail, MailAttachment } from '#domain/ingesta/types.js';
 
@@ -63,7 +63,7 @@ export async function normalize(raw: Buffer, logger: Logger): Promise<IncomingMa
     messageId: parsed.messageId,
     referenceIds: mergeReferenceIds(parsed.inReplyTo, parsed.references),
     recipient: pickRecipient(parsed),
-    senderEmail: extractSenderEmail(parsed.from?.text),
+    senderEmail: extractAddress(parsed.from?.text),
     subject: cleanSubject(parsed.subject ?? ''),
     body,
     attachments,

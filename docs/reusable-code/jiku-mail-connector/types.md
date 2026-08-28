@@ -662,3 +662,52 @@ interface ShutdownDeps {
 full sequence in that case: no task to stop, but the bus still needs to close.
 
 ---
+
+## MotivoDescarte
+
+**Location:** `src/shared/motivo-descarte.ts`
+
+**Description:** The closed catalog of the five discard reasons ADR-006 defines, as a string-literal
+union — never a TypeScript `enum` — so the runtime values are exactly the lowercase strings the log
+line must carry, with no indirection. Lives in `shared`, not in `domain/ruteo`: `ingesta/normalize.ts`
+already produces two of the five (`no_parseable`, `sin_message_id`) and cannot import from `ruteo`
+without inverting the dependency direction CA-1 protects, so both modules import this one instead of
+either importing the other.
+
+**Interface:**
+
+```ts
+type MotivoDescarte =
+  | 'no_parseable'
+  | 'sin_message_id'
+  | 'es_respuesta'
+  | 'sin_slug'
+  | 'slug_no_mapeado';
+```
+
+**Notes:** Only the type is created here; `ingesta/normalize.ts`'s existing `'sin_message_id'`
+literal is left as-is (it is already a compatible string). Wiring every producer to this type
+explicitly is S-014's job, once the tick composes `ingesta` and `ruteo` together.
+
+---
+
+## RouteResult
+
+**Location:** `src/shared/motivo-descarte.ts`
+
+**Description:** The return type of `routeMail()`: either the resolved project, or the discard
+reason. The discard branch's `slug` is **optional** (`slug?`), not `string | undefined` — that
+distinction is what lets a test assert `'slug' in result === false` instead of trusting that nobody
+logs an `undefined` value. Present only when `motivo === 'slug_no_mapeado'` (the one case that needs
+the slug to load it into the map). No field is ever named `key`: `REDACT_PATHS` includes `'key'` and
+`'*.key'`, and a field called `key` would silently redact to `[REDACTED]` in the log.
+
+**Interface:**
+
+```ts
+type RouteResult =
+  | { readonly ok: true; readonly projectId: number; readonly slug: string }
+  | { readonly ok: false; readonly motivo: MotivoDescarte; readonly slug?: string };
+```
+
+---

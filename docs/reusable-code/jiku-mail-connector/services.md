@@ -776,3 +776,48 @@ process.on('SIGINT', () => void shutdown());
   something this handler needs to guard against.
 
 ---
+
+## routeMail()
+
+**Location:** `src/domain/ruteo/route-mail.ts`
+
+**Description:** Resolves the project a mail routes to, or the reason it is discarded. Pure,
+synchronous, never throws and never logs — the caller (the tick, in S-014) decides what to log from
+the `RouteResult` it gets back. Evaluates cheapest-first: `referenceIds.length > 0` short-circuits to
+`es_respuesta` before touching the slug at all (a reply never spends the regex or the map lookup);
+then isolates the address from `recipient` with `extractAddress()`, applies the case-insensitive
+`^<prefix>\+([^@]+)@` pattern (prefix built dynamically from config and escaped), lowercases the
+captured slug, and looks it up in `ticketMap` (already normalized to lowercase since S-012). A known,
+accepted false positive: a forwarded mail with a populated `References` and a legitimate new request
+still discards as `es_respuesta` — a deliberate degrade-to-discard decision (PRD decision 9, G-04),
+not a bug.
+
+**Signature:**
+
+```ts
+function routeMail(
+  mail: Pick<IncomingMail, 'referenceIds' | 'recipient'>,
+  config: Pick<RuteoConfig, 'ticketMap' | 'subaddressPrefix'>,
+): RouteResult;
+```
+
+**Usage example:**
+
+```ts
+import { routeMail } from '#domain/ruteo/route-mail.js';
+
+routeMail(
+  { referenceIds: [], recipient: 'tickets+alfa@grava.io' },
+  { ticketMap: new Map([['alfa', 42]]), subaddressPrefix: 'tickets' },
+); // { ok: true, projectId: 42, slug: 'alfa' }
+```
+
+**Notes:**
+
+- Does not import anything from `#domain/ingesta/*` besides `extractAddress` (value) and
+  `IncomingMail` (type-only), and nothing from `#domain/publicacion/*` — the module is a pure leaf
+  the tick composes, never the other way around.
+- The `slug` field is present in the discard result only when `motivo === 'slug_no_mapeado'`
+  (`'slug' in result`, not `result.slug !== undefined`) — see `RouteResult` in types.md.
+
+---

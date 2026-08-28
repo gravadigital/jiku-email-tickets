@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { simpleParser } from 'mailparser';
 import { describe, expect, it } from 'vitest';
 
-import { extractSenderEmail, mergeReferenceIds, pickRecipient } from '#domain/ingesta/headers.js';
+import { extractAddress, mergeReferenceIds, pickRecipient } from '#domain/ingesta/headers.js';
 
 const FIXTURES_DIR = fileURLToPath(new URL('../fixtures/mails/', import.meta.url));
 
@@ -80,23 +80,23 @@ describe('pickRecipient', () => {
   });
 });
 
-describe('extractSenderEmail', () => {
+describe('extractAddress', () => {
   it('isolates the address from a display-name form', () => {
     // TS-18
-    expect(extractSenderEmail('Juan Pérez <juan@cliente.com>')).toBe('juan@cliente.com');
+    expect(extractAddress('Juan Pérez <juan@cliente.com>')).toBe('juan@cliente.com');
   });
 
   it('returns the trimmed address as-is when From is a bare address', () => {
     // TS-19
-    expect(extractSenderEmail('juan@cliente.com')).toBe('juan@cliente.com');
+    expect(extractAddress('juan@cliente.com')).toBe('juan@cliente.com');
   });
 
   it('returns an empty string when there is no From header', () => {
     // TS-20
-    expect(extractSenderEmail(undefined)).toBe('');
+    expect(extractAddress(undefined)).toBe('');
   });
 
   it('never throws', () => {
-    expect(() => extractSenderEmail(undefined)).not.toThrow();
+    expect(() => extractAddress(undefined)).not.toThrow();
   });
 });
