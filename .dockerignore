@@ -1,0 +1,36 @@
+# Este archivo es la mitad de la garantia de "ningun secreto en la imagen" (CA-4), no una
+# optimizacion de tamaño. `COPY . .` mete el contexto de build entero, y el contexto de una maquina
+# de desarrollo incluye `.env.local`, `.env.test`, quiza una key JSON de desarrollo y el `.git`
+# completo con todo el historial. Esas son las vias por las que un secreto entra a la imagen sin que
+# nadie lo escriba.
+
+# El del host puede tener binarios de otra plataforma; cada etapa instala el suyo.
+node_modules
+
+# El artefacto se produce en la etapa `builder`, no se copia del host.
+dist
+
+.git
+.gitignore
+
+# Patron amplio a proposito, y sin excepciones — ni siquiera `.env.example`, que es documentacion
+# para humanos y no hace falta en la imagen. Una lista de nombres exactos se queda vieja y el
+# archivo que se cuela es siempre el que no estaba en ella.
+.env*
+
+# Credenciales por patron: keys, certificados y creds del bus.
+*.pem
+*.key
+*.creds
+
+# No aportan a ninguna etapa.
+docs
+coverage
+*.md
+.claude
+
+# NO se excluyen `test/`, `vitest.config.ts` ni `scripts/`, aunque no viajen a la imagen final.
+# `.dockerignore` excluye del CONTEXTO, asi que lo excluido no puede copiarse en NINGUNA etapa:
+# excluirlos dejaria la etapa `test` inservible. Que entren al contexto no debilita nada — CA-4 es
+# sobre secretos, y la etapa `production` no los copia, que es lo unico que decide el contenido de
+# la imagen.
