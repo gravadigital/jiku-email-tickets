@@ -79,7 +79,8 @@ future Zod version starts including the offending input in the issue.
 **Location:** `src/config/index.ts`
 
 **Description:** The process-wide configuration contract: the validated environment composed with the
-bus settings the SDK resolves. Consumed by S-003 (logger), S-004 (bus adapter) and S-005 (publishing).
+bus settings the SDK resolves. Consumed by S-003 (logger), S-004 (bus adapter), S-005 (publishing),
+and — through the two nested blocks S-007 added — S-009 (IMAP adapter) and S-011 (scheduler).
 
 **Interface:**
 
@@ -95,6 +96,21 @@ interface AppConfig {
   verifyProjectId: number;
   logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'silent';
   nodeEnv: 'development' | 'test' | 'production';
+  imap: ImapConfig;   // added by S-007
+  poll: PollConfig;   // added by S-007
+}
+
+interface ImapConfig {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+}
+
+interface PollConfig {
+  cron: string;
+  enabled: boolean;
+  maxPerTick: number;
 }
 ```
 
@@ -108,10 +124,24 @@ it to pick the format, and the expensive pretty mode must be asked for explicitl
 by omission. `logLevel` and `nodeEnv` are the two fields the logger consumes; it receives them as
 parameters because it must not read `process.env` itself.
 
-**Five of the ten fields must never reach a log line:** `credsFile` and `keyFile` (paths to secrets —
-where a secret lives is information about the secret), plus `zitadelProjectId` and `servers`
-(deployment topology). The startup line in `src/index.ts` deliberately carries only `instance`,
-`logLevel` and `timeoutMs`.
+**Twelve fields since S-007:** the ten flat ones plus the two nested blocks. `ImapConfig` and
+`PollConfig` are nested rather than seven loose fields because each consumer receives its whole
+configuration: with loose fields every new signature would enumerate four parameters and every
+consumer would have to recompose its own subset.
+
+**Fields that must never reach a log line:** `credsFile` and `keyFile` (paths to secrets — where a
+secret lives is information about the secret), `zitadelProjectId` and `servers` (deployment topology),
+and the whole `imap` block, `imap.password` above all. The startup line in `src/startup.ts`
+deliberately carries only `instance`, `logLevel` and `timeoutMs`.
+
+**The nesting carries a hazard, and it is closed by a rule rather than by a redaction path.**
+`imap.password` sits **three** levels deep if anyone logs the whole `AppConfig` inside a context, and
+Pino's `redact.paths` has **no deep wildcard** — at that depth the secret would come out **in the
+clear, without failing and without warning**. The defence is not to extend `REDACT_PATHS` (it would be
+endless and always one level behind) but the structural rule: **no log point emits the whole
+`AppConfig`**, asserted by a property test in `test/config/source-properties.test.ts` that scans every
+log call in `src/`. `test/shared/log-redaction.test.ts` documents the real boundary: root and one
+level are censored, three levels are not.
 
 ---
 

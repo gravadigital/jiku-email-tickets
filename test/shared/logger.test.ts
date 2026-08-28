@@ -35,6 +35,15 @@ const CFG: AppConfig = {
   verifyProjectId: 42,
   logLevel: 'info',
   nodeEnv: 'production',
+  // Los dos bloques anidados los agrega S-007. Los valores son los de prueba consistentes de toda
+  // la suite: TS-34 los busca literalmente en los streams del proceso real.
+  imap: {
+    host: 'imap.gmail.com',
+    port: 993,
+    user: 'tickets@ejemplo.com',
+    password: 'app-password-de-prueba',
+  },
+  poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
 };
 
 const cfg = (overrides: Partial<AppConfig> = {}): AppConfig => ({ ...CFG, ...overrides });
@@ -201,6 +210,10 @@ describe('createLogger level', () => {
       JIKU_KEY_FILE: '/run/secrets/machine-user.json',
       JIKU_PROJECT_ID: '307f1f77bcf86cd799439011',
       JIKU_VERIFY_PROJECT_ID: '42',
+      // Requeridas desde S-007: un entorno sin ellas ya no resuelve.
+      IMAP_HOST: 'imap.gmail.com',
+      IMAP_USER: 'tickets@ejemplo.com',
+      IMAP_PASSWORD: 'app-password-de-prueba',
     });
     const capture = createLogCapture();
 

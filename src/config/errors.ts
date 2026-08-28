@@ -8,8 +8,11 @@ import { AppError } from '#shared/errors/index.js';
  * `issue.path` y describe la variable desde aca. El `message` de Zod no se interpola nunca, asi que
  * un valor no puede llegar al mensaje ni siquiera si una version futura de Zod empieza a incluir el
  * input en el issue.
+ *
+ * Se exporta para que un test pueda afirmar la correspondencia BIDIRECCIONAL con `envSchema`: una
+ * variable futura sin entrada rompe la suite en vez de quedar muda en UNKNOWN_EXPECTATION.
  */
-const EXPECTATIONS: Record<string, string> = {
+export const EXPECTATIONS: Record<string, string> = {
   JIKU_CREDS: 'se esperaba una ruta no vacia al archivo creds del sentinel',
   JIKU_KEY_FILE: 'se esperaba una ruta no vacia a la key JSON del machine user',
   JIKU_PROJECT_ID: 'se esperaba el project id de Zitadel, no vacio',
@@ -20,6 +23,21 @@ const EXPECTATIONS: Record<string, string> = {
   JIKU_TIMEOUT: 'se esperaba un entero positivo de milisegundos',
   LOG_LEVEL: 'se esperaba uno de: trace, debug, info, warn, error, fatal, silent',
   NODE_ENV: 'se esperaba uno de: development, test, production',
+
+  // --- Casilla IMAP (S-007) ---
+  IMAP_HOST: 'se esperaba el host del servidor IMAP de la casilla, no vacio',
+  IMAP_PORT: 'se esperaba un entero entre 1 y 65535 (el puerto IMAP, por default 993)',
+  IMAP_USER: 'se esperaba el usuario de la casilla IMAP, no vacio',
+
+  // El texto NO describe el formato de un password ni da ninguna pista sobre su contenido. Es la
+  // primera variable del servicio cuyo VALOR es un secreto, asi que es el caso de mayor
+  // consecuencia de toda la tabla.
+  IMAP_PASSWORD: 'se esperaba la password de la casilla IMAP, no vacia',
+
+  // --- Poll (S-007) ---
+  POLL_CRON: 'se esperaba una expresion cron valida (la valida node-cron), por ejemplo */5 * * * *',
+  POLL_ENABLED: 'se esperaba uno de: true, false',
+  POLL_MAX_PER_TICK: 'se esperaba un entero mayor o igual a 1 (el maximo de mails por tick)',
 };
 
 const UNKNOWN_EXPECTATION = 'no paso la validacion declarada en el schema';

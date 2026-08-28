@@ -47,6 +47,15 @@ function configWith(keyFile: string): AppConfig {
     verifyProjectId: 42,
     logLevel: 'silent',
     nodeEnv: 'test',
+    // Los dos bloques anidados los agrega S-007. Los valores son los de prueba consistentes de toda
+    // la suite: TS-34 los busca literalmente en los streams del proceso real.
+    imap: {
+      host: 'imap.gmail.com',
+      port: 993,
+      user: 'tickets@ejemplo.com',
+      password: 'app-password-de-prueba',
+    },
+    poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
   };
 }
 

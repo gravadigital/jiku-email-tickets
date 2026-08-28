@@ -88,6 +88,56 @@ const DEFAULT_SERVERS_URL = 'nats://localhost:4222';
 
 ---
 
+## DEFAULT_IMAP_PORT
+
+**Location:** `src/config/schema.ts`
+
+**Description:** Default IMAP port, 993 (IMAPS — IMAP over implicit TLS), which is what Gmail exposes.
+Added by S-007. Exported as a named constant rather than left as a literal so S-009 can reference it
+without copying the value.
+
+**Signature:**
+
+```ts
+const DEFAULT_IMAP_PORT = 993;
+```
+
+---
+
+## DEFAULT_POLL_CRON
+
+**Location:** `src/config/schema.ts`
+
+**Description:** Default poll expression, every five minutes. Added by S-007. The tick never fires at
+startup: the first one arrives with the cron. The expression is validated at **startup** with
+`validate()` from `node-cron` — the very library that later schedules it — so a malformed one stops
+the process from starting instead of exploding later in `cron.schedule()`.
+
+**Signature:**
+
+```ts
+const DEFAULT_POLL_CRON = '*/5 * * * *';
+```
+
+---
+
+## DEFAULT_POLL_MAX_PER_TICK
+
+**Location:** `src/config/schema.ts`
+
+**Description:** Default cap of mails processed per tick, 50. Added by S-007. Bounds the work of a
+single tick so a mailbox with a backlog is not processed all at once. Consumed by the tick (S-010).
+The schema validates it with `.min(1)`, not `.positive()`: equivalent for integers, but `.min(1)` is
+what the criterion says literally and makes the error message read the same.
+
+**Signature:**
+
+```ts
+const DEFAULT_POLL_MAX_PER_TICK = 50;
+```
+
+---
+
 ## TEST_USER_ID
 
 **Location:** `test/bus/helpers.ts`

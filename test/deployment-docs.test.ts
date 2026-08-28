@@ -101,7 +101,9 @@ describe('README deployment section', () => {
     expect(deployment).toMatch(/escritura/i);
   });
 
-  it('documents the ten configuration variables the orchestrator injects', () => {
+  // Eran diez hasta S-006. S-007 sumo las cuatro de la casilla y las tres del poll: un operador
+  // que despliega de cero tiene que poder hacerlo leyendo esta seccion, sin abrir el codigo.
+  it('documents the seventeen configuration variables the orchestrator injects', () => {
     for (const variable of [
       'JIKU_CREDS',
       'JIKU_KEY_FILE',
@@ -113,9 +115,23 @@ describe('README deployment section', () => {
       'JIKU_TIMEOUT',
       'LOG_LEVEL',
       'NODE_ENV',
+      'IMAP_HOST',
+      'IMAP_PORT',
+      'IMAP_USER',
+      'IMAP_PASSWORD',
+      'POLL_CRON',
+      'POLL_ENABLED',
+      'POLL_MAX_PER_TICK',
     ]) {
       expect(deployment, `${variable} must be documented`).toContain(variable);
     }
+  });
+
+  // CA-10 desde el lado de la documentacion: para que un operador no busque una variable de
+  // carpeta que no existe.
+  it('states that INBOX is fixed and not configurable', () => {
+    expect(deployment).toContain('INBOX');
+    expect(deployment).toMatch(/no es configurable|fija/i);
   });
 
   // TS-33
@@ -155,5 +171,91 @@ describe('README deployment section', () => {
     // quien programa, las de despliegue las resuelve U-02 en tres sistemas que no son este repo.
     expect(readme).toContain('## Precondiciones');
     expect(readme.indexOf('## Precondiciones')).toBeLessThan(readme.indexOf('## Desplegar'));
+  });
+});
+
+/**
+ * TS-40 (S-007). `.env.example` es la lista canonica que se commitea, exigida por la convencion
+ * `env-config`. Es donde el proximo desarrollador busca que hay que configurar, asi que una
+ * variable declarada en el schema y ausente de aca es una variable invisible.
+ */
+describe('.env.example', () => {
+  let example: string;
+
+  beforeAll(async () => {
+    example = await readFile(new URL('.env.example', `file://${PROJECT_ROOT}`), 'utf8');
+  });
+
+  it('declares the three IMAP credentials as required', () => {
+    for (const name of ['IMAP_HOST', 'IMAP_USER', 'IMAP_PASSWORD']) {
+      const line = example.split('\n').find((l) => l.trimStart().startsWith(`${name}=`));
+
+      expect(line, `${name} must be declared`).toBeDefined();
+      expect(line, `${name} must be marked required`).toMatch(/REQUERIDA/);
+    }
+  });
+
+  it('declares the four optional variables with their literal default', () => {
+    for (const [name, fallback] of [
+      ['IMAP_PORT', '993'],
+      ['POLL_CRON', '*/5 * * * *'],
+      ['POLL_ENABLED', 'true'],
+      ['POLL_MAX_PER_TICK', '50'],
+    ] as const) {
+      const line = example.split('\n').find((l) => l.trimStart().startsWith(`${name}=`));
+
+      expect(line, `${name} must be declared`).toBeDefined();
+      expect(line, `${name} must state its default`).toMatch(/default/i);
+      expect(line, `${name} must name ${fallback}`).toContain(fallback);
+    }
+  });
+
+  it('notes that the IMAP password is an App Password that arrives by environment', () => {
+    expect(example).toMatch(/App Password/i);
+  });
+
+  // CA-10: la ausencia se lee como decision, no como olvido.
+  it('states that there is no folder variable because INBOX is fixed', () => {
+    expect(example).toContain('INBOX');
+    expect(example).not.toMatch(/^\s*IMAP_(FOLDER|MAILBOX|INBOX)=/m);
+  });
+
+  it('carries no real value: every declaration is an empty assignment', () => {
+    const declarations = example
+      .split('\n')
+      .filter((line) => /^[A-Z][A-Z0-9_]*=/.test(line.trimStart()));
+
+    expect(declarations.length).toBeGreaterThan(10);
+    for (const line of declarations) {
+      const [, afterEquals = ''] = line.trimStart().split(/=(.*)/s);
+      const value = afterEquals.split('#')[0] ?? '';
+
+      expect(value.trim(), `${line} must not carry a value`).toBe('');
+    }
+  });
+});
+
+/**
+ * TS-44 (S-007). Los dos tests que cambiaron de sentido se INVIRTIERON, no se borraron: un test
+ * borrado no deja rastro de que la regla cambio a proposito, y el proximo que lea el archivo no
+ * tiene forma de distinguir "esto se decidio" de "esto se perdio".
+ */
+describe('the two inverted test cases', () => {
+  const TEST_ROOT = fileURLToPath(new URL('.', import.meta.url));
+
+  it('keeps both cases alive, each naming S-007 as the story that inverted the rule', async () => {
+    for (const [file, caseName] of [
+      ['config/schema.test.ts', 'declares the four IMAP and three POLL variables'],
+      ['config/env.test.ts', 'does not resolve when no IMAP variable is present'],
+    ] as const) {
+      const source = await readFile(new URL(file, `file://${TEST_ROOT}`), 'utf8');
+
+      expect(source, `${file} must keep the inverted case`).toContain(caseName);
+      expect(source, `${file} must explain the inversion`).toContain('INVERTIDO EN S-007');
+      // Los enunciados viejos ya no pueden estar: si estuvieran, el caso se duplico en vez de
+      // invertirse, y la suite afirmaria las dos reglas opuestas a la vez.
+      expect(source).not.toContain('declares no IMAP or ticket-map variable in this scope');
+      expect(source).not.toContain('resolves without throwing when no IMAP');
+    }
   });
 });
