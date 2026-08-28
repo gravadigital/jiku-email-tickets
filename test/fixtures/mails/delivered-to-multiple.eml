@@ -1,0 +1,10 @@
+Message-Id: <delivered-to-multiple-001@fixtures.local>
+Delivered-To: tickets+alfa@grava.io
+Delivered-To: otro@grava.io
+From: cliente@cliente.com
+To: soporte@grava.io
+Subject: Dos Delivered-To
+Content-Type: text/plain; charset=utf-8
+MIME-Version: 1.0
+
+Mail con dos Delivered-To.

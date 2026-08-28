@@ -1,0 +1,18 @@
+Message-Id: <with-attachments-001@fixtures.local>
+From: cliente@cliente.com
+To: soporte@grava.io
+Subject: Con adjunto
+Content-Type: multipart/mixed; boundary="ATT-BOUNDARY"
+MIME-Version: 1.0
+
+--ATT-BOUNDARY
+Content-Type: text/plain; charset=utf-8
+
+Adjunto el documento solicitado.
+--ATT-BOUNDARY
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="reporte.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQgZmFrZSBwZGYgY29udGVudCBmb3IgZml4dHVyZSBwdXJwb3NlcyBvbmx5
+--ATT-BOUNDARY--

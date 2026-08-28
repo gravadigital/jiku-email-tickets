@@ -83,6 +83,19 @@ describe('package.json', () => {
     expect(allDependencies).not.toHaveProperty('@types/node-cron');
   });
 
+  // TS-48 (S-008). Las dos librerias de normalizacion son de PRODUCCION (viajan en la imagen); sus
+  // tipos van aparte como devDependency porque NINGUNO DE LOS DOS PAQUETES TRAE `.d.ts` PROPIOS
+  // (verificado desempaquetando los tarballs de mailparser@3.9.17 y html-to-text@10.0.1). No es una
+  // eleccion de estilo: sin el `@types/*` correspondiente el proyecto no tipa. Y ninguna quinta
+  // dependencia entra con ellas — en particular, ninguna libreria de recorte de texto citado
+  // (Riesgo 3 del REQ-002: esa heuristica se porta del servicio existente, no se reinventa).
+  it('declares mailparser and html-to-text as production deps with separate type packages', () => {
+    expect(manifest.dependencies?.mailparser).toMatch(/^\^3\./);
+    expect(manifest.dependencies?.['html-to-text']).toMatch(/^\^10\./);
+    expect(manifest.devDependencies?.['@types/mailparser']).toBeDefined();
+    expect(manifest.devDependencies?.['@types/html-to-text']).toBeDefined();
+  });
+
   it('declares the build, test and start scripts', () => {
     expect(manifest.scripts).toHaveProperty('build');
     expect(manifest.scripts).toHaveProperty('test');

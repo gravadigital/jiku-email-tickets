@@ -1,0 +1,8 @@
+Message-Id: <html-only-001@fixtures.local>
+From: sender@cliente.com
+To: soporte@grava.io
+Subject: Reporte en HTML
+Content-Type: text/html; charset=utf-8
+MIME-Version: 1.0
+
+<p>Hola</p><p><img src="logo.png"> mira <a href="http://x">acá</a></p>

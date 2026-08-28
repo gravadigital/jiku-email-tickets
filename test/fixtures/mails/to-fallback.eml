@@ -1,0 +1,8 @@
+Message-Id: <to-fallback-001@fixtures.local>
+From: cliente@cliente.com
+To: tickets+beta@grava.io
+Subject: Sin Delivered-To
+Content-Type: text/plain; charset=utf-8
+MIME-Version: 1.0
+
+Mail sin Delivered-To, con To como fallback.

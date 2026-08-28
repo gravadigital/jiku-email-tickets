@@ -1,0 +1,18 @@
+Message-Id: <attachment-without-filename-001@fixtures.local>
+From: cliente@cliente.com
+To: soporte@grava.io
+Subject: Adjunto sin nombre
+Content-Type: multipart/mixed; boundary="NONAME-BOUNDARY"
+MIME-Version: 1.0
+
+--NONAME-BOUNDARY
+Content-Type: text/plain; charset=utf-8
+
+Un adjunto sin filename declarado.
+--NONAME-BOUNDARY
+Content-Type: application/octet-stream
+Content-Disposition: attachment
+Content-Transfer-Encoding: base64
+
+Y29udGVuaWRvIHNpbiBub21icmUgZGUgYXJjaGl2bw==
+--NONAME-BOUNDARY--

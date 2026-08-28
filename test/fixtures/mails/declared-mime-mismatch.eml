@@ -1,0 +1,18 @@
+Message-Id: <declared-mime-mismatch-001@fixtures.local>
+From: cliente@cliente.com
+To: soporte@grava.io
+Subject: Mime declarado no coincide
+Content-Type: multipart/mixed; boundary="MIME-BOUNDARY"
+MIME-Version: 1.0
+
+--MIME-BOUNDARY
+Content-Type: text/plain; charset=utf-8
+
+El adjunto dice ser PDF pero es texto plano.
+--MIME-BOUNDARY
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="no-es-pdf.pdf"
+Content-Transfer-Encoding: base64
+
+ZXN0byBlcyB0ZXh0byBwbGFubywgbm8gdW4gcGRmIHJlYWw=
+--MIME-BOUNDARY--
