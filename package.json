@@ -16,7 +16,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
-    "verify": "node --input-type=module -e \"console.error('El modo de verificacion se implementa en S-005.'); process.exit(1);\"",
+    "verify": "node dist/verify.js",
     "test": "vitest run",
     "test:teardown": "vitest run && node scripts/verify-teardown.mjs"
   },

@@ -287,3 +287,189 @@ function closeBus(): Promise<void>;
   24 and is a **syntax error** on Node 22, this service's runtime.
 - Production does not call it in this scope: the process stays alive with the connection open and S-005
   inherits it. It exists for tests and for the ordered shutdown that arrives with FG-2's tick.
+
+---
+
+## runStartup()
+
+**Location:** `src/startup.ts`
+
+**Description:** The startup sequence shared by both entry points: load configuration → build the
+logger → log `configuracion valida` → build the identity → connect → log `conectado al bus`. Returns
+the three things the caller needs to keep working.
+
+**Signature:**
+
+```ts
+interface Startup {
+  readonly config: AppConfig;
+  readonly logger: Logger;
+  readonly client: Client;
+}
+
+function runStartup(): Promise<Startup>;
+```
+
+**Usage:**
+
+```ts
+const { config, logger, client } = await runStartup();
+```
+
+**Notes:**
+
+- Extracted by S-005 because the repo now has **two** processes that start the same way: the worker
+  (`npm run start`) and the verification mode (`npm run verify`). Copying the sequence would produce
+  two startups that diverge on the first change, and the one that would diverge silently is the one
+  that is almost never run.
+- Extracting it does **not** introduce a second connection: `connectToBus()` still retains the client
+  and still has the counter that asserts one `connect()` per process (ADR-002).
+- It does **not** publish anything, and must not: `start` publishing a command would leave a permanent
+  requirement in Jiku on every restart (invariant 9, no compensating command). There is a property
+  test that asserts `startup.ts` imports nothing from `#domain/publicacion/`.
+
+---
+
+## reportStartupFailure()
+
+**Location:** `src/startup.ts`
+
+**Description:** Reports a startup failure through the channel that matches the moment it happened.
+
+**Signature:**
+
+```ts
+function reportStartupFailure(error: unknown): void;
+```
+
+**Notes:**
+
+- `ConfigValidationError` goes to **stderr**, not through the logger, and the asymmetry is deliberate:
+  step 1 (validation) fails **before the logger exists**. From step 2 onwards failures go through the
+  logger with `fatal`.
+- `KeyLoadError` and `BusConnectError` go through the logger, with a flat context carrying the
+  diagnosis — which system refused — because the fixes live in different places.
+- Extracted so the two entry points do not keep two copies of the same reporting logic.
+
+---
+
+## publishVerificationRequirement()
+
+**Location:** `src/domain/publicacion/publish-requirement.ts`
+
+**Description:** Publishes the fixed `requirements.new` payload, validates the reply, logs the success
+line with `{ projectId, requirementId }` together, and translates any failure into a `PublishError`.
+The first code in this repo that **writes** to Jiku.
+
+**Signature:**
+
+```ts
+interface PublishVerificationRequirementDeps {
+  readonly client: Client;
+  readonly projectId: number;
+  readonly logger: Logger;
+}
+
+function publishVerificationRequirement(
+  deps: PublishVerificationRequirementDeps,
+): Promise<{ requirementId: number }>;
+```
+
+**Usage:**
+
+```ts
+const { requirementId } = await publishVerificationRequirement({
+  client,
+  projectId: config.verifyProjectId,
+  logger,
+});
+```
+
+**Notes:**
+
+- Dependencies arrive **by parameter**, not by importing a singleton: that is what lets a test inject
+  the capture logger and the test client without touching process state — the same criterion as
+  `connectToBus()`.
+- Calls `client.command(COMMAND, payload)` with **two arguments, not three**. The third (`options`) is
+  where the timeout would get lowered by accident, and ADR-006 forbids that explicitly. The `options`
+  argument is used **only from tests**.
+- The payload is validated **before** publishing. An invalid payload is not published: it would spend
+  a round-trip for `core` to answer `invalid_fields` about something the connector already knew was
+  wrong, and it would muddy the diagnosis (a refusal by shape means "the plane is open", and here it
+  would prove nothing).
+- **The reply is validated**, because `command<T>()` returns `reply.data` without checking it against
+  `T`. A `core` answering `{ status: 'success', data: {} }` would produce the line CA-1 requires with
+  `requirementId: undefined` — formally present, materially useless, and without anything failing.
+- **No retry anywhere**: no `for`, no `while`, no backoff. Without idempotency and without a
+  compensating command, a retry creates two requirements where there should have been one — and
+  neither can be deleted.
+- The `catch` translates and **rethrows** after logging: the verification mode must exit non-zero.
+  Logging and returning a partial success would make the operator conclude the write plane is open
+  when it is not.
+- The log lives in this function, not in the entry point, so the line exists no matter who calls —
+  which is what FG-3 inherits when the caller becomes the tick instead of the script.
+
+---
+
+## diagnosePublishFailure()
+
+**Location:** `src/domain/publicacion/publish-errors.ts`
+
+**Description:** Classifies a publication failure into the diagnosis of **which of the three systems
+refused**: the bus by subject, `core` by role, or `core` by shape.
+
+**Signature:**
+
+```ts
+function diagnosePublishFailure(error: unknown): PublishDiagnosis;
+```
+
+**Notes:**
+
+- Discriminates by **SDK class** (`instanceof`) and by **error code** (`isCode`), never by the text of
+  the message (ADR-002).
+- **The order of the branches matters and is not interchangeable.** `JikuFailure` is evaluated before
+  any generic `isJikuError` branch, and the code branches live inside it. Written the other way round,
+  a `caller_not_authorized` would fall into `'desconocido'` and the most valuable diagnosis of the set
+  — the only one that fixes itself by reconnecting — would be lost.
+- **There is no exhaustive `switch` on codes**, and there must never be one: the SDK's catalog is not
+  closed. `core` owns it and grows it. The SDK's own docs say *"Use `isCode`, never a `switch` with a
+  `default` that assumes it has seen everything"*. An unrecognised code is a **normal, expected**
+  outcome that maps to `'core_rechazo_desconocido'`.
+- Codes come from the SDK's `ErrorCode` constant, never from hand-written string literals: a typo in a
+  literal produces a silently wrong diagnosis.
+- Returning `'desconocido'` is a legitimate result and is never mapped to something else. A wrong
+  diagnosis is worse than an absent one: it sends the operator to the wrong system.
+
+---
+
+## hintOf() / codeOf() / coreMessageOf()
+
+**Location:** `src/domain/publicacion/publish-errors.ts`
+
+**Description:** Safe accessors for what `core` sent with a failure.
+
+**Signature:**
+
+```ts
+function hintOf(error: unknown): string | undefined;
+function codeOf(error: unknown): string | undefined;
+function coreMessageOf(error: unknown): string | undefined;
+```
+
+**Notes:**
+
+- **`hintOf()` exists because of a verified SDK finding, and this is the entry most likely to be
+  "simplified" into a bug.** `hint()` is declared **only on `JikuFailure`**. `JikuTimeout`,
+  `JikuNoEndpoint`, `JikuPermissionDenied` and `JikuInvalidRequest` extend `JikuError`, which does not
+  declare it — calling `error.hint()` on any of them is a **`TypeError`**, and it would happen at the
+  worst possible moment: when the connector is already failing and the log is all that is left.
+- It is a **function and not an inline access** so that there is exactly **one** place where the
+  decision to call `hint()` is made. An `error instanceof JikuFailure ? error.hint() : undefined`
+  repeated in two log points is how the third one gets written without the guard. A property test
+  asserts there is exactly one `.hint()` call site in `src/`.
+- `hint()` legitimately returns `undefined` for **`project_not_found`** and for **every unknown code**
+  — the SDK's hint catalog does not cover them and its `default` returns `undefined`. Those are exactly
+  the two cases CA-9 and CA-13 ask to log "with its `hint()`". The honest thing is to **omit** the
+  field; what travels instead is `code` + `errorMessage`, and that is the real diagnostic data there.
+  **Do not invent text to paper over the absence.**

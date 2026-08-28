@@ -128,10 +128,15 @@ describe('src/ bus source properties', () => {
   it('reads the identity off the client rather than declaring it', () => {
     // La contracara del test anterior: el user-id que se loguea sale del Client —que lo derivo del
     // `sub` del token, que a su vez salio de la key— y no de un valor que el conector declare.
-    const index = FILES.find((file) => file.relativePath === 'index.ts');
+    //
+    // La linea de arranque vive en `startup.ts` desde S-005, no en `index.ts`: la secuencia se
+    // extrajo para que los DOS entry points (`start` y `verify`) la reusen sin duplicarla. Lo que
+    // se afirma es la propiedad, no el archivo donde estaba.
+    const startup = FILES.find((file) => file.relativePath === 'startup.ts');
 
-    expect(index?.code).toMatch(/client\.userId/);
-    expect(index?.code).toMatch(/client\.inboxPrefix/);
+    expect(startup, 'the shared startup sequence must be findable').toBeDefined();
+    expect(startup?.code).toMatch(/client\.userId/);
+    expect(startup?.code).toMatch(/client\.inboxPrefix/);
   });
 
   // TS-18
@@ -142,10 +147,21 @@ describe('src/ bus source properties', () => {
     //
     // No es un `grep 'users'` a secas —la palabra puede aparecer en una URL o un identificador—
     // sino una asercion sobre lo que importaria de verdad.
+    //
+    // ACTUALIZADO EN S-005: hasta S-004 ningun archivo publicaba comandos y la asercion podia ser
+    // "ningun `.command(` en ningun lado". S-005 introduce exactamente UNO —`requirements.new`, en
+    // `domain/publicacion/publish-requirement.ts`— asi que la propiedad que sigue valiendo es mas
+    // precisa: el conector no publica NINGUN comando relacionado con `users`, y publica solo desde
+    // el unico archivo autorizado. La cota de cuantos y cuales comandos existen la afirma
+    // `test/publicacion/source-properties.test.ts`; lo que se defiende aca es la fila en `users`.
+    const PUBLISHER = `domain${sep}publicacion${sep}publish-requirement.ts`;
+
     for (const file of FILES) {
-      expect(file.code, `${file.relativePath} must not publish a command`).not.toMatch(
-        /\.command\s*\(/,
-      );
+      if (file.relativePath !== PUBLISHER) {
+        expect(file.code, `${file.relativePath} must not publish a command`).not.toMatch(
+          /\.command\s*\(/,
+        );
+      }
       expect(file.code, `${file.relativePath} must not name the users command`).not.toMatch(
         /['"`]users\.[a-z]+['"`]/,
       );
@@ -153,6 +169,12 @@ describe('src/ bus source properties', () => {
         /\bINSERT\s+INTO\b/i,
       );
     }
+
+    // Y el unico publicador publica el comando de requisitos, nunca uno de `users`: la fila la crea
+    // Jiku sola en la primera autenticacion, y el conector no la crea ni la pide (G-03, ADR-005).
+    const publisher = FILES.find((file) => file.relativePath === PUBLISHER);
+    expect(publisher, 'the single publisher must be findable').toBeDefined();
+    expect(publisher?.code).not.toMatch(/['"`]users\./);
   });
 
   it('declares no database client, as ADR-001 forbids', () => {

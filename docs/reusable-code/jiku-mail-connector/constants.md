@@ -227,3 +227,105 @@ identity doubles declare.
 
 - Literals rather than random values on purpose: they make the tests readable, and there is nothing to
   protect in an ephemeral container that lives as long as one test file.
+
+---
+
+## TITLE_MAX_LENGTH
+
+**Location:** `src/domain/publicacion/requirement.schema.ts`
+
+**Description:** The maximum length of a requirement `title`: **255**.
+
+**Signature:**
+
+```ts
+const TITLE_MAX_LENGTH = 255;
+```
+
+**Notes:**
+
+- The command contract does **not** declare a `maxLength`, but Jiku's column is `varchar(255)`: a
+  longer title is either refused by `core` with `invalid_fields` or truncated by the database.
+- Exported rather than inlined because **FG-3 needs it to truncate** (ADR-003: "`title` MUST truncarse
+  a 255 caracteres antes de publicar"). Here it only validates; there it truncates. Exporting it now
+  keeps FG-3 from writing a literal `255` in another file, where the two could drift.
+
+---
+
+## VERIFY_TITLE / VERIFY_DESCRIPTION
+
+**Location:** `src/domain/publicacion/verification-payload.ts`
+
+**Description:** The code literals of the verification requirement's title and description.
+
+**Notes:**
+
+- Their text says outright that the requirement is a **deployment check**, and that matters because
+  **the requirement stays forever**: there is no compensating command and a created requirement is
+  never modified or deleted (invariant 9). Whoever finds it in the Jiku project has to recognise it as
+  not-real-work without asking anyone.
+- The description also says the connector cannot delete it and that every run leaves a new one.
+
+---
+
+## VERIFY_TYPE / VERIFY_PRIORITY / VERIFY_VISIBILITY_LEVEL
+
+**Location:** `src/domain/publicacion/verification-payload.ts`
+
+**Description:** The connector's defaults: `'incidencia'`, `'sin_prioridad'`, `'public'`.
+
+**Notes:**
+
+- They are **policy of the connector**, not of the contract — in the contract all three fields are
+  required. That is precisely why they live in the payload builder and **not** as `.default()` in the
+  schema: mixing the two would make an empty object parse into a "valid" payload.
+
+---
+
+## REQUIREMENT_TYPES / REQUIREMENT_PRIORITIES / REQUIREMENT_VISIBILITY_LEVELS
+
+**Location:** `src/domain/publicacion/requirement.schema.ts`
+
+**Description:** The contract enums of `requirements.new`, verbatim from the API context.
+
+---
+
+## REMEDIES
+
+**Location:** `src/domain/publicacion/publish-errors.ts`
+
+**Description:** What to check for each `PublishDiagnosis`. The operator-facing half of the story's
+central deliverable.
+
+**Signature:**
+
+```ts
+const REMEDIES: Record<PublishDiagnosis, string>;
+```
+
+**Notes:**
+
+- Each text names **the system** and **the fix**, because the three systems have three different
+  fixes and the worst real case is checking the payload when the problem is in Zitadel.
+- Three texts carry specific claims the story requires: the bus one says it **implies nothing about
+  `core`**; the two shape ones say they are **proof that the write plane is open**; the role one says
+  it is typically the missing `users` row and that **reconnecting fixes it by itself**.
+- The timeout figure in `nada_respondio` is interpolated from `MIN_TIMEOUT_MS`, **not written as a
+  literal**, even though it is prose: two copies would drift and the remedy would claim one number
+  while the process waits for another — exactly the misleading diagnosis this module exists to
+  prevent. A property test forbids the literal outside `src/config/`.
+
+---
+
+## MUTE
+
+**Location:** `test/bus/responder.ts`
+
+**Description:** Responder mode that receives a message and does **not** answer.
+
+**Notes:**
+
+- It is how `JikuTimeout` is provoked without turning anything off: the message arrives — so the
+  counter records it, which is what proves the publication **did** reach the wire — and nobody
+  answers. Different from having **no** responder, which yields `JikuNoEndpoint` immediately
+  (measured: 11 ms).
