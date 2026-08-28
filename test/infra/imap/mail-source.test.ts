@@ -27,6 +27,12 @@ function configWith(): AppConfig {
     nodeEnv: 'test',
     imap: { host: 'imap.test', port: 993, user: 'u', password: 'p' },
     poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
+    ruteo: {
+      ticketMap: new Map([['alfa', 42]]),
+      subaddressPrefix: 'tickets',
+      placeholderTitle: 'Ticket recibido por mail',
+      placeholderBody: '(mail sin contenido)',
+    },
   };
 }
 

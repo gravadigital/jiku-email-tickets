@@ -7,9 +7,12 @@ import { readSource } from '../shared/source-scan.js';
 import {
   DEFAULT_IMAP_PORT,
   DEFAULT_ISSUER,
+  DEFAULT_PLACEHOLDER_BODY,
+  DEFAULT_PLACEHOLDER_TITLE,
   DEFAULT_POLL_CRON,
   DEFAULT_POLL_MAX_PER_TICK,
   DEFAULT_SERVERS_URL,
+  DEFAULT_SUBADDRESS_PREFIX,
   MIN_TIMEOUT_MS,
   envSchema,
 } from '#config/schema.js';
@@ -17,10 +20,11 @@ import {
 const schema = z.object(envSchema);
 
 /**
- * Entorno minimo valido: las siete requeridas.
+ * Entorno minimo valido: las ocho requeridas.
  *
  * Eran cuatro hasta S-006. S-007 sumo las tres credenciales de la casilla IMAP, que pasaron a ser
- * requeridas con la ingesta en alcance.
+ * requeridas con la ingesta en alcance. S-012 sumo el Mapa de Tickets: con el ruteo en alcance
+ * pasa a ser requerido (supersede el criterio 40 de REQ-002).
  */
 const VALID_ENV = {
   JIKU_CREDS: '/run/secrets/sentinel.creds',
@@ -30,6 +34,7 @@ const VALID_ENV = {
   IMAP_HOST: 'imap.gmail.com',
   IMAP_USER: 'tickets@ejemplo.com',
   IMAP_PASSWORD: 'app-password-de-prueba',
+  TICKET_MAP: '{"alfa":42,"beta":7}',
 };
 
 describe('envSchema constants', () => {
@@ -114,24 +119,32 @@ describe('envSchema', () => {
     ]);
   });
 
-  // INVERTIDO EN S-007, no borrado. Hasta S-006 este caso afirmaba que NINGUNA clave empezaba con
-  // 'IMAP_': la ingesta no estaba en alcance y las variables de la casilla eran opcionales por
-  // ausencia. Con FG-2 en alcance dejan de serlo, y un test borrado no dejaria rastro de que la
-  // regla cambio a proposito. Lo que NO cambio: las del Mapa de Tickets siguen ausentes (FG-3).
-  // (TS-25, TS-42)
-  it('declares the four IMAP and three POLL variables, and still no ticket-map one', () => {
+  // INVERTIDO EN S-012, no borrado. La primera mitad la INVIRTIO S-007 (hasta S-006 afirmaba que
+  // NINGUNA clave empezaba con 'IMAP_'); la segunda la invierte S-012. Hasta S-011 este caso
+  // afirmaba que las del Mapa de Tickets seguian ausentes porque FG-3 no estaba en alcance: con el
+  // ruteo en alcance el mapa pasa a ser requerido, y un test borrado no dejaria rastro de que la
+  // regla cambio a proposito.
+  // (TS-25, TS-36, TS-42)
+  it('declares the four IMAP and three POLL variables, and the five routing ones', () => {
     const declared = Object.keys(envSchema);
 
-    // Diecisiete desde S-007: las diez de S-003 mas las siete de la casilla y del poll.
-    expect(declared).toHaveLength(17);
+    // Veintidos desde S-012: las diecisiete de S-007 mas las cinco del ruteo.
+    expect(declared).toHaveLength(22);
     for (const name of ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASSWORD']) {
       expect(declared, name).toContain(name);
     }
     for (const name of ['POLL_CRON', 'POLL_ENABLED', 'POLL_MAX_PER_TICK']) {
       expect(declared, name).toContain(name);
     }
-    expect(declared.some((key) => key.includes('TICKET'))).toBe(false);
-    expect(declared.some((key) => key.startsWith('MAP'))).toBe(false);
+    for (const name of [
+      'TICKET_MAP',
+      'TICKET_MAP_FILE',
+      'SUBADDRESS_PREFIX',
+      'PLACEHOLDER_TITLE',
+      'PLACEHOLDER_BODY',
+    ]) {
+      expect(declared, name).toContain(name);
+    }
   });
 
   // TS-24. INBOX es fija y no configurable en v1: vive como constante del modulo de ingesta, no
@@ -321,14 +334,17 @@ describe('envSchema IMAP requirement independence', () => {
     ).toEqual(['IMAP_HOST', 'IMAP_PASSWORD', 'IMAP_USER']);
   });
 
-  // TS-22. Sin logica condicional: el schema las declara requeridas y punto. Un schema condicional
-  // convertiria un interruptor en dos configuraciones validas distintas, y la segunda no la
-  // ejercita nadie.
+  // TS-22, TS-41. ACOTADO EN S-012, no borrado. La prohibicion nacio en S-007 sobre el interruptor
+  // `POLL_ENABLED` —"un schema condicional convertiria un interruptor en dos configuraciones
+  // validas distintas, y la segunda no la ejercita nadie"— pero se escribio como una prohibicion
+  // global de `superRefine` sobre el archivo entero. S-012 la acota a su intencion: la validacion
+  // cruzada de las dos fuentes del Mapa de Tickets es de otra naturaleza (no ramifica el schema:
+  // lo valida), asi que la prohibicion de `superRefine` se levanta SOLO para `config/schema.ts`.
+  // En `config/index.ts` se conserva tal cual, porque el compositor efectivamente no valida nada.
   it('implements that requirement with no conditional logic at all', () => {
     for (const relative of ['config/schema.ts', 'config/index.ts']) {
       const code = readSource(relative);
 
-      expect(code, relative).not.toMatch(/superRefine/);
       expect(code, relative).not.toMatch(/discriminatedUnion/);
       // Ninguna rama condicional sobre el interruptor del poll.
       expect(code, relative).not.toMatch(/if\s*\([^)]*POLL_ENABLED/);
@@ -336,6 +352,9 @@ describe('envSchema IMAP requirement independence', () => {
       expect(code, relative).not.toMatch(/POLL_ENABLED[^\n]*\?[^\n]*:/);
       expect(code, relative).not.toMatch(/poll\.enabled[^\n]*\?[^\n]*:/);
     }
+
+    // El compositor sigue sin validar nada: toda la logica quedo en el schema.
+    expect(readSource('config/index.ts')).not.toMatch(/superRefine/);
 
     const schemaSource = readSource('config/schema.ts');
     for (const name of ['IMAP_HOST', 'IMAP_USER', 'IMAP_PASSWORD']) {
@@ -348,5 +367,147 @@ describe('envSchema IMAP requirement independence', () => {
   // TS-12 (parte de codigo): el schema no lee el entorno por su cuenta.
   it('never mentions process.env in the schema module', () => {
     expect(readSource('config/schema.ts')).not.toMatch(/process\.env/);
+  });
+});
+
+/**
+ * El Mapa de Tickets (S-012).
+ *
+ * La carga vive en el `.transform()` de cada clave y no en un refinement sobre el objeto: es lo que
+ * hace que sus fallos entren como un issue mas en la lista unica que arma `parseWithDictionary()`
+ * de `@t3-oss/env-core`. Estos casos ejercitan el schema desnudo; la regla cross-field de las dos
+ * fuentes se prueba desde `loadEnv()` en `env.test.ts`, que es donde vive.
+ */
+describe('envSchema TICKET_MAP', () => {
+  /** El Map resuelto de un entorno valido, ya normalizado. */
+  function mapOf(raw: string): ReadonlyMap<string, number> {
+    return schema.parse({ ...VALID_ENV, TICKET_MAP: raw }).TICKET_MAP as ReadonlyMap<string, number>;
+  }
+
+  function failsOn(raw: string): void {
+    const result = schema.safeParse({ ...VALID_ENV, TICKET_MAP: raw });
+
+    expect(result.success, raw).toBe(false);
+    expect(result.error?.issues.map((i) => i.path[0]), raw).toContain('TICKET_MAP');
+  }
+
+  // TS-16
+  it('normalizes the slugs to lowercase while loading', () => {
+    const map = mapOf('{"Alfa":42,"BETA":7}');
+
+    expect([...map.entries()]).toEqual([
+      ['alfa', 42],
+      ['beta', 7],
+    ]);
+    expect(map.get('alfa')).toBe(42);
+  });
+
+  // TS-18. La AUSENCIA no arranca (se prueba en env.test.ts, es cross-field); el mapa VACIO si.
+  // Es la diferencia entre una decision del operador y un olvido de configuracion.
+  it('accepts an empty map as a valid state', () => {
+    const map = mapOf('{}');
+
+    expect(map.size).toBe(0);
+  });
+
+  // TS-5
+  it('rejects content that is not parseable JSON', () => {
+    failsOn('{alfa: 42');
+  });
+
+  // TS-6, TS-7
+  it('rejects JSON that is not an object of pairs', () => {
+    failsOn('[1,2,3]');
+    failsOn('"alfa"');
+    failsOn('42');
+  });
+
+  // TS-8, TS-9
+  it('rejects a projectId that is not a positive integer', () => {
+    failsOn('{"alfa":2.5}');
+    failsOn('{"alfa":0}');
+    failsOn('{"alfa":-3}');
+  });
+
+  // TS-10. No se coerce: un projectId como string es un mapa mal escrito, no un valor a rescatar.
+  it('does not coerce a projectId given as a string', () => {
+    failsOn('{"alfa":"42"}');
+  });
+
+  // TS-11. La clave se recorta antes de evaluarla, asi que un slug de solo espacios es vacio.
+  it('rejects an empty slug', () => {
+    failsOn('{"":42}');
+    failsOn('{"   ":42}');
+  });
+
+  // TS-12
+  it('rejects slugs that collapse into the same key once trimmed', () => {
+    failsOn('{"alfa":42,"alfa ":7}');
+  });
+
+  // TS-13. El caso que JSON.parse NO resuelve solo: son dos claves distintas hasta que se
+  // normalizan, y es el error que un operador comete de verdad.
+  it('rejects slugs that only differ in casing', () => {
+    failsOn('{"Alfa":42,"alfa":7}');
+  });
+
+  // TS-20. DOCUMENTA la limitacion, no la finge cumplida: con la clave EXACTAMENTE repetida el
+  // parser ya resolvio el duplicado antes de que el conector vea nada, y gana la ultima. Lo que si
+  // se garantiza es que el resultado nunca es un ruteo arbitrario silencioso: aca el valor es
+  // deterministico, y el caso real (claves que difieren en casing) no arranca (TS-13).
+  it('cannot detect an exactly repeated key, because JSON.parse already deduplicated it', () => {
+    const map = mapOf('{"alfa":42,"alfa":7}');
+
+    expect(map.get('alfa')).toBe(7);
+    expect(map.size).toBe(1);
+  });
+
+  // TS-21. ADR-004: el conector no verifica contra Jiku que el proyecto exista. El sintoma aparece
+  // por mail, como `project_not_found`.
+  it('accepts a projectId that does not exist in Jiku, without consulting anything', () => {
+    expect(mapOf('{"alfa":999999999}').get('alfa')).toBe(999_999_999);
+  });
+});
+
+describe('envSchema routing defaults', () => {
+  // TS-24
+  it('exposes the three routing defaults as named constants', () => {
+    expect(DEFAULT_SUBADDRESS_PREFIX).toBe('tickets');
+    expect(DEFAULT_PLACEHOLDER_TITLE).toBe('Ticket recibido por mail');
+    expect(DEFAULT_PLACEHOLDER_BODY).toBe('(mail sin contenido)');
+  });
+
+  // TS-23
+  it('applies the three defaults when nothing is configured', () => {
+    const parsed = schema.parse(VALID_ENV);
+
+    expect(parsed.SUBADDRESS_PREFIX).toBe('tickets');
+    expect(parsed.PLACEHOLDER_TITLE).toBe('Ticket recibido por mail');
+    expect(parsed.PLACEHOLDER_BODY).toBe('(mail sin contenido)');
+  });
+
+  // TS-25
+  it('prefers a configured value over the default', () => {
+    const parsed = schema.parse({
+      ...VALID_ENV,
+      SUBADDRESS_PREFIX: 'soporte',
+      PLACEHOLDER_TITLE: 'Sin asunto',
+      PLACEHOLDER_BODY: 'Sin cuerpo',
+    });
+
+    expect(parsed.SUBADDRESS_PREFIX).toBe('soporte');
+    expect(parsed.PLACEHOLDER_TITLE).toBe('Sin asunto');
+    expect(parsed.PLACEHOLDER_BODY).toBe('Sin cuerpo');
+  });
+
+  // TS-26. El string vacio lo convierte `emptyStringAsUndefined` en ausente (y cae al default), asi
+  // que el caso que hay que probar de verdad es un valor SOLO de espacios, que si llega como valor.
+  it('rejects a value made only of whitespace', () => {
+    for (const name of ['SUBADDRESS_PREFIX', 'PLACEHOLDER_TITLE', 'PLACEHOLDER_BODY'] as const) {
+      const result = schema.safeParse({ ...VALID_ENV, [name]: '   ' });
+
+      expect(result.success, name).toBe(false);
+      expect(result.error?.issues.map((i) => i.path[0]), name).toContain(name);
+    }
   });
 });

@@ -138,6 +138,59 @@ const DEFAULT_POLL_MAX_PER_TICK = 50;
 
 ---
 
+## DEFAULT_SUBADDRESS_PREFIX
+
+**Location:** `src/config/schema.ts`
+
+**Description:** Default prefix of the subaddress the project slug is extracted from
+(`<prefix>+<slug>@domain`, e.g. `tickets+alfa@grava.io`). Added by S-012, which only **declares** it;
+the extraction that consumes it is S-013. Named and exported rather than inlined so a later story can
+refer to it without copying the literal — the same precedent as `DEFAULT_IMAP_PORT` and
+`DEFAULT_POLL_CRON`. Configurable through `SUBADDRESS_PREFIX`, which rejects a whitespace-only value.
+
+**Signature:**
+
+```ts
+const DEFAULT_SUBADDRESS_PREFIX = 'tickets';
+```
+
+---
+
+## DEFAULT_PLACEHOLDER_TITLE
+
+**Location:** `src/config/schema.ts`
+
+**Description:** Default title a requirement is created with when the mail arrives without a subject.
+Added by S-012; consumed by S-015. Configurable through `PLACEHOLDER_TITLE`.
+
+Note for whoever edits `EXPECTATIONS`: this literal contains the word *recibido*, and the expectations
+table sustains the property of describing only what was **expected** and never what was received.
+`EXPECTATIONS.PLACEHOLDER_TITLE` therefore points at this constant by name instead of quoting it —
+deliberately, so the property has no exception anyone would later have to tell apart from a real leak.
+
+**Signature:**
+
+```ts
+const DEFAULT_PLACEHOLDER_TITLE = 'Ticket recibido por mail';
+```
+
+---
+
+## DEFAULT_PLACEHOLDER_BODY
+
+**Location:** `src/config/schema.ts`
+
+**Description:** Default body a requirement is created with when the mail arrives with no content.
+Added by S-012; consumed by S-015. Configurable through `PLACEHOLDER_BODY`.
+
+**Signature:**
+
+```ts
+const DEFAULT_PLACEHOLDER_BODY = '(mail sin contenido)';
+```
+
+---
+
 ## TEST_USER_ID
 
 **Location:** `test/bus/helpers.ts`

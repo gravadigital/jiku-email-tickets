@@ -151,3 +151,99 @@ describe('log call sites', () => {
     }
   });
 });
+
+/**
+ * CA-14 (S-012). El bloque `ruteo` entra bajo la misma regla estructural que el resto de
+ * `AppConfig` —ningun punto de log lo emite completo— y agrega una razon propia: el `ticketMap` es
+ * la topologia comercial del despliegue, los `projectId` de todos los clientes habilitados.
+ *
+ * El escaner de arriba ya cubre el caso principal SIN CAMBIOS, porque afirma sobre `\bconfig\b` y
+ * `\bAppConfig\b`: cualquier log del objeto entero lo rompe, lleve el bloque `ruteo` o no. Lo que
+ * agrega este describe es defensa en profundidad para el caso que aquel no atraparia — que alguien
+ * loguee el bloque SOLO, o el mapa solo.
+ */
+describe('routing block log safety', () => {
+  const LOG_CALL = /(?:logger|getLogger\(\))\s*\.\s*(?:trace|debug|info|warn|error|fatal|child)\s*\(/g;
+
+  function logContexts(file: SourceFile): string[] {
+    const found: string[] = [];
+
+    for (const match of file.code.matchAll(LOG_CALL)) {
+      let depth = 1;
+      let index = match.index + match[0].length;
+      const start = index;
+
+      while (index < file.code.length && depth > 0) {
+        const char = file.code[index];
+        if (char === '(') depth += 1;
+        else if (char === ')') depth -= 1;
+        else if (char === ',' && depth === 1) break;
+        index += 1;
+      }
+
+      found.push(file.code.slice(start, index));
+    }
+
+    return found;
+  }
+
+  // TS-40
+  it('never passes the routing block or the ticket map as a log context', () => {
+    for (const file of FILES) {
+      for (const context of logContexts(file)) {
+        const where = `${file.relativePath}: ${context.trim().slice(0, 60)}`;
+
+        expect(context, where).not.toMatch(/\bruteo\b/);
+        expect(context, where).not.toMatch(/\bticketMap\b/);
+        expect(context, where).not.toMatch(/\bTICKET_MAP\b/);
+      }
+    }
+  });
+
+  // TS-38. Ni siquiera con las cinco variables nuevas: si la implementacion necesitara leer el
+  // entorno en otro lado, la implementacion esta mal, no el test (CA-12 lo dice explicitamente).
+  it('keeps the schema module free of process.env, with the five new variables in it', () => {
+    const schema = FILES.find((file) => file.relativePath === `${CONFIG_DIR}schema.ts`);
+
+    expect(schema).toBeDefined();
+    expect(schema?.code).not.toMatch(/process\.env/);
+    // Y las cinco estan efectivamente ahi: sin esto el caso pasaria en verde sobre un schema que no
+    // declara nada.
+    for (const name of [
+      'TICKET_MAP',
+      'TICKET_MAP_FILE',
+      'SUBADDRESS_PREFIX',
+      'PLACEHOLDER_TITLE',
+      'PLACEHOLDER_BODY',
+    ]) {
+      expect(schema?.code, name).toContain(name);
+    }
+  });
+
+  // TS-43. La story no agrega ninguna dependencia: JSON.parse, el Zod ya instalado y node:fs. Un
+  // parser propio o una libreria de YAML seria exactamente lo que el diseno descarto.
+  it('adds no dependency to the project', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const raw = await readFile(new URL('../../package.json', import.meta.url), 'utf8');
+    const pkg = JSON.parse(raw) as {
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+    };
+
+    expect(Object.keys(pkg.dependencies).sort()).toEqual([
+      '@gravadigital/jiku',
+      '@t3-oss/env-core',
+      'dotenv',
+      'html-to-text',
+      'imapflow',
+      'mailparser',
+      'node-cron',
+      'pino',
+      'zod',
+    ]);
+    for (const forbidden of ['yaml', 'js-yaml', 'json5', 'lodash']) {
+      expect(Object.keys(pkg.dependencies), forbidden).not.toContain(forbidden);
+      expect(Object.keys(pkg.devDependencies), forbidden).not.toContain(forbidden);
+    }
+  });
+});

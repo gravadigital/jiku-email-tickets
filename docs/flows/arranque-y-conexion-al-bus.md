@@ -5,7 +5,7 @@ type: event
 status: Draft
 created: 2026-08-27
 last_updated: 2026-08-28
-stories: [S-002, S-003, S-004, S-006, S-007, S-011]
+stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012]
 ---
 
 # Arranque y Conexión al Bus
@@ -13,8 +13,8 @@ stories: [S-002, S-003, S-004, S-006, S-007, S-011]
 **Tipo:** Evento
 **Status:** Draft
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-28 (S-011 implementada: el Paso 8 — schedular el tick y el apagado ordenado — ya está implementado, no pendiente)
-**Stories:** S-002, S-003, S-004, S-006, S-007, S-011
+**Última actualización:** 2026-08-28 (S-011 implementada: el Paso 8 — schedular el tick y el apagado ordenado — ya está implementado, no pendiente. S-012 implementada: el Paso 1 valida también el Mapa de Tickets, el prefijo y los placeholders — ya no queda nada fuera del arranque)
+**Stories:** S-002, S-003, S-004, S-006, S-007, S-011, S-012
 
 ## Descripción
 
@@ -125,10 +125,32 @@ filesystem y CA-2 exige fallar sin intentar nada antes.
 | `POLL_CRON` | No | `*/5 * * * *` |
 | `POLL_ENABLED` | No | `true` |
 | `POLL_MAX_PER_TICK` | No | `50` |
+| `TICKET_MAP` | **Condicional** (una de las dos) | — |
+| `TICKET_MAP_FILE` | **Condicional** (una de las dos) | — |
+| `SUBADDRESS_PREFIX` | No | `tickets` |
+| `PLACEHOLDER_TITLE` | No | `Ticket recibido por mail` |
+| `PLACEHOLDER_BODY` | No | `(mail sin contenido)` |
 
 Las de **IMAP ya se declaran y son requeridas** (S-007): con la ingesta en alcance dejaron de ser
-opcionales, y esto **supera el criterio 5 de REQ-001**. Queda afuera **sólo el Mapa de Tickets**
-(FG-3).
+opcionales, y esto **supera el criterio 5 de REQ-001**. Con S-012 **ya no queda nada afuera**: las
+cinco del ruteo se validan en este mismo paso, y el Mapa de Tickets pasó a ser **requerido**
+(supersede el criterio 40 de REQ-002).
+
+**La validación cruzada de las dos fuentes del mapa.** `TICKET_MAP` (inline) y `TICKET_MAP_FILE`
+(archivo montado) son **excluyentes**: exactamente una tiene que estar declarada. Ninguna → no
+arranca; las dos → tampoco, porque elegir una en silencio dejaría a U-02 editando la que no tiene
+efecto. Es la única regla **cross-field** de todo el schema, y por eso no vive en una clave: vive en
+el `createFinalSchema` de `src/config/env.ts`.
+
+**La lectura del archivo ocurre DENTRO de la validación del schema**, en el `.transform()` de
+`TICKET_MAP_FILE`, y no después de `loadEnvFromProcess()`. La razón es la lista única: si la carga
+ocurriera después, un despliegue sin `IMAP_HOST` y con el archivo del mapa roto informaría **dos
+veces, en dos formatos distintos** — que es exactamente lo que este paso existe para evitar. La
+consecuencia aceptada es que la validación del schema deja de ser pura y toca el **filesystem**: es
+la misma clase de excepción que `POLL_CRON` ya hace llamando a `cron.validate()` en el arranque, y
+por la misma razón. La lectura es **sincrónica** (`readFileSync`) porque el schema de `createEnv` no
+admite refinements asincrónicos, y ocurre **una sola vez al arrancar**, antes de que exista ningún
+trabajo concurrente.
 
 `POLL_CRON` se valida con **`cron.validate()` de `node-cron`, en el arranque** — no al schedular.
 Sin esa validación temprana, un cron mal formado explotaría recién en `cron.schedule()` (Paso 8, ya
@@ -142,7 +164,41 @@ sobre `z.enum(['true','false'])`, y un valor que no sea uno de los dos **no arra
 La configuración del bus se lee con `loadConfig()` del SDK, invocado **dentro de `src/config/`** para
 no duplicar sus defaults ni romper el punto de lectura único.
 
-**Ref:** S-002, S-007; ADR-002; convención `env-config`
+> **Implementado en S-012.** El paso quedó como lo describe la acción, con **un hallazgo que vale la
+> pena dejar registrado** porque es contraintuitivo y le ahorra el descubrimiento a la próxima story
+> que toque el módulo.
+>
+> **`createEnv` no valida un `z.object()`, y eso decide dónde puede vivir cada validación.** La
+> librería recorre el schema como un **diccionario plano de shapes** (`parseWithDictionary()`),
+> validando cada clave por separado y **acumulando** todos los issues antes de invocar
+> `onValidationError` una sola vez. Eso es lo que hace que un `IMAP_HOST` ausente y un
+> `TICKET_MAP_FILE` roto salgan juntos: sale gratis, por construcción, siempre que la validación
+> viva **en una clave**.
+>
+> **La trampa está en la regla cross-field.** El diseño de REQ-003 decía "un `superRefine` sobre el
+> objeto parseado" para la regla de las dos fuentes. Escrito de la forma obvia —
+> `z.object(shape).superRefine(...)` dentro de `createFinalSchema`— **rompe la lista única en
+> silencio**: Zod **no corre el refinement si alguna clave del objeto ya falló**, así que en el caso
+> que más importa (falta una variable del bus **y** el mapa no está declarado) el issue del mapa
+> **nunca aparece**, y el operador arregla una cosa para descubrir la otra en la corrida siguiente.
+> `.check()` se comporta igual. Verificado empíricamente contra `@t3-oss/env-core@0.13.11` y
+> `zod@4.4.3`, no inferido de la documentación.
+>
+> **La forma que sí cumple es un híbrido.** Las seis formas de mapa mal formado viven en las claves,
+> como `.transform()` con `ctx.addIssue()`, y se agregan solas. **Sólo** la regla de las dos fuentes
+> —que es genuinamente cross-field— vive en `createFinalSchema`, implementada como un **Standard
+> Schema propio** que corre el `safeParse()` del objeto **y además** la regla, y **concatena las dos
+> listas de issues siempre**, sin cortar. Hay un test que lo protege
+> (`test/config/env.test.ts` → *reports the absent map together with a missing bus variable*): falla
+> con la implementación ingenua y pasa con esta, que es la única forma de saber que el test protege
+> lo que dice proteger.
+>
+> **Un detalle de tipos que sorprende:** con `createFinalSchema` declarado, la librería **deja de
+> usar `parseWithDictionary()`** y delega la validación entera en ese schema — así que hay que
+> reponer ahí lo que aquella función hacía (acumular con la clave como primer segmento del `path`).
+> `z.object()` ya hace las dos cosas; alcanza con no cortar después.
+
+**Ref:** S-002, S-007, S-012; ADR-002, ADR-004; convención `env-config`
 
 ---
 

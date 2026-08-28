@@ -93,6 +93,12 @@ describe('EXPECTATIONS', () => {
     'POLL_CRON',
     'POLL_ENABLED',
     'POLL_MAX_PER_TICK',
+    // Las cinco del ruteo (S-012).
+    'TICKET_MAP',
+    'TICKET_MAP_FILE',
+    'SUBADDRESS_PREFIX',
+    'PLACEHOLDER_TITLE',
+    'PLACEHOLDER_BODY',
   ] as const;
 
   // TS-26. La correspondencia se afirma en las DOS direcciones para que una variable futura sin
@@ -105,7 +111,7 @@ describe('EXPECTATIONS', () => {
     expect(described).toEqual(declared);
   });
 
-  it('describes each of the seven new variables', () => {
+  it('describes each of the twelve new variables', () => {
     for (const name of NEW_VARIABLES) {
       expect(EXPECTATIONS[name], name).toMatch(/^se esperaba /);
     }
@@ -188,5 +194,59 @@ describe('toConfigValidationError with the IMAP and poll variables', () => {
       'JIKU_VERIFY_PROJECT_ID',
     ]);
     expect(err.message).toContain('7 variables');
+  });
+});
+
+describe('toConfigValidationError with the routing variables', () => {
+  // TS-34. TICKET_MAP es la unica variable del servicio cuya entrada tiene que explicar una REGLA y
+  // no solo un formato: los dos issues cross-field de las dos fuentes aterrizan en su path, y es lo
+  // unico que el operador va a leer cuando se equivoque.
+  it('explains the two-source rule from the TICKET_MAP entry', () => {
+    const err = toConfigValidationError([issue('TICKET_MAP')]);
+
+    expect(err.variables).toEqual(['TICKET_MAP']);
+    expect(err.message).not.toContain('no paso la validacion declarada en el schema');
+    expect(err.message).toContain(EXPECTATIONS.TICKET_MAP);
+    expect(err.message).toContain('TICKET_MAP_FILE');
+  });
+
+  it('describes the file source from its own entry', () => {
+    const err = toConfigValidationError([issue('TICKET_MAP_FILE')]);
+
+    expect(err.message).not.toContain('no paso la validacion declarada en el schema');
+    expect(err.message).toContain(EXPECTATIONS.TICKET_MAP_FILE);
+  });
+
+  it('names the literal default of the two routing variables whose default it can quote', () => {
+    for (const [name, fallback] of [
+      ['SUBADDRESS_PREFIX', 'tickets'],
+      ['PLACEHOLDER_BODY', '(mail sin contenido)'],
+    ] as const) {
+      expect(EXPECTATIONS[name], name).toContain(fallback);
+    }
+  });
+
+  // PLACEHOLDER_TITLE es la excepcion, y la excepcion es la propiedad de la tabla y no un descuido:
+  // su default literal ("Ticket recibido por mail") contiene la palabra "recibido", y la tabla
+  // entera sostiene que describe QUE se esperaba y nunca que se recibio. Citarlo aca convertiria esa
+  // propiedad en una excepcion que despues nadie sabe distinguir de una fuga real.
+  it('does not quote the title default, whose literal collides with the never-received rule', () => {
+    expect(EXPECTATIONS.PLACEHOLDER_TITLE).not.toContain('Ticket recibido por mail');
+    expect(EXPECTATIONS.PLACEHOLDER_TITLE).toContain('DEFAULT_PLACEHOLDER_TITLE');
+  });
+
+  // TS-35. El mapa es la topologia comercial del despliegue: los projectId de todos los clientes
+  // habilitados. Ni un slug ni un projectId puede llegar al reporte por ningun camino.
+  it('never leaks a slug or a projectId into the message or the details', () => {
+    const err = toConfigValidationError([
+      issue('IMAP_HOST'),
+      issue('TICKET_MAP', 'received {"cliente-confidencial":98765}'),
+    ]);
+
+    expect(err.variables).toEqual(['IMAP_HOST', 'TICKET_MAP']);
+    for (const value of ['cliente-confidencial', '98765']) {
+      expect(err.message, value).not.toContain(value);
+      expect(JSON.stringify(err.details), value).not.toContain(value);
+    }
   });
 });

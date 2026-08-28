@@ -115,9 +115,10 @@ describe('README deployment section', () => {
     expect(deployment).toMatch(/escritura/i);
   });
 
-  // Eran diez hasta S-006. S-007 sumo las cuatro de la casilla y las tres del poll: un operador
-  // que despliega de cero tiene que poder hacerlo leyendo esta seccion, sin abrir el codigo.
-  it('documents the seventeen configuration variables the orchestrator injects', () => {
+  // TS-47. ACTUALIZADO EN S-012: decia "seventeen". Eran diez hasta S-006; S-007 sumo las cuatro de
+  // la casilla y las tres del poll, y S-012 las cinco del ruteo. Un operador que despliega de cero
+  // tiene que poder hacerlo leyendo esta seccion, sin abrir el codigo.
+  it('documents the twenty-two configuration variables the orchestrator injects', () => {
     for (const variable of [
       'JIKU_CREDS',
       'JIKU_KEY_FILE',
@@ -136,9 +137,24 @@ describe('README deployment section', () => {
       'POLL_CRON',
       'POLL_ENABLED',
       'POLL_MAX_PER_TICK',
+      'TICKET_MAP',
+      'TICKET_MAP_FILE',
+      'SUBADDRESS_PREFIX',
+      'PLACEHOLDER_TITLE',
+      'PLACEHOLDER_BODY',
     ]) {
       expect(deployment, `${variable} must be documented`).toContain(variable);
     }
+  });
+
+  // TS-48. Las dos fuentes son EXCLUYENTES y el archivo se monta como los otros dos, read-only. Es
+  // el error que un operador comete: declarar las dos y quedarse editando la que no tiene efecto.
+  it('explains the two exclusive map sources and how the file is mounted', () => {
+    expect(deployment).toContain('TICKET_MAP');
+    expect(deployment).toContain('TICKET_MAP_FILE');
+    expect(deployment).toMatch(/excluyente|una de las dos|exactamente una/i);
+    // El tercer montaje read-only, igual que la key y el creds.
+    expect(deployment).toContain(':ro');
   });
 
   // CA-10 desde el lado de la documentacion: para que un operador no busque una variable de
@@ -234,6 +250,39 @@ describe('.env.example', () => {
     expect(example).not.toMatch(/^\s*IMAP_(FOLDER|MAILBOX|INBOX)=/m);
   });
 
+  // TS-44. Las cinco del ruteo. Las tres opcionales nombran su default literal; las dos del mapa no
+  // pueden marcarse "REQUERIDA" a secas, porque lo requerido es UNA DE LAS DOS.
+  it('declares the five routing variables, each with its requirement or its default', () => {
+    for (const [name, fallback] of [
+      ['SUBADDRESS_PREFIX', 'tickets'],
+      ['PLACEHOLDER_TITLE', 'Ticket recibido por mail'],
+      ['PLACEHOLDER_BODY', '(mail sin contenido)'],
+    ] as const) {
+      const line = example.split('\n').find((l) => l.trimStart().startsWith(`${name}=`));
+
+      expect(line, `${name} must be declared`).toBeDefined();
+      expect(line, `${name} must state its default`).toMatch(/default/i);
+      expect(line, `${name} must name ${fallback}`).toContain(fallback);
+    }
+
+    for (const name of ['TICKET_MAP', 'TICKET_MAP_FILE'] as const) {
+      const line = example.split('\n').find((l) => l.trimStart().startsWith(`${name}=`));
+
+      expect(line, `${name} must be declared`).toBeDefined();
+    }
+  });
+
+  // TS-45. La regla que un operador puede equivocar de verdad: declarar las DOS fuentes no arranca.
+  // Sin esto, quien declaro las dos edita la que no tiene efecto y no entiende por que nada cambia.
+  it('documents the two exclusive sources and that declaring both does not start', () => {
+    expect(example).toContain('TICKET_MAP');
+    expect(example).toContain('TICKET_MAP_FILE');
+    expect(example).toMatch(/una de las dos|excluyente|exactamente una/i);
+    expect(example).toMatch(/las dos.*no arranca|no arranca.*las dos/is);
+    // Y que el mapa vacio SI es valido: es la diferencia entre una decision y un olvido.
+    expect(example).toMatch(/vacio|vacío/i);
+  });
+
   it('carries no real value: every declaration is an empty assignment', () => {
     const declarations = example
       .split('\n')
@@ -250,14 +299,17 @@ describe('.env.example', () => {
 });
 
 /**
- * TS-44 (S-007). Los dos tests que cambiaron de sentido se INVIRTIERON, no se borraron: un test
- * borrado no deja rastro de que la regla cambio a proposito, y el proximo que lea el archivo no
- * tiene forma de distinguir "esto se decidio" de "esto se perdio".
+ * TS-44 (S-007), TS-49 (S-012). Los tests que cambiaron de sentido se INVIRTIERON, no se borraron:
+ * un test borrado no deja rastro de que la regla cambio a proposito, y el proximo que lea el archivo
+ * no tiene forma de distinguir "esto se decidio" de "esto se perdio".
+ *
+ * El describe ya no dice "two": S-012 sumo sus propias inversiones a los mismos dos archivos, sin
+ * perder las de S-007. Los dos rastros conviven porque documentan dos decisiones distintas.
  */
-describe('the two inverted test cases', () => {
+describe('the inverted test cases', () => {
   const TEST_ROOT = fileURLToPath(new URL('.', import.meta.url));
 
-  it('keeps both cases alive, each naming S-007 as the story that inverted the rule', async () => {
+  it('keeps both cases alive, each naming the story that inverted the rule', async () => {
     for (const [file, caseName] of [
       ['config/schema.test.ts', 'declares the four IMAP and three POLL variables'],
       ['config/env.test.ts', 'does not resolve when no IMAP variable is present'],
@@ -265,11 +317,39 @@ describe('the two inverted test cases', () => {
       const source = await readFile(new URL(file, `file://${TEST_ROOT}`), 'utf8');
 
       expect(source, `${file} must keep the inverted case`).toContain(caseName);
-      expect(source, `${file} must explain the inversion`).toContain('INVERTIDO EN S-007');
       // Los enunciados viejos ya no pueden estar: si estuvieran, el caso se duplico en vez de
       // invertirse, y la suite afirmaria las dos reglas opuestas a la vez.
       expect(source).not.toContain('declares no IMAP or ticket-map variable in this scope');
       expect(source).not.toContain('resolves without throwing when no IMAP');
     }
+  });
+
+  // Las inversiones de S-007 SIGUEN ahi: la de schema.test.ts quedo absorbida en el comentario del
+  // caso que S-012 volvio a invertir, y la de env.test.ts conserva su rastro propio.
+  it('keeps the S-007 inversions on record', async () => {
+    const schemaSource = await readFile(new URL('config/schema.test.ts', `file://${TEST_ROOT}`), 'utf8');
+    const envSource = await readFile(new URL('config/env.test.ts', `file://${TEST_ROOT}`), 'utf8');
+
+    for (const source of [schemaSource, envSource]) {
+      expect(source).toContain('S-007');
+    }
+  });
+
+  // TS-49. Las de S-012: el mapa pasa a ser requerido y las claves de ticket ya se declaran.
+  it('records the S-012 inversions in the same two files', async () => {
+    for (const file of ['config/schema.test.ts', 'config/env.test.ts'] as const) {
+      const source = await readFile(new URL(file, `file://${TEST_ROOT}`), 'utf8');
+
+      expect(source, `${file} must explain the S-012 inversion`).toContain('INVERTIDO EN S-012');
+    }
+  });
+
+  // El caso de schema.test.ts que S-012 ACOTA en vez de invertir: la prohibicion de `superRefine`
+  // sobre config/schema.ts se levanta, pero la del interruptor POLL_ENABLED sigue viva.
+  it('keeps the narrowed POLL_ENABLED rule alive after S-012 lifted the superRefine ban', async () => {
+    const source = await readFile(new URL('config/schema.test.ts', `file://${TEST_ROOT}`), 'utf8');
+
+    expect(source).toContain('implements that requirement with no conditional logic at all');
+    expect(source).toContain('POLL_ENABLED');
   });
 });

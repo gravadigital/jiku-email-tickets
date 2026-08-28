@@ -44,6 +44,12 @@ const CFG: AppConfig = {
     password: 'app-password-de-prueba',
   },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
+  ruteo: {
+    ticketMap: new Map([['alfa', 42]]),
+    subaddressPrefix: 'tickets',
+    placeholderTitle: 'Ticket recibido por mail',
+    placeholderBody: '(mail sin contenido)',
+  },
 };
 
 const cfg = (overrides: Partial<AppConfig> = {}): AppConfig => ({ ...CFG, ...overrides });
@@ -214,6 +220,8 @@ describe('createLogger level', () => {
       IMAP_HOST: 'imap.gmail.com',
       IMAP_USER: 'tickets@ejemplo.com',
       IMAP_PASSWORD: 'app-password-de-prueba',
+      // Requerida desde S-012, en una de sus dos fuentes.
+      TICKET_MAP: '{"alfa":42}',
     });
     const capture = createLogCapture();
 

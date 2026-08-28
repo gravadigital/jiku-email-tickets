@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { LoadedConfig } from '@gravadigital/jiku/node';
@@ -17,6 +21,8 @@ const VALID_ENV = {
   IMAP_HOST: 'imap.gmail.com',
   IMAP_USER: 'tickets@ejemplo.com',
   IMAP_PASSWORD: 'app-password-de-prueba',
+  // El Mapa de Tickets es requerido desde S-012: sin el, toda esta suite falla.
+  TICKET_MAP: '{"alfa":42,"beta":7}',
 };
 
 /** Lo que devuelve loadConfig() en un contenedor sin ~/.config/jiku/config.yaml. */
@@ -42,10 +48,11 @@ async function withEnv(
   source: Record<string, string | undefined>,
   run: () => Promise<void>,
 ): Promise<void> {
-  // Las diecisiete declaradas. La lista se limpia ANTES de correr para que una IMAP_HOST exportada
-  // en la shell del desarrollador no se filtre al test y lo vuelva dependiente del host — el fallo
-  // intermitente que la convencion `testing` prohibe. NODE_ENV queda deliberadamente afuera: vitest
-  // la setea y borrarla cambiaria el comportamiento del logger bajo test.
+  // Las veintiuna declaradas menos NODE_ENV. La lista se limpia ANTES de correr para que una
+  // IMAP_HOST —o, desde S-012, un TICKET_MAP— exportado en la shell del desarrollador no se filtre
+  // al test y lo vuelva dependiente del host: el fallo intermitente que la convencion `testing`
+  // prohibe. NODE_ENV queda deliberadamente afuera: vitest la setea y borrarla cambiaria el
+  // comportamiento del logger bajo test.
   const keys = [
     'JIKU_CREDS',
     'JIKU_KEY_FILE',
@@ -63,6 +70,11 @@ async function withEnv(
     'POLL_CRON',
     'POLL_ENABLED',
     'POLL_MAX_PER_TICK',
+    'TICKET_MAP',
+    'TICKET_MAP_FILE',
+    'SUBADDRESS_PREFIX',
+    'PLACEHOLDER_TITLE',
+    'PLACEHOLDER_BODY',
   ];
   const saved = new Map(keys.map((key) => [key, process.env[key]]));
   for (const key of keys) delete process.env[key];
@@ -183,7 +195,7 @@ describe('loadAppConfig', () => {
     });
   });
 
-  it('exposes exactly the twelve documented fields', async () => {
+  it('exposes exactly the thirteen documented fields', async () => {
     loadConfigMock.mockResolvedValue(sdkResult());
     const { loadAppConfig } = await import('#config/index.js');
 
@@ -202,6 +214,9 @@ describe('loadAppConfig', () => {
         // nodeEnv lo agrega S-003: lo consume el logger para elegir formato (JSON vs pino-pretty).
         'nodeEnv',
         'poll',
+        // El bloque del ruteo lo agrega S-012: el lookup del proyecto (S-013) y el alta (S-015)
+        // reciben cada uno la configuracion ENTERA, con el mismo criterio que `imap` y `poll`.
+        'ruteo',
         'servers',
         'timeoutMs',
         'verifyProjectId',
@@ -312,6 +327,7 @@ describe('loadAppConfig IMAP and poll blocks', () => {
         JIKU_KEY_FILE: VALID_ENV.JIKU_KEY_FILE,
         JIKU_PROJECT_ID: VALID_ENV.JIKU_PROJECT_ID,
         JIKU_VERIFY_PROJECT_ID: VALID_ENV.JIKU_VERIFY_PROJECT_ID,
+        TICKET_MAP: VALID_ENV.TICKET_MAP,
         POLL_ENABLED: 'false',
       },
       async () => {
@@ -322,5 +338,132 @@ describe('loadAppConfig IMAP and poll blocks', () => {
     );
 
     expect(loadConfigMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('loadAppConfig routing block', () => {
+  const dirs: string[] = [];
+
+  function tempFile(content: string): string {
+    const dir = mkdtempSync(join(tmpdir(), 'jiku-ticket-map-'));
+    dirs.push(dir);
+    const path = join(dir, 'mapa.json');
+    writeFileSync(path, content, 'utf8');
+    return path;
+  }
+
+  afterEach(() => {
+    while (dirs.length > 0) {
+      const dir = dirs.pop();
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // TS-28. Llega ENTERO y anidado, con el mismo criterio con que ya llegan `imap` y `poll`: el
+  // consumidor recibe su configuracion completa y no cuatro campos sueltos que tenga que recomponer.
+  it('exposes the whole routing block, with the map already normalized', async () => {
+    loadConfigMock.mockResolvedValue(sdkResult());
+    const { loadAppConfig } = await import('#config/index.js');
+
+    await withEnv({ ...VALID_ENV, TICKET_MAP: '{"Alfa":42,"BETA":7}' }, async () => {
+      const config = await loadAppConfig();
+
+      expect(Object.keys(config.ruteo).sort()).toEqual([
+        'placeholderBody',
+        'placeholderTitle',
+        'subaddressPrefix',
+        'ticketMap',
+      ]);
+      expect(config.ruteo.ticketMap).toBeInstanceOf(Map);
+      expect(config.ruteo.ticketMap.get('alfa')).toBe(42);
+      expect(config.ruteo.ticketMap.get('beta')).toBe(7);
+      expect(config.ruteo.subaddressPrefix).toBe('tickets');
+      expect(config.ruteo.placeholderTitle).toBe('Ticket recibido por mail');
+      expect(config.ruteo.placeholderBody).toBe('(mail sin contenido)');
+    });
+  });
+
+  it('takes the map from the file source when that is the declared one', async () => {
+    loadConfigMock.mockResolvedValue(sdkResult());
+    const { loadAppConfig } = await import('#config/index.js');
+
+    await withEnv(
+      { ...VALID_ENV, TICKET_MAP: undefined, TICKET_MAP_FILE: tempFile('{"Alfa":42}') },
+      async () => {
+        const config = await loadAppConfig();
+
+        expect(config.ruteo.ticketMap.get('alfa')).toBe(42);
+      },
+    );
+  });
+
+  it('carries the three configured routing values through unchanged', async () => {
+    loadConfigMock.mockResolvedValue(sdkResult());
+    const { loadAppConfig } = await import('#config/index.js');
+
+    await withEnv(
+      {
+        ...VALID_ENV,
+        SUBADDRESS_PREFIX: 'soporte',
+        PLACEHOLDER_TITLE: 'Sin asunto',
+        PLACEHOLDER_BODY: 'Sin cuerpo',
+      },
+      async () => {
+        const config = await loadAppConfig();
+
+        expect(config.ruteo.subaddressPrefix).toBe('soporte');
+        expect(config.ruteo.placeholderTitle).toBe('Sin asunto');
+        expect(config.ruteo.placeholderBody).toBe('Sin cuerpo');
+      },
+    );
+  });
+
+  // TS-30. CA-4: informa LAS DOS cosas y no llega a conectar al bus. `loadConfig()` del SDK lee el
+  // filesystem, asi que si se lo hubiera llamado antes de validar, un entorno incompleto habria
+  // tocado el disco antes de fallar.
+  it('validates the whole configuration before the SDK touches anything', async () => {
+    loadConfigMock.mockResolvedValue(sdkResult());
+    const { loadAppConfig } = await import('#config/index.js');
+
+    await withEnv({ ...VALID_ENV, JIKU_CREDS: undefined, TICKET_MAP: 'roto' }, async () => {
+      await expect(loadAppConfig()).rejects.toMatchObject({
+        variables: ['JIKU_CREDS', 'TICKET_MAP'],
+      });
+    });
+
+    expect(loadConfigMock).not.toHaveBeenCalled();
+  });
+
+  // TS-31. CA-11: sin recarga en caliente. El archivo se lee UNA vez al arrancar; cambiarlo en disco
+  // con el proceso vivo no toca el Map en memoria, y hace falta un redeploy.
+  it('does not reload the map when the file changes after startup', async () => {
+    loadConfigMock.mockResolvedValue(sdkResult());
+    const { loadAppConfig } = await import('#config/index.js');
+    const path = tempFile('{"alfa":42}');
+
+    await withEnv({ ...VALID_ENV, TICKET_MAP: undefined, TICKET_MAP_FILE: path }, async () => {
+      const config = await loadAppConfig();
+
+      expect(config.ruteo.ticketMap.get('alfa')).toBe(42);
+
+      writeFileSync(path, '{"alfa":999,"nuevo":7}', 'utf8');
+
+      // El Map en memoria es el mismo: ni el valor cambio ni entro la entrada nueva.
+      expect(config.ruteo.ticketMap.get('alfa')).toBe(42);
+      expect(config.ruteo.ticketMap.has('nuevo')).toBe(false);
+      expect(config.ruteo.ticketMap.size).toBe(1);
+    });
+  });
+
+  // Un mapa vacio declarado compone igual: el bloque llega entero, con el Map vacio (CA-8).
+  it('composes an empty map into the block without failing', async () => {
+    loadConfigMock.mockResolvedValue(sdkResult());
+    const { loadAppConfig } = await import('#config/index.js');
+
+    await withEnv({ ...VALID_ENV, TICKET_MAP: '{}' }, async () => {
+      const config = await loadAppConfig();
+
+      expect(config.ruteo.ticketMap.size).toBe(0);
+    });
   });
 });

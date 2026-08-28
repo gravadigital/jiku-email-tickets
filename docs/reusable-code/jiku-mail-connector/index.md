@@ -6,8 +6,9 @@ detailed documentation.
 Created by S-001 (bootstrap), extended by S-002 (typed configuration), S-003 (structured logging with
 redaction), S-004 (identity and the single bus connection), S-005 (publishing `requirements.new` and
 translating its errors), S-008 (pure mail normalization), S-009 (the `MailSource` port and its
-`imapflow` adapter), S-010 (the tick: cap, order, marking and failure isolation) and S-011 (the
-no-overlap scheduler guard, `cron.schedule()` wiring, and the ordered shutdown on `SIGTERM`/`SIGINT`).
+`imapflow` adapter), S-010 (the tick: cap, order, marking and failure isolation), S-011 (the
+no-overlap scheduler guard, `cron.schedule()` wiring, and the ordered shutdown on `SIGTERM`/`SIGINT`)
+and S-012 (the Ticket Map with its two exclusive sources, the subaddress prefix and the placeholders).
 The service is a `worker` in Node.js with no HTTP surface and no database, so several categories do
 not apply and stay empty until a story creates them.
 
@@ -149,19 +150,24 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 23**
+**Total: 24**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
 - **ConfigValidationError** (`src/config/errors.ts`) - Raised when the environment fails validation.
   Carries the complete list of offending variable names in `variables`.
 - **AppConfig** (`src/config/index.ts`) - The process-wide configuration contract consumed by S-003,
-  S-004, S-005, S-009 and S-011. Twelve fields since S-007 added the `imap` and `poll` blocks; the
-  bus paths, the topology and the whole `imap` block must never reach a log line.
+  S-004, S-005, S-009 and S-011. Thirteen fields since S-012 added the `ruteo` block to the `imap`
+  and `poll` ones; the bus paths, the topology, the whole `imap` block and the whole `ruteo` block
+  must never reach a log line.
 - **ImapConfig** (`src/config/index.ts`) - The IMAP adapter's whole configuration (`host`, `port`,
   `user`, `password`), nested so S-009 receives it complete instead of four loose parameters.
 - **PollConfig** (`src/config/index.ts`) - The tick's whole configuration (`cron`, `enabled`,
   `maxPerTick`), nested on the same criterion for S-010 and S-011.
+- **RuteoConfig** (`src/config/index.ts`) - The routing's whole configuration (`ticketMap`,
+  `subaddressPrefix`, `placeholderTitle`, `placeholderBody`), nested on the same criterion for S-013
+  and S-015. The `ticketMap` arrives already normalized and validated as `ReadonlyMap<string,
+  number>`: the read-only type is what seals the contract, since the underlying Map is mutable.
 - **TestBusContext** (`test/bus/helpers.ts`) - Return type of `setupTestBus()`: the NATS connection,
   the bus client, and a `cleanup()` that drains the connection.
 - **KeyLoadError** (`src/infra/bus/errors.ts`) - The machine-user key could not be loaded. Names the
@@ -216,7 +222,7 @@ See full details in [types.md](./types.md)
 
 ## Constants
 
-**Total: 22**
+**Total: 25**
 
 - **SERVICE_NAME** (`src/shared/service-info.ts`) - The service name, used wherever the process has to
   identify itself.
@@ -230,6 +236,13 @@ See full details in [types.md](./types.md)
 - **DEFAULT_POLL_CRON** (`src/config/schema.ts`) - Default poll expression, `*/5 * * * *`, validated at
   startup with `node-cron`'s own `validate()`.
 - **DEFAULT_POLL_MAX_PER_TICK** (`src/config/schema.ts`) - Default cap of mails per tick, 50.
+- **DEFAULT_SUBADDRESS_PREFIX** (`src/config/schema.ts`) - Default subaddress prefix the project slug
+  is extracted from, `tickets`. Declared by S-012, consumed by S-013.
+- **DEFAULT_PLACEHOLDER_TITLE** (`src/config/schema.ts`) - Default title for a mail with no subject,
+  `Ticket recibido por mail`. Its literal is deliberately not quoted in `EXPECTATIONS` — see the note
+  in `constants.md`.
+- **DEFAULT_PLACEHOLDER_BODY** (`src/config/schema.ts`) - Default body for a mail with no content,
+  `(mail sin contenido)`.
 - **TEST_USER_ID** (`test/bus/helpers.ts`) - Fixed caller identity used by the test bus context.
 - **TEST_INSTANCE** (`test/bus/helpers.ts`) - Bus instance name used by the test bus context.
 - **REDACT_PATHS** (`src/shared/log-redaction.ts`) - The `redact` paths the logger censors: tokens,

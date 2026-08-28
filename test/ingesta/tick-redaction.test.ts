@@ -38,6 +38,12 @@ const BASE_CONFIG: AppConfig = {
   nodeEnv: 'production',
   imap: { host: 'imap.gmail.com', port: 993, user: TEST_USER, password: TEST_PASSWORD },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
+  ruteo: {
+    ticketMap: new Map([['alfa', 42]]),
+    subaddressPrefix: 'tickets',
+    placeholderTitle: 'Ticket recibido por mail',
+    placeholderBody: '(mail sin contenido)',
+  },
 };
 
 // El contenido sensible real de los fixtures usados, para buscarlo como subcadena exacta.

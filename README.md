@@ -128,7 +128,7 @@ dos copias de la misma tabla divergen, y la que se lee termina siendo la vieja.
 
 ### Configuración: variables y montajes
 
-Las diecisiete variables que valida el arranque. Las dos credenciales del bus son **rutas a archivos
+Las veintidós variables que valida el arranque. Las dos credenciales del bus son **rutas a archivos
 montados**, no su contenido. **`IMAP_PASSWORD` es la única que lleva un secreto en su valor** — y por
 eso llega por entorno y nunca se hornea en la imagen (NFR-S05).
 
@@ -151,6 +151,51 @@ eso llega por entorno y nunca se hornea en la imagen (NFR-S05).
 | `POLL_CRON` | No | `*/5 * * * *` | Se valida con `cron.validate()` de `node-cron` **en el arranque**: una expresión mal formada **no arranca** |
 | `POLL_ENABLED` | No | `true` | Sólo `true` o `false` literales. Cualquier otro valor **no arranca** |
 | `POLL_MAX_PER_TICK` | No | `50` | Máximo de mails por tick. Mínimo `1` |
+| `TICKET_MAP` | **Condicional** | — | El Mapa de Tickets **inline**, como JSON. **Una** de las dos fuentes |
+| `TICKET_MAP_FILE` | **Condicional** | — | **Ruta** a un archivo montado con ese mismo JSON. **La otra** fuente |
+| `SUBADDRESS_PREFIX` | No | `tickets` | Prefijo del subaddress del que se extrae el slug (`tickets+alfa@…`) |
+| `PLACEHOLDER_TITLE` | No | `Ticket recibido por mail` | Título del requisito cuando el mail llega sin asunto |
+| `PLACEHOLDER_BODY` | No | `(mail sin contenido)` | Cuerpo del requisito cuando el mail llega sin contenido |
+
+#### El Mapa de Tickets y sus dos fuentes excluyentes
+
+El Mapa de Tickets es lo que traduce el slug del subaddress al `projectId` de Jiku donde se crea el
+requisito. **Es requerido**, y se declara en **exactamente una** de dos fuentes:
+
+- **`TICKET_MAP`** — el JSON inline, en la variable de entorno.
+- **`TICKET_MAP_FILE`** — la ruta a un archivo montado con ese mismo JSON.
+
+**Declarar las dos no arranca**, y es deliberado: elegir una en silencio dejaría a U-02 editando la
+que no tiene efecto y sin entender por qué el ruteo no cambia. **No declarar ninguna tampoco
+arranca.** Las dos fuentes aceptan **exactamente el mismo contenido** — un objeto de pares
+`"<slug>": <projectId>`, con el `projectId` como el **entero** de Jiku, nunca el nombre del proyecto
+ni su slug:
+
+```json
+{ "alfa": 42, "beta": 7 }
+```
+
+Cinco cosas que conviene saber antes de configurarlo:
+
+- **Los slugs se normalizan a minúsculas al cargar.** `{"Alfa": 42, "alfa": 7}` es un **duplicado** y
+  **no arranca**. La comparación es en minúsculas en las dos puntas: la del mapa y la del mail.
+- **Un mapa vacío (`{}`) es válido y arranca.** La *ausencia* no arranca; el vacío sí. Es la
+  diferencia entre una decisión del operador y un olvido de configuración: con el mapa vacío el
+  worker arranca y descarta todo con log.
+- **Los `projectId` no se verifican contra Jiku.** Un `projectId` que apunta a un proyecto
+  inexistente **arranca igual** — el conector no consulta el plano de lectura del bus (ADR-004). El
+  síntoma aparece más tarde, por mail, como `project_not_found`.
+- **No hay recarga en caliente.** El mapa se lee **una sola vez al arrancar**: agregarle un slug con
+  el worker corriendo no cambia nada hasta el **redeploy**.
+- **Un mapa mal formado no arranca**, y entra en la **misma lista** de fail-fast que lo que falte del
+  bus y de IMAP. Son seis formas: JSON no parseable, JSON que no es un objeto de pares, `projectId`
+  que no es entero positivo, slug vacío, slugs duplicados, y ruta de archivo inexistente o ilegible.
+
+El archivo de `TICKET_MAP_FILE` se monta **read-only**, igual que la key y el creds:
+
+```
+/run/secrets/ticket-map.json     (ro)   <- TICKET_MAP_FILE apunta acá
+```
 
 Tres cosas de la configuración de la casilla que conviene saber antes de desplegar:
 
@@ -170,11 +215,13 @@ Tres cosas de la configuración de la casilla que conviene saber antes de desple
   la ingesta tampoco funciona: es una precondición operativa de U-02, no algo que el software pueda
   detectar de antemano.
 
-Los dos montajes, y son los únicos:
+Los montajes, y son los únicos — dos siempre, y un tercero sólo si el Mapa de Tickets se declara
+como archivo en vez de inline:
 
 ```
 /run/secrets/machine-user.json   (ro)   <- JIKU_KEY_FILE apunta acá
 /run/secrets/sentinel.creds      (ro)   <- JIKU_CREDS apunta acá
+/run/secrets/ticket-map.json     (ro)   <- TICKET_MAP_FILE apunta acá (sólo con esa fuente)
 ```
 
 **No hay ningún montaje de escritura**, y no es un olvido: el conector no persiste estado en disco —
@@ -194,6 +241,10 @@ docker run --rm \
   -e JIKU_CREDS=/run/secrets/sentinel.creds \
   -e JIKU_SERVERS=nats://bus:4222 \
   -e JIKU_INSTANCE=prod \
+  -e IMAP_HOST=imap.gmail.com \
+  -e IMAP_USER=tickets@grava.io \
+  -e IMAP_PASSWORD=... \
+  -e TICKET_MAP='{"alfa": 42, "beta": 7}' \
   -v /ruta/host/machine-user.json:/run/secrets/machine-user.json:ro \
   -v /ruta/host/sentinel.creds:/run/secrets/sentinel.creds:ro \
   --network <la-red-del-bus> \
