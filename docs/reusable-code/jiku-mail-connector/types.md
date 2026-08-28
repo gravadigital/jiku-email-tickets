@@ -98,6 +98,7 @@ interface AppConfig {
   nodeEnv: 'development' | 'test' | 'production';
   imap: ImapConfig;   // added by S-007
   poll: PollConfig;   // added by S-007
+  ruteo: RuteoConfig; // added by S-012
 }
 
 interface ImapConfig {
@@ -112,6 +113,13 @@ interface PollConfig {
   enabled: boolean;
   maxPerTick: number;
 }
+
+interface RuteoConfig {
+  ticketMap: ReadonlyMap<string, number>;
+  subaddressPrefix: string;
+  placeholderTitle: string;
+  placeholderBody: string;
+}
 ```
 
 **Notes:** Written by hand on purpose, and that does not contradict the "types are inferred" rule:
@@ -124,14 +132,22 @@ it to pick the format, and the expensive pretty mode must be asked for explicitl
 by omission. `logLevel` and `nodeEnv` are the two fields the logger consumes; it receives them as
 parameters because it must not read `process.env` itself.
 
-**Twelve fields since S-007:** the ten flat ones plus the two nested blocks. `ImapConfig` and
-`PollConfig` are nested rather than seven loose fields because each consumer receives its whole
-configuration: with loose fields every new signature would enumerate four parameters and every
-consumer would have to recompose its own subset.
+**Thirteen fields since S-012:** the ten flat ones plus the three nested blocks. `ImapConfig`,
+`PollConfig` and `RuteoConfig` are nested rather than eleven loose fields because each consumer
+receives its whole configuration: with loose fields every new signature would enumerate four
+parameters and every consumer would have to recompose its own subset.
+
+`RuteoConfig.ticketMap` arrives **already normalized and validated** — `loadAppConfig()` transforms
+nothing, it only composes; all the loading lives in the schema. Its type is `ReadonlyMap` and not
+`Map`, and that is the whole guarantee: the Map the schema builds is mutable, and `Object.freeze`
+would not freeze it anyway. What stops a consumer from calling `.set()` is the type of the contract,
+not the runtime — so loosening it to `Map` is a real regression, and `tsc` is where it gets caught.
 
 **Fields that must never reach a log line:** `credsFile` and `keyFile` (paths to secrets — where a
 secret lives is information about the secret), `zitadelProjectId` and `servers` (deployment topology),
-and the whole `imap` block, `imap.password` above all. The startup line in `src/startup.ts`
+the whole `imap` block, `imap.password` above all, and the whole `ruteo` block — `ticketMap` is the
+deployment's **commercial topology**, the `projectId` of every enabled client, and has no business in
+stdout. The startup line in `src/startup.ts`
 deliberately carries only `instance`, `logLevel` and `timeoutMs`.
 
 **The nesting carries a hazard, and it is closed by a rule rather than by a redaction path.**

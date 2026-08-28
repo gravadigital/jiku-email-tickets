@@ -56,6 +56,12 @@ function configWith(keyFile: string): AppConfig {
       password: 'app-password-de-prueba',
     },
     poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
+    ruteo: {
+      ticketMap: new Map([['alfa', 42]]),
+      subaddressPrefix: 'tickets',
+      placeholderTitle: 'Ticket recibido por mail',
+      placeholderBody: '(mail sin contenido)',
+    },
   };
 }
 

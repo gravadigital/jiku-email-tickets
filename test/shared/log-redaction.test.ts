@@ -113,6 +113,12 @@ describe('REDACT_PATHS depth boundary', () => {
     nodeEnv: 'production',
     imap: { host: 'imap.gmail.com', port: 993, user: 'tickets@ejemplo.com', password: SECRET },
     poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
+    ruteo: {
+      ticketMap: new Map([['alfa', 42]]),
+      subaddressPrefix: 'tickets',
+      placeholderTitle: 'Ticket recibido por mail',
+      placeholderBody: '(mail sin contenido)',
+    },
   };
 
   afterEach(() => {

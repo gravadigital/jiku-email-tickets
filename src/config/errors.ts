@@ -38,6 +38,34 @@ export const EXPECTATIONS: Record<string, string> = {
   POLL_CRON: 'se esperaba una expresion cron valida (la valida node-cron), por ejemplo */5 * * * *',
   POLL_ENABLED: 'se esperaba uno de: true, false',
   POLL_MAX_PER_TICK: 'se esperaba un entero mayor o igual a 1 (el maximo de mails por tick)',
+
+  // --- Ruteo (S-012) ---
+  // Esta entrada es la unica de la tabla que describe una REGLA y no solo un formato, y es
+  // deliberado: los dos issues cross-field de las dos fuentes excluyentes aterrizan en el path de
+  // TICKET_MAP, asi que esto es lo unico que el operador va a leer cuando se equivoque. Si dijera
+  // solo "se esperaba un JSON de objeto", quien declaro las dos fuentes no tendria forma de saber
+  // que el problema es haber declarado tambien el archivo.
+  TICKET_MAP:
+    'se esperaba el Mapa de Tickets como JSON de objeto slug -> projectId entero positivo, ' +
+    'declarado en EXACTAMENTE UNA de las dos fuentes: esta variable o TICKET_MAP_FILE. ' +
+    'Declarar las dos, o ninguna, no arranca. Un mapa vacio ({}) es valido',
+  TICKET_MAP_FILE:
+    'se esperaba la ruta a un archivo legible con el Mapa de Tickets, con el mismo JSON que ' +
+    'TICKET_MAP y excluyente con ella',
+  SUBADDRESS_PREFIX:
+    'se esperaba el prefijo del subaddress, no vacio (por default tickets)',
+  // A diferencia de las otras dos, esta entrada NO cita su default literal, y es a proposito: el
+  // texto del default ("Ticket recibido por mail") contiene la palabra "recibido", y toda la tabla
+  // sostiene la propiedad de describir QUE se esperaba y nunca que se recibio — hay un test que la
+  // afirma sobre las cinco entradas. Citar el literal aca convertiria esa propiedad en una excepcion
+  // que despues nadie sabe distinguir de una fuga real. El default vive en DEFAULT_PLACEHOLDER_TITLE
+  // y esta documentado en .env.example y en el README, que es donde el operador lo busca.
+  PLACEHOLDER_TITLE:
+    'se esperaba el titulo con el que se da de alta un mail sin asunto, no vacio ' +
+    '(hay un default, ver DEFAULT_PLACEHOLDER_TITLE)',
+  PLACEHOLDER_BODY:
+    'se esperaba el cuerpo con el que se da de alta un mail sin contenido, no vacio ' +
+    '(por default (mail sin contenido))',
 };
 
 const UNKNOWN_EXPECTATION = 'no paso la validacion declarada en el schema';

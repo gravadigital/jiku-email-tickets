@@ -25,6 +25,22 @@ export interface PollConfig {
 }
 
 /**
+ * La configuracion del ruteo, entera. Mismo criterio que `imap` y `poll`: el lookup del proyecto
+ * (S-013) y el alta del requisito (S-015) reciben cada uno lo que les toca sin recomponerlo.
+ *
+ * El `ticketMap` llega YA normalizado y validado desde el schema: `loadAppConfig()` no transforma
+ * nada, solo compone. Su tipo es `ReadonlyMap` y no `Map`, y ahi esta toda la garantia: el Map real
+ * que el schema construye es mutable, y `Object.freeze` no lo congelaria de todas formas. Lo que
+ * impide que un consumidor haga `.set()` sin darse cuenta es el tipo del contrato, no el runtime.
+ */
+export interface RuteoConfig {
+  ticketMap: ReadonlyMap<string, number>;
+  subaddressPrefix: string;
+  placeholderTitle: string;
+  placeholderBody: string;
+}
+
+/**
  * La configuracion unica del proceso: el entorno validado compuesto con lo que resuelve el SDK.
  *
  * Se escribe a mano y eso no contradice CA-9: CA-9 exige que los tipos del *schema* se infieran
@@ -54,6 +70,12 @@ export interface AppConfig {
   // (test/config/source-properties.test.ts).
   imap: ImapConfig;
   poll: PollConfig;
+
+  // El bloque del ruteo entra bajo la MISMA regla estructural que el comentario de arriba: ningun
+  // punto de log emite el AppConfig completo. Agrega una razon propia — el `ticketMap` es la
+  // topologia comercial del despliegue, los projectId de todos los clientes habilitados, y no tiene
+  // por que estar en stdout. El escaner de `test/config/source-properties.test.ts` lo cubre.
+  ruteo: RuteoConfig;
 }
 
 /**
@@ -111,6 +133,21 @@ export async function loadAppConfig(): Promise<AppConfig> {
       cron: env.POLL_CRON,
       enabled: env.POLL_ENABLED,
       maxPerTick: env.POLL_MAX_PER_TICK,
+    },
+
+    // Los cuatro valores salen ENTEROS del env validado, sin `??` ni fallbacks: el schema ya aplico
+    // los defaults y ya construyo el Map normalizado.
+    ruteo: {
+      // Exactamente una de las dos esta definida — la regla de las dos fuentes en `env.ts` lo
+      // garantiza, y por eso el `??` no necesita un tercer termino. El `new Map()` final es
+      // inalcanzable en runtime y esta solo para el tipo: sin el, TypeScript ve `... | undefined`
+      // porque las dos claves son opcionales a nivel de schema (su obligatoriedad es cross-field y
+      // el tipo no la puede expresar). NO se re-valida la regla aca: una segunda comprobacion se
+      // desincroniza de la primera, y el compositor no valida nada por diseno.
+      ticketMap: env.TICKET_MAP ?? env.TICKET_MAP_FILE ?? new Map<string, number>(),
+      subaddressPrefix: env.SUBADDRESS_PREFIX,
+      placeholderTitle: env.PLACEHOLDER_TITLE,
+      placeholderBody: env.PLACEHOLDER_BODY,
     },
   };
 }

@@ -72,9 +72,15 @@ const VALID_ENV = {
   IMAP_HOST: 'imap.gmail.com',
   IMAP_USER: 'tickets@ejemplo.com',
   IMAP_PASSWORD: 'app-password-de-prueba',
+  // Requerida desde S-012, en una de sus dos fuentes.
+  TICKET_MAP: '{"alfa":42}',
 };
 
-/** Las siete requeridas. Eran cuatro hasta S-006; S-007 sumo las tres de la casilla. */
+/**
+ * Las ocho requeridas. Eran cuatro hasta S-006; S-007 sumo las tres de la casilla y S-012 el Mapa
+ * de Tickets, cuya obligatoriedad es cross-field: lo requerido es UNA de sus dos fuentes, y el
+ * reporte lo nombra por TICKET_MAP.
+ */
 const REQUIRED_VARIABLES = [
   'JIKU_CREDS',
   'JIKU_KEY_FILE',
@@ -83,6 +89,7 @@ const REQUIRED_VARIABLES = [
   'IMAP_HOST',
   'IMAP_USER',
   'IMAP_PASSWORD',
+  'TICKET_MAP',
 ];
 
 interface RunResult {
