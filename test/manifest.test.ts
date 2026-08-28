@@ -74,6 +74,15 @@ describe('package.json', () => {
     expect(allDependencies).not.toHaveProperty('nats');
   });
 
+  // TS-38 (S-007). node-cron entra como dependencia de PRODUCCION y no de desarrollo porque
+  // cron.validate() se necesita EN EL ARRANQUE, dentro del schema de configuracion: un POLL_CRON
+  // mal formado tiene que impedir el arranque, no explotar despues en cron.schedule().
+  it('declares node-cron as a production dependency and brings its own types', () => {
+    expect(manifest.dependencies?.['node-cron']).toMatch(/^\^4\./);
+    expect(manifest.devDependencies ?? {}).not.toHaveProperty('node-cron');
+    expect(allDependencies).not.toHaveProperty('@types/node-cron');
+  });
+
   it('declares the build, test and start scripts', () => {
     expect(manifest.scripts).toHaveProperty('build');
     expect(manifest.scripts).toHaveProperty('test');

@@ -127,8 +127,9 @@ dos copias de la misma tabla divergen, y la que se lee termina siendo la vieja.
 
 ### Configuración: variables y montajes
 
-Las diez variables que valida el arranque. **Ninguna lleva un secreto en su valor**: las dos
-credenciales son **rutas a archivos montados**, no su contenido.
+Las diecisiete variables que valida el arranque. Las dos credenciales del bus son **rutas a archivos
+montados**, no su contenido. **`IMAP_PASSWORD` es la única que lleva un secreto en su valor** — y por
+eso llega por entorno y nunca se hornea en la imagen (NFR-S05).
 
 | Variable | Req. | Default | Qué es |
 |---|---|---|---|
@@ -142,6 +143,24 @@ credenciales son **rutas a archivos montados**, no su contenido.
 | `JIKU_TIMEOUT` | No | `15000` (ms) | Piso de 15000: valores menores se elevan. No bajarlo |
 | `LOG_LEVEL` | No | `info` | `trace\|debug\|info\|warn\|error\|fatal\|silent` |
 | `NODE_ENV` | No | `production` | Sólo `development` activa `pino-pretty`, que **no está en la imagen** |
+| `IMAP_HOST` | **Sí** | — | Host del servidor IMAP de la casilla de tickets |
+| `IMAP_PORT` | No | `993` | IMAPS. Entero entre 1 y 65535 |
+| `IMAP_USER` | **Sí** | — | Usuario de la casilla |
+| `IMAP_PASSWORD` | **Sí** | — | **App Password** de la casilla, **no** la password de la cuenta. Es el único secreto que viaja en el valor de una variable |
+| `POLL_CRON` | No | `*/5 * * * *` | Se valida con `cron.validate()` de `node-cron` **en el arranque**: una expresión mal formada **no arranca** |
+| `POLL_ENABLED` | No | `true` | Sólo `true` o `false` literales. Cualquier otro valor **no arranca** |
+| `POLL_MAX_PER_TICK` | No | `50` | Máximo de mails por tick. Mínimo `1` |
+
+Tres cosas de la configuración de la casilla que conviene saber antes de desplegar:
+
+- **No hay variable de carpeta.** En v1 la carpeta es **`INBOX`, fija y no es configurable**: vive
+  como constante del módulo de ingesta. Si buscás una `IMAP_FOLDER`, no existe, y la ausencia es una
+  decisión y no un olvido.
+- **Las tres credenciales de IMAP son requeridas incluso con `POLL_ENABLED=false`.** `POLL_ENABLED`
+  es un **interruptor operativo**, no un modo de despliegue distinto: apagar el poll no convierte al
+  conector en un servicio que no necesita la casilla.
+- **Un `POLL_CRON` mal formado impide el arranque**, no falla más tarde al schedular. Es deliberado:
+  un cron inválido dejaría un worker vivo que nunca ingesta nada y **sin síntoma**.
 
 Los dos montajes, y son los únicos:
 

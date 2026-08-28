@@ -15,13 +15,22 @@ const VALID_ENV = {
   JIKU_KEY_FILE: '/run/secrets/machine-user.json',
   JIKU_PROJECT_ID: '307f1f77bcf86cd799439011',
   JIKU_VERIFY_PROJECT_ID: '42',
+  // Requeridas desde S-007: sin ellas el proceso ya no llega a arrancar. Los valores son los de
+  // prueba consistentes de toda la suite, y TS-34 los busca literalmente en los streams.
+  IMAP_HOST: 'imap.gmail.com',
+  IMAP_USER: 'tickets@ejemplo.com',
+  IMAP_PASSWORD: 'app-password-de-prueba',
 };
 
+/** Las siete requeridas. Eran cuatro hasta S-006; S-007 sumo las tres de la casilla. */
 const REQUIRED_VARIABLES = [
   'JIKU_CREDS',
   'JIKU_KEY_FILE',
   'JIKU_PROJECT_ID',
   'JIKU_VERIFY_PROJECT_ID',
+  'IMAP_HOST',
+  'IMAP_USER',
+  'IMAP_PASSWORD',
 ];
 
 /**
@@ -141,6 +150,11 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
 
     expect(result.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
     expect(result.stderr).not.toContain('ERR_PACKAGE_IMPORT_NOT_DEFINED');
+    // ERR_REQUIRE_ESM es el especifico de S-007: `node-cron` es ESM nativo y se importa desde el
+    // schema, o sea desde el arranque mismo. Un `require()` de un paquete ESM muere aca y no lo
+    // detectaria `tsc --noEmit`, que es justamente por lo que `module-imports` exige verificar la
+    // resolucion EJECUTANDO el dist/.
+    expect(result.stderr).not.toContain('ERR_REQUIRE_ESM');
     expect(result.stdout).toContain('configuracion valida');
   }, 30_000);
 
@@ -194,6 +208,43 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
     // despliegue. ADR-006: una linea de arranque exitoso sin ninguna credencial.
     for (const field of ['credsFile', 'keyFile', 'zitadelProjectId', 'servers']) {
       expect(line, `${field} must stay out of the startup line`).not.toHaveProperty(field);
+    }
+  }, 30_000);
+
+  // TS-33 (S-007). La linea de arranque sigue enumerando campos A MANO y no incorporo ninguno de
+  // los siete valores nuevos. Es la mitad ejecutable de CA-12: el escaner de codigo afirma que
+  // ningun log emite el AppConfig entero, y esto afirma que la linea real tampoco lo hace.
+  it('keeps every IMAP and poll value out of the startup line', () => {
+    const { stdout } = runDist({ ...VALID_ENV, NODE_ENV: 'production' });
+
+    const first = stdout.split('\n').filter((l) => l.trim() !== '')[0] as string;
+    const line = JSON.parse(first) as Record<string, unknown>;
+
+    // Exactamente las claves de contexto de siempre, mas las de base del logger.
+    expect(Object.keys(line).sort()).toEqual([
+      'env',
+      'instance',
+      'level',
+      'logLevel',
+      'msg',
+      'service',
+      'time',
+      'timeoutMs',
+    ]);
+    for (const field of ['imap', 'poll', 'password', 'host', 'user']) {
+      expect(line, `${field} must stay out of the startup line`).not.toHaveProperty(field);
+    }
+  }, 30_000);
+
+  // TS-34 (S-007). Ningun valor de la casilla aparece en NINGUNA linea del arranque, ni por stdout
+  // ni por stderr. El password es el caso que importa: es el primer secreto que este servicio
+  // recibe en el VALOR de una variable.
+  it('never leaks an IMAP value into either stream during startup', () => {
+    const { stdout, stderr } = runDist({ ...VALID_ENV, NODE_ENV: 'production' });
+
+    for (const value of ['app-password-de-prueba', 'tickets@ejemplo.com', 'imap.gmail.com']) {
+      expect(stdout, `${value} leaked to stdout`).not.toContain(value);
+      expect(stderr, `${value} leaked to stderr`).not.toContain(value);
     }
   }, 30_000);
 

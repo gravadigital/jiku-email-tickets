@@ -99,14 +99,19 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 13**
+**Total: 15**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
 - **ConfigValidationError** (`src/config/errors.ts`) - Raised when the environment fails validation.
   Carries the complete list of offending variable names in `variables`.
 - **AppConfig** (`src/config/index.ts`) - The process-wide configuration contract consumed by S-003,
-  S-004 and S-005. Ten fields since S-003 added `nodeEnv`; five of them must never reach a log line.
+  S-004, S-005, S-009 and S-011. Twelve fields since S-007 added the `imap` and `poll` blocks; the
+  bus paths, the topology and the whole `imap` block must never reach a log line.
+- **ImapConfig** (`src/config/index.ts`) - The IMAP adapter's whole configuration (`host`, `port`,
+  `user`, `password`), nested so S-009 receives it complete instead of four loose parameters.
+- **PollConfig** (`src/config/index.ts`) - The tick's whole configuration (`cron`, `enabled`,
+  `maxPerTick`), nested on the same criterion for S-010 and S-011.
 - **TestBusContext** (`test/bus/helpers.ts`) - Return type of `setupTestBus()`: the NATS connection,
   the bus client, and a `cleanup()` that drains the connection.
 - **KeyLoadError** (`src/infra/bus/errors.ts`) - The machine-user key could not be loaded. Names the
@@ -137,7 +142,7 @@ See full details in [types.md](./types.md)
 
 ## Constants
 
-**Total: 19**
+**Total: 22**
 
 - **SERVICE_NAME** (`src/shared/service-info.ts`) - The service name, used wherever the process has to
   identify itself.
@@ -147,6 +152,10 @@ See full details in [types.md](./types.md)
   deliberately has no default for it.
 - **DEFAULT_SERVERS_URL** (`src/config/schema.ts`) - Default bus endpoint. The SDK applies this one
   only at `connect()`, not at `loadConfig()`.
+- **DEFAULT_IMAP_PORT** (`src/config/schema.ts`) - Default IMAP port, 993 (IMAPS).
+- **DEFAULT_POLL_CRON** (`src/config/schema.ts`) - Default poll expression, `*/5 * * * *`, validated at
+  startup with `node-cron`'s own `validate()`.
+- **DEFAULT_POLL_MAX_PER_TICK** (`src/config/schema.ts`) - Default cap of mails per tick, 50.
 - **TEST_USER_ID** (`test/bus/helpers.ts`) - Fixed caller identity used by the test bus context.
 - **TEST_INSTANCE** (`test/bus/helpers.ts`) - Bus instance name used by the test bus context.
 - **REDACT_PATHS** (`src/shared/log-redaction.ts`) - The `redact` paths the logger censors: tokens,
@@ -185,9 +194,10 @@ See full details in [constants.md](./constants.md)
 
 **Total: 3**
 
-- **envSchema** (`src/config/schema.ts`) - Zod shapes of the ten environment variables in scope, with
-  their defaults and the timeout floor. The source of truth for the `Env` type. S-003 added `NODE_ENV`,
-  defaulted to `production`.
+- **envSchema** (`src/config/schema.ts`) - Zod shapes of the seventeen environment variables in scope,
+  with their defaults and the timeout floor. The source of truth for the `Env` type. S-007 added the
+  four `IMAP_` and three `POLL_` variables and made the three IMAP credentials **required**; only the
+  ticket-map ones remain undeclared.
 - **newRequirementSchema** (`src/domain/publicacion/requirement.schema.ts`) - The `requirements.new`
   payload contract: six fields, **`.strict()`** so a stray `actor` **fails** instead of being silently
   dropped, and no `.default()` on the enums (the schema models `core`'s contract, not the connector's

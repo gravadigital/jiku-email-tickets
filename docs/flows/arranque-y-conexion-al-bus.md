@@ -4,8 +4,8 @@ title: Arranque y conexión al bus
 type: event
 status: Draft
 created: 2026-08-27
-last_updated: 2026-08-27
-stories: [S-002, S-003, S-004, S-006]
+last_updated: 2026-08-28
+stories: [S-002, S-003, S-004, S-006, S-007, S-011]
 ---
 
 # Arranque y Conexión al Bus
@@ -13,8 +13,8 @@ stories: [S-002, S-003, S-004, S-006]
 **Tipo:** Evento
 **Status:** Draft
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-27 (S-006: el `CMD` del contenedor es ahora un trigger real y verificado — la imagen ejecuta este flujo, no el de publicación)
-**Stories:** S-002, S-003, S-004, S-006
+**Última actualización:** 2026-08-28 (S-007 implementada: el Paso 1 ya declara y exige las siete variables de IMAP/poll. S-011 agregará el Paso 8 — schedular el tick — más el apagado ordenado)
+**Stories:** S-002, S-003, S-004, S-006, S-007, S-011
 
 ## Descripción
 
@@ -118,13 +118,31 @@ filesystem y CA-2 exige fallar sin intentar nada antes.
 | `JIKU_TIMEOUT` | No | `15000` (**piso**, no baja) |
 | `LOG_LEVEL` | No | `info` |
 | `NODE_ENV` | No | `production` (agregada en S-003 — ver la nota del Paso 2) |
+| `IMAP_HOST` | Sí | — |
+| `IMAP_PORT` | No | `993` |
+| `IMAP_USER` | Sí | — |
+| `IMAP_PASSWORD` | Sí | — |
+| `POLL_CRON` | No | `*/5 * * * *` |
+| `POLL_ENABLED` | No | `true` |
+| `POLL_MAX_PER_TICK` | No | `50` |
 
-Las variables de **IMAP y del Mapa de Tickets no se declaran todavía** (FG-2 y FG-3).
+Las de **IMAP ya se declaran y son requeridas** (S-007): con la ingesta en alcance dejaron de ser
+opcionales, y esto **supera el criterio 5 de REQ-001**. Queda afuera **sólo el Mapa de Tickets**
+(FG-3).
+
+`POLL_CRON` se valida con **`cron.validate()` de `node-cron`, en el arranque** — no al schedular.
+Sin esa validación temprana, un cron mal formado explotaría recién en `cron.schedule()` (Paso 8, ya
+con el logger construido y la conexión abierta): un worker vivo que nunca ingesta nada y **sin
+síntoma**, que es exactamente el fallo diferido que este paso existe para evitar.
+
+`POLL_ENABLED` **no** usa `z.coerce.boolean()`: `Boolean('false')` es `true`, así que la coerción
+automática habilitaría el poll cuando se pidió deshabilitarlo, en silencio. La coerción es explícita
+sobre `z.enum(['true','false'])`, y un valor que no sea uno de los dos **no arranca**.
 
 La configuración del bus se lee con `loadConfig()` del SDK, invocado **dentro de `src/config/`** para
 no duplicar sus defaults ni romper el punto de lectura único.
 
-**Ref:** S-002; ADR-002; convención `env-config`
+**Ref:** S-002, S-007; ADR-002; convención `env-config`
 
 ---
 

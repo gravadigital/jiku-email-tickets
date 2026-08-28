@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
+import type { AppConfig } from '#config/index.js';
 import { REDACT_CENSOR, REDACT_PATHS } from '#shared/log-redaction.js';
+import { createLogger, resetLoggerForTests } from '#shared/logger.js';
+
+import { createLogCapture } from './log-capture.js';
 
 /**
  * Los tests de que la redaccion EFECTIVAMENTE censura viven en `logger.test.ts`, contra el logger
@@ -77,5 +81,67 @@ describe('REDACT_PATHS', () => {
 
   it('has no duplicate entry', () => {
     expect(new Set(paths).size).toBe(paths.length);
+  });
+});
+
+/**
+ * TS-35 (S-007). La frontera REAL de `redact`, afirmada sobre la linea SERIALIZADA — que es donde
+ * `redact` actua. Un test escrito sobre el objeto de entrada pasaria con `redact` desconectado.
+ *
+ * Que el caso de TRES niveles NO se censure es el resultado ESPERADO y esta escrito como tal, no
+ * como bug: `redact.paths` de Pino no tiene comodin profundo. Es exactamente la razon de existir
+ * del escaner de puntos de log de test/config/source-properties.test.ts — la defensa contra un
+ * `config.imap.password` en un log no es una ruta mas en esta lista (siempre quedaria un nivel
+ * atras), sino la regla estructural de que ningun log emite el AppConfig completo.
+ *
+ * NO "arreglar" este test agregando una ruta: la ruta cubriria un solo camino de anidamiento y el
+ * problema es la clase entera.
+ */
+describe('REDACT_PATHS depth boundary', () => {
+  const SECRET = 'app-password-de-prueba';
+
+  const CFG: AppConfig = {
+    servers: 'nats://localhost:4222',
+    instance: 'dev',
+    credsFile: '/run/secrets/sentinel.creds',
+    keyFile: '/run/secrets/machine-user.json',
+    zitadelProjectId: '307f1f77bcf86cd799439011',
+    issuer: 'https://id.grava.io',
+    timeoutMs: 15_000,
+    verifyProjectId: 42,
+    logLevel: 'info',
+    nodeEnv: 'production',
+    imap: { host: 'imap.gmail.com', port: 993, user: 'tickets@ejemplo.com', password: SECRET },
+    poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
+  };
+
+  afterEach(() => {
+    resetLoggerForTests();
+  });
+
+  it('censors a password at the root of the context', () => {
+    const capture = createLogCapture();
+    createLogger(CFG, capture.stream).info({ password: SECRET }, 'x');
+
+    expect(capture.raw().join('\n')).not.toContain(SECRET);
+    expect(capture.raw().join('\n')).toContain(REDACT_CENSOR);
+  });
+
+  it('censors a password nested one level, which is where imap.password sits', () => {
+    const capture = createLogCapture();
+    createLogger(CFG, capture.stream).info({ imap: { password: SECRET } }, 'x');
+
+    expect(capture.raw().join('\n')).not.toContain(SECRET);
+    expect(capture.raw().join('\n')).toContain(REDACT_CENSOR);
+  });
+
+  it('does NOT censor at three levels, which is why the log-call scanner exists', () => {
+    const capture = createLogCapture();
+    // Esto es exactamente lo que pasaria si un log emitiera el AppConfig entero bajo una clave.
+    createLogger(CFG, capture.stream).info({ config: { imap: { password: SECRET } } }, 'x');
+
+    // El secreto sale EN CLARO. No falla, no avisa. Por eso la defensa es estructural y no una
+    // ruta mas en la lista.
+    expect(capture.raw().join('\n')).toContain(SECRET);
   });
 });

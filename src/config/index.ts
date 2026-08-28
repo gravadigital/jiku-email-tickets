@@ -4,6 +4,27 @@ import { loadEnvFromProcess } from '#config/env.js';
 import { type LOG_LEVELS } from '#config/schema.js';
 
 /**
+ * La configuracion del adaptador IMAP, entera.
+ *
+ * Va anidada y no como cuatro campos sueltos porque el adaptador (S-009) la recibe completa: con
+ * campos sueltos, cada firma nueva enumeraria los cuatro y cada consumidor tendria que recomponer
+ * el subconjunto que le toca.
+ */
+export interface ImapConfig {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+}
+
+/** La configuracion del tick, entera. Mismo criterio: el scheduler (S-011) la recibe completa. */
+export interface PollConfig {
+  cron: string;
+  enabled: boolean;
+  maxPerTick: number;
+}
+
+/**
  * La configuracion unica del proceso: el entorno validado compuesto con lo que resuelve el SDK.
  *
  * Se escribe a mano y eso no contradice CA-9: CA-9 exige que los tipos del *schema* se infieran
@@ -23,6 +44,16 @@ export interface AppConfig {
   verifyProjectId: number;
   logLevel: (typeof LOG_LEVELS)[number];
   nodeEnv: 'development' | 'test' | 'production';
+
+  // OJO con el anidamiento: `imap.password` queda a DOS niveles desde la raiz de este objeto, y a
+  // TRES si alguien loguea el AppConfig entero dentro de un contexto. `redact.paths` de Pino NO
+  // tiene comodin profundo (ver src/shared/log-redaction.ts): a esa profundidad el secreto saldria
+  // EN CLARO, sin fallar y sin avisar. La defensa no es ampliar la lista de redaccion —seria
+  // interminable y quedaria siempre un nivel atras— sino la regla estructural: NINGUN punto de log
+  // emite el AppConfig completo, y hay un test de propiedad que lo afirma
+  // (test/config/source-properties.test.ts).
+  imap: ImapConfig;
+  poll: PollConfig;
 }
 
 /**
@@ -67,5 +98,19 @@ export async function loadAppConfig(): Promise<AppConfig> {
     // La consume el logger para decidir formato (JSON vs pino-pretty). Llega por parametro, no por
     // lectura del entorno: el logger no toca process.env.
     nodeEnv: env.NODE_ENV,
+
+    // Los siete valores salen ENTEROS del env validado: ninguno viene del SDK, que no conoce la
+    // casilla. Sin `??` ni fallbacks — el schema ya aplico los defaults.
+    imap: {
+      host: env.IMAP_HOST,
+      port: env.IMAP_PORT,
+      user: env.IMAP_USER,
+      password: env.IMAP_PASSWORD,
+    },
+    poll: {
+      cron: env.POLL_CRON,
+      enabled: env.POLL_ENABLED,
+      maxPerTick: env.POLL_MAX_PER_TICK,
+    },
   };
 }

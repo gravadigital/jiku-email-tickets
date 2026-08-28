@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { ConfigValidationError, toConfigValidationError } from '#config/errors.js';
+import { EXPECTATIONS, ConfigValidationError, toConfigValidationError } from '#config/errors.js';
+import { envSchema } from '#config/schema.js';
 import { AppError } from '#shared/errors/index.js';
 
 /** Minimal shape of a Standard Schema issue, enough to drive the formatter. */
@@ -80,5 +81,112 @@ describe('ConfigValidationError', () => {
     expect(err.variables).toEqual(['SOME_FUTURE_VAR']);
     expect(err.message).toContain('SOME_FUTURE_VAR');
     expect(err.message).not.toContain('leaked');
+  });
+});
+
+describe('EXPECTATIONS', () => {
+  const NEW_VARIABLES = [
+    'IMAP_HOST',
+    'IMAP_PORT',
+    'IMAP_USER',
+    'IMAP_PASSWORD',
+    'POLL_CRON',
+    'POLL_ENABLED',
+    'POLL_MAX_PER_TICK',
+  ] as const;
+
+  // TS-26. La correspondencia se afirma en las DOS direcciones para que una variable futura sin
+  // entrada rompa la suite en vez de quedar muda: sin entrada cae en UNKNOWN_EXPECTATION, que es
+  // seguro pero no le dice al operador que arreglar.
+  it('has one entry per schema key, and no entry that the schema does not declare', () => {
+    const declared = Object.keys(envSchema).sort();
+    const described = Object.keys(EXPECTATIONS).sort();
+
+    expect(described).toEqual(declared);
+  });
+
+  it('describes each of the seven new variables', () => {
+    for (const name of NEW_VARIABLES) {
+      expect(EXPECTATIONS[name], name).toMatch(/^se esperaba /);
+    }
+  });
+
+  // El texto describe QUE se esperaba, nunca que se recibio: es lo que hace estructuralmente
+  // imposible que un valor llegue al mensaje.
+  it('never quotes a value or hints at the shape of a credential', () => {
+    expect(EXPECTATIONS.IMAP_PASSWORD).not.toMatch(/caracter|largo|longitud|min|mayuscula|simbolo/i);
+    for (const name of NEW_VARIABLES) {
+      expect(EXPECTATIONS[name], name).not.toMatch(/recibi|recibido|valor recibido/i);
+    }
+  });
+});
+
+describe('toConfigValidationError with the IMAP and poll variables', () => {
+  // TS-3. Sin entrada propia, IMAP_PASSWORD caeria en UNKNOWN_EXPECTATION: correcto pero mudo.
+  it('describes IMAP_PASSWORD from its own entry, not from the unknown fallback', () => {
+    const err = toConfigValidationError([issue('IMAP_PASSWORD')]);
+
+    expect(err.variables).toEqual(['IMAP_PASSWORD']);
+    expect(err.message).not.toContain('no paso la validacion declarada en el schema');
+    expect(err.message).toContain(EXPECTATIONS.IMAP_PASSWORD);
+  });
+
+  // TS-10. El mensaje se lee igual que el criterio: "el minimo es 1".
+  it('names 1 as the minimum for POLL_MAX_PER_TICK', () => {
+    const err = toConfigValidationError([issue('POLL_MAX_PER_TICK')]);
+
+    expect(err.message).toContain('1');
+    expect(err.message).toContain(EXPECTATIONS.POLL_MAX_PER_TICK);
+  });
+
+  // TS-20. Un interruptor operativo tiene que decir cuales son sus dos posiciones.
+  it('enumerates the two accepted values for POLL_ENABLED', () => {
+    const err = toConfigValidationError([issue('POLL_ENABLED')]);
+
+    expect(err.message).toContain('true');
+    expect(err.message).toContain('false');
+  });
+
+  it('asks for a valid cron expression without echoing what was received', () => {
+    const err = toConfigValidationError([issue('POLL_CRON', 'received "no es un cron"')]);
+
+    expect(err.message).toContain('cron');
+    expect(err.message).not.toContain('no es un cron');
+  });
+
+  // TS-4. El valor de un secreto no llega al reporte por ningun camino.
+  it('never leaks the IMAP password value into the message or the details', () => {
+    const err = toConfigValidationError([
+      issue('IMAP_HOST', 'received ""'),
+      issue('IMAP_PASSWORD', 'received "app-password-de-prueba"'),
+    ]);
+
+    expect(err.variables).toEqual(['IMAP_HOST', 'IMAP_PASSWORD']);
+    expect(err.message).not.toContain('app-password-de-prueba');
+    expect(JSON.stringify(err.details)).not.toContain('app-password-de-prueba');
+  });
+
+  // TS-1. Las tres de IMAP y las del bus salen en UNA sola lista completa.
+  it('reports the three IMAP credentials together with the bus ones in a single list', () => {
+    const err = toConfigValidationError([
+      issue('JIKU_CREDS'),
+      issue('JIKU_KEY_FILE'),
+      issue('JIKU_PROJECT_ID'),
+      issue('JIKU_VERIFY_PROJECT_ID'),
+      issue('IMAP_HOST'),
+      issue('IMAP_USER'),
+      issue('IMAP_PASSWORD'),
+    ]);
+
+    expect(err.variables).toEqual([
+      'IMAP_HOST',
+      'IMAP_PASSWORD',
+      'IMAP_USER',
+      'JIKU_CREDS',
+      'JIKU_KEY_FILE',
+      'JIKU_PROJECT_ID',
+      'JIKU_VERIFY_PROJECT_ID',
+    ]);
+    expect(err.message).toContain('7 variables');
   });
 });

@@ -68,13 +68,21 @@ const VALID_ENV = {
   JIKU_KEY_FILE: '/run/secrets/machine-user.json',
   JIKU_PROJECT_ID: '307f1f77bcf86cd799439011',
   JIKU_VERIFY_PROJECT_ID: '42',
+  // Requeridas desde S-007.
+  IMAP_HOST: 'imap.gmail.com',
+  IMAP_USER: 'tickets@ejemplo.com',
+  IMAP_PASSWORD: 'app-password-de-prueba',
 };
 
+/** Las siete requeridas. Eran cuatro hasta S-006; S-007 sumo las tres de la casilla. */
 const REQUIRED_VARIABLES = [
   'JIKU_CREDS',
   'JIKU_KEY_FILE',
   'JIKU_PROJECT_ID',
   'JIKU_VERIFY_PROJECT_ID',
+  'IMAP_HOST',
+  'IMAP_USER',
+  'IMAP_PASSWORD',
 ];
 
 interface RunResult {
