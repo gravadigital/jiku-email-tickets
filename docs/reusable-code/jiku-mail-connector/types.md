@@ -526,3 +526,70 @@ class MissingMessageIdError extends AppError {
 
 **Notes:** `code` mirrors the literal `sin_message_id`, one of the five closed-catalog discard
 reasons ADR-006 enumerates. Do not invent a variant spelling.
+
+---
+
+## MailSource / RawMessage
+
+**Location:** `src/domain/ingesta/ports.ts`
+
+**Description:** The domain port that isolates the tick from the concrete IMAP client. Three
+operations, not two — a two-operation `fetchUnseen(max): Promise<RawMessage[]>` shape cannot
+satisfy the deferred-count `warn` (needs the untruncated total), one-at-a-time marking right after
+each download, and skip-without-marking on a failed download, all at once. `domain/` depends only
+on this port; the concrete adapter lives under `infra/imap/` (CA-11).
+
+**Interface:**
+
+```ts
+interface RawMessage {
+  readonly uid: number;
+  readonly source: Buffer; // raw, unparsed RFC 822 bytes
+}
+
+interface MailSource {
+  searchUnseen(): Promise<number[]>; // untruncated total, UID descending
+  fetch(uid: number): Promise<RawMessage>; // throws on failure, never marks
+  markSeen(uid: number): Promise<void>; // one UID at a time, no batch variant
+}
+```
+
+**Notes:** No Zod schema — the real boundary is the IMAP client, whose shape this port itself
+defines; there is no external deserialization to validate (same deviation criterion as
+`IncomingMail` in S-008). The production implementation is `withMailSource()`'s assembled object in
+`src/infra/imap/client.ts` (see services.md); tests inject a hand-written double, never a mock of
+the `imapflow` module.
+
+---
+
+## ImapConnectError / ImapConnectDiagnosis / diagnoseImapConnectFailure()
+
+**Location:** `src/infra/imap/errors.ts`
+
+**Description:** A failed IMAP connect/open translated into a diagnosis-carrying `AppError`,
+mirroring `BusConnectError`/`diagnoseConnectFailure()` in `infra/bus/errors.ts`. Classification is
+by **structure** (the `imapflow` error's constructor name, `errno` codes), never by interpolating
+the client's raw message text — so `message`/`details` never carry the password or user, in any
+form.
+
+**Signature:**
+
+```ts
+type ImapConnectDiagnosis = 'credenciales_invalidas' | 'host_inalcanzable' | 'desconocido';
+
+function diagnoseImapConnectFailure(error: unknown): ImapConnectDiagnosis;
+
+class ImapConnectError extends AppError {
+  readonly code = 'IMAP_CONNECT_ERROR';
+  readonly httpStatus = 500;
+  readonly diagnosis: ImapConnectDiagnosis;
+  readonly sdkErrorClass: string;
+}
+```
+
+**Notes:** `'desconocido'` is a legitimate, un-mapped result (ADR-006) — never guessed into one of
+the other two. `AuthenticationFailure` (by constructor name, not `instanceof`, for the same
+cross-copy reason as the bus's diagnosis) maps to `credenciales_invalidas`; the standard Node
+network `errno` codes (`ECONNREFUSED`, `ENOTFOUND`, etc.) map to `host_inalcanzable`.
+
+---

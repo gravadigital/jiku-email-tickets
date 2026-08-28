@@ -4,7 +4,7 @@ title: Ingesta y normalización del mail
 type: event
 status: Draft
 created: 2026-08-27
-last_updated: 2026-08-27
+last_updated: 2026-08-28
 stories: [S-007, S-008, S-009, S-010, S-011]
 ---
 
@@ -13,7 +13,7 @@ stories: [S-007, S-008, S-009, S-010, S-011]
 **Tipo:** Evento (scheduled)
 **Status:** Draft
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-27 (creado desde REQ-002, antes de la implementación)
+**Última actualización:** 2026-08-28 (S-009 implementada: Pasos 2 y 3, y el puerto `MailSource`)
 **Stories:** S-007, S-008, S-009, S-010, S-011
 
 ## Descripción
@@ -140,7 +140,10 @@ emitir la línea de métricas aunque el tick falle acá mismo.
 **Destino:** Casilla IMAP
 **Tipo:** Interno
 
-- `searchUnseen()` → `client.search({ seen: false })`: **únicamente** los `\Unseen`.
+- `searchUnseen()` → `client.search({ seen: false }, { uid: true })`: **únicamente** los `\Unseen`.
+  El segundo argumento **no es opcional en la práctica**: sin `{ uid: true }`, `imapflow` devuelve
+  números de secuencia (posición en la casilla), no UIDs, y esos números no sirven para `fetch()` ni
+  `markSeen()` de otra invocación (verificado contra `imapflow@1.7.6` en la Tarea 1 de S-009).
 - Ordena **UID descendente** — por **UID**, no por el header `Date`, que es dato del cliente y puede
   venir mal.
 - `const total = uids.length; const batch = uids.slice(0, maxPerTick);`

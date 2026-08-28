@@ -5,9 +5,9 @@ detailed documentation.
 
 Created by S-001 (bootstrap), extended by S-002 (typed configuration), S-003 (structured logging with
 redaction), S-004 (identity and the single bus connection), S-005 (publishing `requirements.new` and
-translating its errors) and S-008 (pure mail normalization). The service is a `worker` in Node.js
-with no HTTP surface and no database, so several categories do not apply and stay empty until a story
-creates them.
+translating its errors), S-008 (pure mail normalization) and S-009 (the `MailSource` port and its
+`imapflow` adapter). The service is a `worker` in Node.js with no HTTP surface and no database, so
+several categories do not apply and stay empty until a story creates them.
 
 ## Components
 
@@ -40,7 +40,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 12**
+**Total: 13**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -76,6 +76,10 @@ N/A (no HTTP surface - ADR-001)
   accessors for what `core` sent. **`hintOf()` exists because `hint()` is declared only on
   `JikuFailure`**: calling it on any of the other four SDK error classes is a `TypeError`, so the guard
   lives in exactly one place. See services.md before "simplifying" it to an inline `error.hint()`.
+- **withMailSource()** (`src/infra/imap/client.ts`) - Opens one IMAP connection (`secure: true`,
+  `logger: false` unconditional), takes the `INBOX` lock, builds a `MailSource` bound to that
+  client, runs the caller's callback, and closes lock/connection in a `finally` — one cycle shared
+  across `searchUnseen`/`fetch`/`markSeen`, not one connection per operation.
 
 See full details in [services.md](./services.md)
 
@@ -120,7 +124,7 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 18**
+**Total: 21**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -166,6 +170,15 @@ See full details in [test-helpers.md](./test-helpers.md)
 - **MissingMessageIdError** (`src/domain/ingesta/errors.ts`) - Thrown by `normalize()` for a mail
   without `Message-Id`. `code: 'SIN_MESSAGE_ID'` mirrors the closed-catalog discard reason
   `sin_message_id` from ADR-006.
+- **MailSource / RawMessage** (`src/domain/ingesta/ports.ts`) - The domain port isolating the tick
+  from the concrete IMAP client: `searchUnseen()` (untruncated total), `fetch(uid)` (throws on
+  failure), `markSeen(uid)` (single UID, no batch variant). `domain/` depends only on this; the
+  adapter lives under `infra/imap/`.
+- **ImapConnectError / ImapConnectDiagnosis** (`src/infra/imap/errors.ts`) - A failed IMAP
+  connect/open, diagnosed by structure (constructor name, `errno` codes) never by message text —
+  `message`/`details` never carry the password or user.
+- **diagnoseImapConnectFailure()** (`src/infra/imap/errors.ts`) - Classifies an `imapflow` connect
+  failure into `'credenciales_invalidas' | 'host_inalcanzable' | 'desconocido'`.
 
 See full details in [types.md](./types.md)
 
