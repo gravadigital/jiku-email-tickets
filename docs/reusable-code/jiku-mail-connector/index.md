@@ -4,9 +4,9 @@ This document lists all reusable code available in this service. Each category h
 detailed documentation.
 
 Created by S-001 (bootstrap), extended by S-002 (typed configuration), S-003 (structured logging with
-redaction) and S-004 (identity and the single bus connection). The service is a `worker` in Node.js
-with no HTTP surface and no database, so several categories do not apply and stay empty until a story
-creates them.
+redaction), S-004 (identity and the single bus connection) and S-005 (publishing `requirements.new`
+and translating its errors). The service is a `worker` in Node.js with no HTTP surface and no
+database, so several categories do not apply and stay empty until a story creates them.
 
 ## Components
 
@@ -22,7 +22,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 7**
+**Total: 12**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -42,12 +42,28 @@ N/A (no HTTP surface - ADR-001)
   refresh at `error` level and leaves the process alive.
 - **closeBus()** (`src/infra/bus/connection.ts`) - Drains and closes the retained connection. Never use
   `await using` — it is a syntax error on Node 22.
+- **runStartup()** (`src/startup.ts`) - The startup sequence shared by both entry points: configuration
+  → logger → identity → connection, with the two log lines. Extracted in S-005 so `start` and `verify`
+  cannot diverge.
+- **reportStartupFailure()** (`src/startup.ts`) - Reports a startup failure through the channel that
+  matches its moment: stderr for a configuration failure (the logger does not exist yet), the logger
+  for everything after it.
+- **publishVerificationRequirement()** (`src/domain/publicacion/publish-requirement.ts`) - Publishes
+  `requirements.new` with `client.command()`, validates the reply, logs `{ projectId, requirementId }`
+  on one line, and translates any failure into a `PublishError`. Never retries.
+- **diagnosePublishFailure()** (`src/domain/publicacion/publish-errors.ts`) - Classifies a publication
+  failure by **SDK class and error code**, never by message text, into the diagnosis of *which system
+  refused*. An unknown code is a normal outcome and is never mapped to a known case.
+- **hintOf() / codeOf() / coreMessageOf()** (`src/domain/publicacion/publish-errors.ts`) - Safe
+  accessors for what `core` sent. **`hintOf()` exists because `hint()` is declared only on
+  `JikuFailure`**: calling it on any of the other four SDK error classes is a `TypeError`, so the guard
+  lives in exactly one place. See services.md before "simplifying" it to an inline `error.hint()`.
 
 See full details in [services.md](./services.md)
 
 ## Test Helpers
 
-**Total: 5**
+**Total: 6**
 
 - **setupTestBus** (`test/bus/helpers.ts`) - Opens a NATS connection against the suite's shared
   container and builds a bus `Client` with `Client.fromConnection()`, returning a context with
@@ -63,12 +79,16 @@ See full details in [services.md](./services.md)
   Zitadel.
 - **generateServiceAccountKeyFile / writeRawKeyFile** (`test/bus/auth-helpers.ts`) - Writes a
   `ServiceAccountKey` JSON with a **real** RSA private key, plus its invalid variants.
+- **respondTo** (`test/bus/responder.ts`) - The `core` double: subscribes to a command **on the real
+  bus** with a **wildcard** subject and answers a prefabricated envelope. Exposes the observed subjects
+  and payloads, a **message counter** (which is what proves "no retry"), a mute mode for provoking
+  `JikuTimeout`, and `stop()`. Never rebuild the subject by hand — see its notes.
 
 See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 8**
+**Total: 13**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -87,12 +107,26 @@ See full details in [test-helpers.md](./test-helpers.md)
   union. `'desconocido'` is legitimate and is never mapped to another value.
 - **diagnoseConnectFailure() / causeChain()** (`src/infra/bus/errors.ts`) - Classify a connection
   failure by **structure**, never by the SDK's message text — the SDK's own regex misses a closed port.
+- **NewRequirementPayload** (`src/domain/publicacion/requirement.types.ts`) - The `requirements.new`
+  payload, **inferred** from the schema with `z.infer`. The SDK exports no type for this command, so
+  the schema is the only definition of the contract in the repo.
+- **NewRequirementReply** (`src/domain/publicacion/requirement.types.ts`) - The validated success
+  reply. Exists because `command<T>()` does not validate `data` against `T`.
+- **PublishDiagnosis** (`src/domain/publicacion/publish-errors.ts`) - Which system refused the
+  publication, as a literal union of nine values. `'desconocido'` is legitimate and is never mapped.
+- **PublishError** (`src/domain/publicacion/publish-errors.ts`) - A failed publication. Exposes
+  `diagnosis`, `sdkErrorClass`, `errorCode`, `hint`, `coreMessage` and `planoDeEscrituraAbierto` as
+  fields, plus `logContext(projectId)` which builds the flat log context and omits absent fields.
+- **RequirementValidationError** (`src/domain/publicacion/verification-payload.ts`) - The payload
+  failed the command contract. Carries the invalid field **paths**, never their values.
+- **CoreResponder** (`test/bus/responder.ts`) - What `respondTo()` returns: observed subjects and
+  payloads, the message counter, and `stop()`.
 
 See full details in [types.md](./types.md)
 
 ## Constants
 
-**Total: 12**
+**Total: 19**
 
 - **SERVICE_NAME** (`src/shared/service-info.ts`) - The service name, used wherever the process has to
   identify itself.
@@ -116,15 +150,39 @@ See full details in [types.md](./types.md)
   container accepts, and one it rejects.
 - **TEST_SUBJECT** (`test/bus/auth-helpers.ts`) - The `sub` the identity doubles declare,
   `'machine-user-abc'`.
+- **TITLE_MAX_LENGTH** (`src/domain/publicacion/requirement.schema.ts`) - 255, the `varchar` limit of
+  Jiku's column. The contract declares no `maxLength`. Exported because **FG-3 needs it to truncate**;
+  here it only validates.
+- **VERIFY_TITLE / VERIFY_DESCRIPTION** (`src/domain/publicacion/verification-payload.ts`) - The code
+  literals of the verification requirement. Their text says they are a deployment check, because the
+  requirement **stays forever**: there is no compensating command.
+- **VERIFY_TYPE / VERIFY_PRIORITY / VERIFY_VISIBILITY_LEVEL**
+  (`src/domain/publicacion/verification-payload.ts`) - The connector's defaults: `incidencia`,
+  `sin_prioridad`, `public`. They are policy of the connector, not of the contract, which is why they
+  live here and not as schema defaults.
+- **REQUIREMENT_TYPES / REQUIREMENT_PRIORITIES / REQUIREMENT_VISIBILITY_LEVELS**
+  (`src/domain/publicacion/requirement.schema.ts`) - The contract enums, verbatim.
+- **REMEDIES** (`src/domain/publicacion/publish-errors.ts`) - What to check for each diagnosis. Each
+  text names **the system** and **the fix**; the bus one says it implies nothing about `core`, the
+  shape ones say they prove the write plane is open, and the role one says reconnecting fixes it.
+- **MUTE** (`test/bus/responder.ts`) - Responder mode that receives and does not answer, to provoke
+  `JikuTimeout` without waiting 15 s.
 
 See full details in [constants.md](./constants.md)
 
 ## Validators
 
-**Total: 1**
+**Total: 3**
 
 - **envSchema** (`src/config/schema.ts`) - Zod shapes of the ten environment variables in scope, with
   their defaults and the timeout floor. The source of truth for the `Env` type. S-003 added `NODE_ENV`,
   defaulted to `production`.
+- **newRequirementSchema** (`src/domain/publicacion/requirement.schema.ts`) - The `requirements.new`
+  payload contract: six fields, **`.strict()`** so a stray `actor` **fails** instead of being silently
+  dropped, and no `.default()` on the enums (the schema models `core`'s contract, not the connector's
+  policy).
+- **newRequirementReplySchema** (`src/domain/publicacion/requirement.schema.ts`) - The success reply,
+  `{ id }`. Deliberately **not** `z.coerce`, and `.loose()` so a field `core` starts sending tomorrow
+  does not break the connector.
 
 See full details in [validators.md](./validators.md)

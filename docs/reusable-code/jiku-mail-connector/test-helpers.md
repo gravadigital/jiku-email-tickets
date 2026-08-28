@@ -194,3 +194,64 @@ function cleanupKeyFiles(): Promise<void>;
   so a fixture with `key: 'fake'` fails with `ERR_OSSL_UNSUPPORTED` — a *different* failure mode from
   the one the test means to exercise. The format is `pkcs1`/`pem`, the same
   `-----BEGIN RSA PRIVATE KEY-----` Zitadel hands out.
+
+---
+
+## respondTo
+
+**Location:** `test/bus/responder.ts`
+
+**Description:** The `core` double: subscribes to a command **on the real bus** and answers a
+prefabricated envelope. It is what makes the eight error situations testable without `core` and
+without mocking the bus.
+
+**Signature:**
+
+```ts
+function respondTo(
+  nc: NatsConnection,
+  command: string,
+  replies: ResponderReply | ResponderReply[] | typeof MUTE,
+): Promise<CoreResponder>;
+```
+
+**Usage:**
+
+```ts
+const responder = await respondTo(bus.connection, 'requirements.new', {
+  status: 'success',
+  data: { id: 42 },
+});
+
+// ... publish ...
+
+expect(responder.count()).toBe(1);   // no retry
+await responder.stop();
+```
+
+**Notes:**
+
+- **It subscribes with a WILDCARD (`*.*.jiku-commands.v1.{command}`), never by rebuilding the
+  subject**, and this is the rule that makes or breaks the helper. The `testing` convention says so
+  outright: a responder that rebuilt the subject and got it wrong **the same way** the production code
+  did would pass green with both halves broken — the test would be asserting the test's own
+  reconstruction instead of the SDK's. Verified: the subject the SDK publishes is
+  `test.test-machine-user.jiku-commands.v1.requirements.new`, and the wildcard covers `instance` and
+  `userId` while `jiku-commands`, `v1` and the method stay literal.
+- It exposes a **message counter**, which is what proves "no retry" (exactly 1 per publication) and
+  "the local rejection never reached the wire" (exactly 0 for `JikuInvalidRequest`). Without the
+  counter a silent retry would go unnoticed: the function's observable result would be identical.
+- It accepts a **sequence** of replies, which is what makes the repeatability test direct (two runs
+  answering `id: 1` and `id: 2`) without re-subscribing mid-test. Once exhausted it repeats the last
+  one, so a test that publishes more gets a coherent answer instead of a timeout that would be
+  diagnosed as something else.
+- `MUTE` receives and does not answer, to provoke `JikuTimeout` **with a short timeout injected from
+  the test** — never by lowering production's.
+- It imports the NATS types from **`@gravadigital/jiku/nats`, never from `nats`**: `nats` is not a
+  dependency of this project and must not become one (ADR-002). Two copies in the tree are two sets of
+  error classes, and `instanceof` fails against the copy that threw. This holds in tests exactly as it
+  does in production.
+- It waits **deterministically** for the subscription to be live with `nc.flush()` — no wall-clock
+  sleeps, which the convention forbids for waiting on a condition.
+- Always `stop()` it: with `fileParallelism: false` and a shared bus, a live subscription from an
+  earlier test is exactly the cross-contamination that sequential execution exists to avoid.

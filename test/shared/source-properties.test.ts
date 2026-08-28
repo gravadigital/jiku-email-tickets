@@ -103,17 +103,43 @@ describe('logger call sites in src/', () => {
   it('passes a context object as the first argument of every logger call', () => {
     // La otra mitad de CA-6: sin objeto de contexto no hay campos consultables, y el dato termina
     // — si termina en algun lado — dentro del texto.
+    //
+    // El contexto puede llegar de dos formas y las dos cumplen la convencion: un literal inline
+    // (`{ projectId }`) o una llamada que DEVUELVE el objeto (`error.logContext(projectId)`, que
+    // S-005 usa para que la forma del contexto de un fallo de publicacion viva junto al error y no
+    // se copie en cada punto de log). Lo que la convencion prohibe es pasar un STRING primero, que
+    // es lo que deja el dato dentro del texto en vez de en un campo.
+    //
+    // De ahi que se rechace por lo que NO puede ser, en vez de exigir que empiece con `{`: exigir
+    // el literal haria fallar la forma correcta junto con la incorrecta, y el "arreglo" seria
+    // inlinear un objeto que a proposito esta centralizado.
     const offenders: string[] = [];
+    const looksLikeAString = /^['"`]/;
 
     for (const file of FILES) {
       for (const args of loggerCalls(file.code)) {
         const trimmed = args.trim();
-        if (!trimmed.startsWith('{')) {
+        if (looksLikeAString.test(trimmed)) {
           offenders.push(`${file.relativePath}: ${trimmed.slice(0, 120)}`);
         }
       }
     }
 
     expect(offenders, `logger calls without a context object:\n${offenders.join('\n')}`).toEqual([]);
+  });
+
+  it('never interpolates a variable into the log message itself', () => {
+    // La regla que el test de arriba dejaria de cubrir al aceptar una llamada como contexto: el
+    // MENSAJE tiene que ser estatico. Un mensaje interpolado hace que las lineas no se puedan
+    // agrupar y mete el dato en el texto en vez de en un campo consultable.
+    for (const file of FILES) {
+      for (const args of loggerCalls(file.code)) {
+        // El mensaje es el ultimo argumento. Se busca un template literal con `${` en la lista.
+        expect(
+          args,
+          `${file.relativePath} must keep the log message static`,
+        ).not.toMatch(/`[^`]*\$\{[^`]*`\s*\)?\s*$/);
+      }
+    }
   });
 });

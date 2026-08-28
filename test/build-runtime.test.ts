@@ -61,6 +61,25 @@ function runDist(extra: Record<string, string>): { stdout: string; stderr: strin
   return { stdout: result.stdout, stderr: result.stderr, status: result.status };
 }
 
+/**
+ * Lo mismo para el SEGUNDO entry point, el del modo de verificacion (S-005).
+ *
+ * Existe como funcion aparte y no como parametro de `runDist()` para que quede visible que este
+ * repo emite DOS ejecutables y que los dos tienen que resolver sus `#` imports en runtime. Un
+ * mapeo roto pasa el typecheck y muere al arrancar, y el entry point que casi nunca se corre es
+ * exactamente el que se descubriria roto en el peor momento: cuando el operador esta verificando
+ * un despliegue nuevo.
+ */
+function runDistVerify(extra: Record<string, string>): { stdout: string; stderr: string; status: number | null } {
+  const result = spawnSync(process.execPath, ['dist/verify.js'], {
+    cwd: PROJECT_ROOT,
+    env: BASE_ENV_WITH(extra),
+    encoding: 'utf8',
+  });
+
+  return { stdout: result.stdout, stderr: result.stderr, status: result.status };
+}
+
 // El error que este archivo previene es el que pasa el typecheck y falla al arrancar:
 // tsc no reescribe los especificadores al emitir, asi que el mapeo `#` tiene que estar
 // configurado tambien del lado runtime (package.json#imports).
@@ -257,6 +276,55 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
     // Sin linea JSON de arranque: el logger no llego a construirse.
     expect(result.stdout.trim()).toBe('');
   }, 30_000);
+
+  // TS-33: el `dist/` del entry point de VERIFICACION arranca y resuelve sus `#` imports.
+  //
+  // Es el mismo error que este archivo previene para `index.js`, y vale doble aca: `verify` es el
+  // entry point que casi nunca se corre, asi que un mapeo roto suyo se descubriria recien cuando un
+  // operador esta verificando un despliegue nuevo y necesita que funcione.
+  it('resolves every subpath import of the verify entry point at runtime', () => {
+    const result = runDistVerify(VALID_ENV);
+
+    expect(result.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+    expect(result.stderr).not.toContain('ERR_PACKAGE_IMPORT_NOT_DEFINED');
+    // Llego a ejecutar codigo propio: la configuracion valido y el arranque emitio su linea.
+    expect(result.stdout).toContain('configuracion valida');
+  }, 30_000);
+
+  it('makes the verify entry point fail by CONFIGURATION, not by module resolution', () => {
+    // La distincion es la que hace util a este test: un proceso que muere en la resolucion de
+    // modulos y uno que muere validando el entorno fallan los dos, y solo el segundo significa que
+    // el cableado esta bien.
+    const result = spawnSync(process.execPath, ['dist/verify.js'], {
+      cwd: PROJECT_ROOT,
+      env: BASE_ENV_WITH({ JIKU_INSTANCE: 'dev' }),
+      encoding: 'utf8',
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('la configuracion es invalida');
+    for (const name of REQUIRED_VARIABLES) {
+      expect(result.stderr).toContain(name);
+    }
+    expect(result.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+    expect(result.stderr).not.toContain('ERR_PACKAGE_IMPORT_NOT_DEFINED');
+  }, 30_000);
+
+  it('never publishes anything from the verify entry point without a reachable bus', () => {
+    // El modo de verificacion publica UN comando y sale. Sin bus alcanzable tiene que morir en el
+    // arranque con codigo != 0 y sin colgarse: es un proceso de vida corta que cierra la conexion en
+    // un `finally`, no un worker que queda esperando.
+    const result = runDistVerify({
+      ...VALID_ENV,
+      JIKU_KEY_FILE: VALID_KEY_FILE,
+      JIKU_CREDS: READABLE_CREDS,
+      JIKU_SERVERS: 'nats://127.0.0.1:1',
+      NODE_ENV: 'production',
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).not.toContain('ERR_PACKAGE_IMPORT_NOT_DEFINED');
+  }, 60_000);
 
   it('never writes a secret path to stdout, where the structured log goes', () => {
     const { stdout } = runDist(VALID_ENV);

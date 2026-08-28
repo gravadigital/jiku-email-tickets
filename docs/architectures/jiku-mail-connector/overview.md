@@ -18,6 +18,11 @@ worker en node
   al arrancar). Un mail sin slug mapeado se descarta con motivo logueado.
 - **publicacion** — Los dos comandos de escritura al bus via el SDK: `files.request-upload` y
   `requirements.new`. El `PUT` del byte del adjunto a la URL prefirmada que devuelve `core`.
+  **Estado (S-005):** `requirements.new` esta **implementado** —schema Zod del contrato, payload fijo,
+  publicacion con `client.command()` y la traduccion de las 7 clases de error del SDK al diagnostico
+  de que sistema rechazo— y se ejercita con el modo de verificacion (`npm run verify`), un entry point
+  separado del arranque. **Pendientes de FG-4:** `files.request-upload`, el `PUT` del adjunto y
+  `fileIds` en el payload. **Pendiente de FG-3:** el payload derivado del mail (hoy es fijo).
 
 ## Notas adicionales
 

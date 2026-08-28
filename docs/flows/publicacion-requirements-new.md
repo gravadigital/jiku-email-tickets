@@ -2,7 +2,7 @@
 id: publicacion-requirements-new
 title: Publicación de requirements.new
 type: feature
-status: Draft
+status: Implemented
 created: 2026-08-27
 last_updated: 2026-08-27
 stories: [S-005]
@@ -11,7 +11,7 @@ stories: [S-005]
 # Publicación de `requirements.new`
 
 **Tipo:** Feature
-**Status:** Draft
+**Status:** Implemented
 **Creado:** 2026-08-27
 **Última actualización:** 2026-08-27
 **Stories:** S-005
@@ -207,11 +207,11 @@ Errores). **No reintenta nada.**
 | 4 | `JikuFailure` | `caller_not_authorized` | El bus dejó pasar; **`core` rechazó por rol** | Típicamente **sin fila en `users`**. **Reconectar lo corrige solo**, y una corrida posterior tiene éxito | S-005 CA-8 |
 | 4 | `JikuFailure` | `invalid_fields` | `core` aceptó el caller y rechazó **la forma** | El payload. **Es prueba de que el plano de escritura está abierto** | S-005 CA-10 |
 | 4 | `JikuFailure` | `project_not_found` | `core`: el proyecto no existe | Se loguea **con el `projectId` usado**. También prueba que el plano está abierto | S-005 CA-9 |
-| 3-4 | `JikuTimeout` | — | Nada respondió: `core` caído o lento | A los **15 s**, con la clase y el `hint()` | S-005 CA-11 |
-| 4 | cualquiera | **desconocido** | — | Se loguea con su `code` y su `hint()` **y no se mapea a nada** | S-005 CA-13 |
+| 3-4 | `JikuTimeout` | — | Nada respondió: `core` caído o lento | A los **15 s**, con la clase. **Sin `hint()`: la clase no lo declara** (ver Nota sobre `hint()`) | S-005 CA-11 |
+| 4 | cualquiera | **desconocido** | — | Se loguea con su `code` y su `errorMessage` **y no se mapea a nada**. Su `hint()` es `undefined` (ver Nota sobre `hint()`) | S-005 CA-13 |
 
 **En los ocho casos: no hay reintento** (C-19, NFR-R03). El resultado del modo de verificación es
-informar el fallo con la clase del SDK, el `code` y el `hint()`.
+informar el fallo con la clase del SDK, el `code` y —cuando existe— el `hint()`.
 
 **El eje del diagnóstico:** las tres primeras filas son **el bus**; las tres siguientes son **`core`**,
 y entre ellas se distingue **por rol** (`caller_not_authorized`) de **por forma** (`invalid_fields`,
@@ -252,3 +252,28 @@ de `users`, o en el payload.
 - **Convención candidata:** el patrón de uso del SDK (conexión única, token como getter, mapeo de
   clases de error) no tiene convención escrita en el catálogo. Este flujo **lo produce**; formalizarlo
   es candidato a `/product-change-technical-definition` cuando FG-2/FG-3 confirmen que se estabilizó.
+
+- **Nota sobre `hint()` — desviación documentada entre la story y el SDK instalado.** Los criterios
+  CA-9, CA-11, CA-12 y CA-13 de S-005 piden loguear la clase del error "con su `hint()`". **Eso no se
+  puede hacer literalmente**, y verificarlo ejecutando el SDK lo dejó firme:
+
+  1. **`hint()` está declarado sólo en `JikuFailure`.** `JikuTimeout`, `JikuNoEndpoint`,
+     `JikuPermissionDenied` y `JikuInvalidRequest` extienden `JikuError`, que no lo declara:
+     invocarlo sobre cualquiera de ellas es un **`TypeError`** — y ocurriría justo cuando el conector
+     ya está fallando y el log es lo único que queda. Por eso el acceso vive en **una sola** función
+     guardada (`hintOf()`), y hay un test de propiedad que afirma que hay un único punto de llamada.
+  2. **`hint()` devuelve `undefined` para `project_not_found` y para todo código desconocido.** El
+     catálogo de `hintFor()` no los cubre y su `default` devuelve `undefined`. Son exactamente los dos
+     casos que CA-9 y CA-13 piden loguear "con su `hint()`".
+
+  **Lo que se implementó en su lugar:** el campo `hint` se **omite** del contexto cuando no existe (no
+  se loguea `hint: null`, que sugeriría que el SDK contestó algo cuando no contestó nada), y lo que
+  viaja siempre es la **clase del error**, el **`code`** y el **`errorMessage` que mandó `core`,
+  verbatim**. Para esos dos casos ése es el dato de diagnóstico real. **No inventar texto para tapar
+  la ausencia de `hint()`.**
+
+- **Nota para FG-3:** este flujo se **extiende**, no se reescribe. Lo que cambia es el **origen del
+  payload** (fijo → derivado del mail, con truncado y placeholders) y se agrega el registro del alta
+  con `messageId`. **La traducción de errores queda igual**, y el punto de log también: la línea vive
+  dentro de `publishVerificationRequirement()` y no en el entry point, precisamente para que siga
+  existiendo cuando el llamador pase a ser el tick en vez del script.

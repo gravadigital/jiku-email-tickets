@@ -257,3 +257,163 @@ function causeChain(error: unknown): Error[];
   anything, so there is no positive structural signal for it. The token failure is recognised
   elsewhere — `connectToBus()` asks for the token *before* `connect()`, so its failure is attributed
   by the call that produced it rather than by what is left over.
+
+---
+
+## NewRequirementPayload
+
+**Location:** `src/domain/publicacion/requirement.types.ts`
+
+**Description:** The `requirements.new` payload type, **inferred** from the schema.
+
+**Signature:**
+
+```ts
+type NewRequirementPayload = z.infer<typeof newRequirementSchema>;
+```
+
+**Notes:**
+
+- Inferred and never hand-written: the `validation` convention requires it, and the reason is concrete
+  — the SDK exports no type for this command, so the schema is the only definition of the contract in
+  the repo. A parallel hand-written type could diverge from the schema without anything failing, and
+  then the compiler would assert one shape while another travelled to the bus.
+
+---
+
+## NewRequirementReply
+
+**Location:** `src/domain/publicacion/requirement.types.ts`
+
+**Description:** The validated success reply of the command.
+
+**Signature:**
+
+```ts
+type NewRequirementReply = z.infer<typeof newRequirementReplySchema>;
+```
+
+---
+
+## PublishDiagnosis
+
+**Location:** `src/domain/publicacion/publish-errors.ts`
+
+**Description:** Which system refused the publication, and therefore where the fix is.
+
+**Signature:**
+
+```ts
+type PublishDiagnosis =
+  | 'rechazo_del_bus_por_subject'   // THE BUS, by subject, before core saw anything. Zitadel.
+  | 'bus_sin_endpoint'              // THE BUS: nothing is subscribed. Said immediately.
+  | 'error_de_armado_del_conector'  // THE CONNECTOR: rejected locally, nothing reached the wire.
+  | 'core_rechazo_por_rol'          // core, by ROLE. Typically the missing `users` row.
+  | 'core_rechazo_por_forma'        // core, by SHAPE. The payload or the project.
+  | 'core_rechazo_desconocido'      // core refused with a code this connector does not know.
+  | 'nada_respondio'                // Nobody answered within the timeout.
+  | 'respuesta_ilegible'            // core said success and the reply has no usable id.
+  | 'desconocido';                  // Not an SDK error. Logged as such, never mapped.
+```
+
+**Notes:**
+
+- A literal union rather than loose strings, so the `REMEDIES` record is exhaustive for the
+  typechecker when a tenth case is added.
+- `'core_rechazo_por_forma'` covers **two** codes (`invalid_fields` and `project_not_found`) on
+  purpose: same axis of diagnosis (`core` accepted the caller and refused the shape) and same
+  operational message (the write plane is open). What distinguishes them — the `projectId` — travels
+  in the `code` and in the log context, not in the diagnosis.
+- `'desconocido'` is a legitimate result and is **never** mapped to another value.
+
+---
+
+## PublishError
+
+**Location:** `src/domain/publicacion/publish-errors.ts`
+
+**Description:** A failed publication of `requirements.new`.
+
+**Signature:**
+
+```ts
+class PublishError extends AppError {
+  readonly code = 'PUBLISH_ERROR';
+  readonly httpStatus = 500;
+  readonly diagnosis: PublishDiagnosis;
+  readonly sdkErrorClass: string;
+  readonly errorCode: string | undefined;
+  readonly hint: string | undefined;
+  readonly coreMessage: string | undefined;
+  readonly planoDeEscrituraAbierto: boolean;
+  logContext(projectId: number): Record<string, unknown>;
+}
+```
+
+**Notes:**
+
+- Exposes the diagnosis as a **field**, not only inside the message — imitating `BusConnectError` from
+  S-004. That is what lets the log point and the tests assert on **structure** instead of captured
+  text, and therefore what lets the message be rewritten without breaking any test.
+- `planoDeEscrituraAbierto` is **positive information**: if `core` answered at all, the bus let the
+  command through and this identity has permission on the subject. It travels as a boolean field
+  rather than buried in prose.
+- `logContext()` builds a **flat, one-level** context, because S-003's redaction has no deep wildcard:
+  a nested context would leave a secret in the clear without failing or warning.
+- It **omits** `code`, `hint` and `errorMessage` when they are `undefined`, with a conditional spread.
+  It never logs `hint: null`: that is noise in a line read for diagnosis, and it suggests the SDK
+  answered something when it answered nothing. The absence of `code` is itself information — it means
+  `core` never answered.
+- The log key is **`code`** while the class field is **`errorCode`**, and the asymmetry is deliberate:
+  in the log, `code` is the code `core` sent — the field that cross-references `core`'s own log, which
+  calls it that — whereas `PublishError.code` is the constant `PUBLISH_ERROR` and adds nothing to a
+  line that already carries `diagnosis`.
+- **Neither the message nor any field carries the payload, the title or the description.** Verified
+  reason: `REDACT_PATHS` covers `text`, `content` and `body` but **not** `title` or `description`. In
+  this story they are code literals so there would be no leak; in FG-3 the payload derives from the
+  mail and there would be. The rule is established here, while it is free.
+
+---
+
+## RequirementValidationError
+
+**Location:** `src/domain/publicacion/verification-payload.ts`
+
+**Description:** The payload did not satisfy the command contract.
+
+**Signature:**
+
+```ts
+class RequirementValidationError extends AppError {
+  readonly code = 'REQUIREMENT_VALIDATION_ERROR';
+  readonly httpStatus = 500;
+  readonly invalidFields: string[];
+}
+```
+
+**Notes:**
+
+- Carries the **paths** of the invalid fields, never their values. The distinction is security, not
+  tidiness: in FG-3 those values are mail content, and `title`/`description` are not redacted.
+- This is why `parseNewRequirement()` uses `safeParse` and not `parse`: with `parse` the raw `ZodError`
+  escapes, and its `message` carries the rejected values.
+
+---
+
+## CoreResponder
+
+**Location:** `test/bus/responder.ts`
+
+**Description:** What `respondTo()` returns: the observed subjects and payloads, the message counter,
+and `stop()`.
+
+**Signature:**
+
+```ts
+interface CoreResponder {
+  subjects(): string[];
+  payloads(): unknown[];
+  count(): number;
+  stop(): Promise<void>;
+}
+```
