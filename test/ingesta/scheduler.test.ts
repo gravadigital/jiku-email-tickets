@@ -130,6 +130,13 @@ describe('scheduler: scheduleTick() — las dos ramas de POLL_ENABLED (Tarea 2)'
     expect(task).toBe(fakeScheduledTask);
   });
 
+  // Defensa complementaria de S-016 CA-8, junto con `test/publicacion/verify-entry-point.test.ts`
+  // (que afirma la mitad estructural: `index.ts`/`startup.ts` no importan `#domain/publicacion/`
+  // ni hacen `.command(`). ESTE test es el que impide "que cada reinicio deje basura permanente"
+  // (Riesgo 1 de REQ-003) ahora que existe un camino de codigo real de `index.ts` a `publicacion`
+  // via el tick (S-014/S-015): si `scheduleTick()` alguna vez disparara un tick inmediato al
+  // arrancar, cada reinicio del proceso republicaria altas para los mails ya `\Unseen` en ese
+  // instante. Nombrado explicitamente para que nadie lo elimine por "redundante".
   it('TS-7: no hay tick inmediato al arrancar — la funcion de tick inyectada no se invoca al schedular', () => {
     const { logger } = testLoggerWithCapture();
     const config = { ...configStub(), poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 } };

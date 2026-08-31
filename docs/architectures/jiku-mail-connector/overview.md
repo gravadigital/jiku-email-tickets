@@ -20,17 +20,24 @@ worker en node
   segun `POLL_CRON` (o queda vivo sin schedular nada si `POLL_ENABLED=false`), nunca corre un tick
   inmediato al arrancar, saltea un disparo si hay uno en curso (con `warn`, sin encolar), libera su
   indicador de solapamiento **siempre** —incluso si el tick lanza—, y responde a `SIGTERM`/`SIGINT`
-  esperando el tick en vuelo antes de cerrar el bus y salir con codigo `0`. **Pendiente de FG-3:** el
-  ruteo y la publicacion — hoy el mail normalizado se descarta al final del tick.
+  esperando el tick en vuelo antes de cerrar el bus y salir con codigo `0`. Desde S-014/S-015, cada
+  mail normalizado se rutea y publica dentro de la misma iteracion del tick — ver el modulo `ruteo`.
 - **ruteo** — Resolucion del slug del subaddress contra el Mapa de Tickets (KV en memoria, cargado
-  al arrancar). Un mail sin slug mapeado se descarta con motivo logueado.
+  al arrancar). Un mail sin slug mapeado se descarta con motivo logueado. **Estado (S-012 a S-016):**
+  **implementado** de punta a punta — el arbol de decision puro de `routeMail()` (`es_respuesta` →
+  `sin_slug` → `slug_no_mapeado` → resuelto, S-013), cableado en el tick junto con la publicacion
+  (S-014), y con las propiedades del sistema completo afirmadas por tests (slug literal en el log
+  redactado, ningun log filtra contenido de cliente, entry points limpios, pico de memoria de un mail
+  a la vez — S-016). Documentado de punta a punta en
+  [ruteo-y-alta-del-requisito](../../flows/ruteo-y-alta-del-requisito.md).
 - **publicacion** — Los dos comandos de escritura al bus via el SDK: `files.request-upload` y
   `requirements.new`. El `PUT` del byte del adjunto a la URL prefirmada que devuelve `core`.
-  **Estado (S-005):** `requirements.new` esta **implementado** —schema Zod del contrato, payload fijo,
-  publicacion con `client.command()` y la traduccion de las 7 clases de error del SDK al diagnostico
-  de que sistema rechazo— y se ejercita con el modo de verificacion (`npm run verify`), un entry point
-  separado del arranque. **Pendientes de FG-4:** `files.request-upload`, el `PUT` del adjunto y
-  `fileIds` en el payload. **Pendiente de FG-3:** el payload derivado del mail (hoy es fijo).
+  **Estado (S-005 a S-016):** `requirements.new` esta **implementado** de punta a punta —schema Zod
+  del contrato, publicacion con `client.command()` y la traduccion de las 9 ramas de diagnostico del
+  SDK al sistema que rechazo (S-005)— con **dos disparadores** desde S-015: el modo de verificacion
+  (`npm run verify`, payload fijo, un entry point separado del arranque) y el tick (payload derivado
+  del mail, via `publishRequirementFromMail()`). **Pendientes de FG-4:** `files.request-upload`, el
+  `PUT` del adjunto y `fileIds` en el payload.
 
 ## Notas adicionales
 

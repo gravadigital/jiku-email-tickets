@@ -4,8 +4,8 @@ title: Publicación de requirements.new
 type: feature
 status: Implemented
 created: 2026-08-27
-last_updated: 2026-08-27
-stories: [S-005]
+last_updated: 2026-08-31
+stories: [S-005, S-012, S-013, S-014, S-015, S-016]
 ---
 
 # Publicación de `requirements.new`
@@ -13,29 +13,35 @@ stories: [S-005]
 **Tipo:** Feature
 **Status:** Implemented
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-27
-**Stories:** S-005
+**Última actualización:** 2026-08-31 (S-016 implementada: el flujo queda extendido con el segundo
+disparador — el tick, con el payload derivado del mail — sin reescribir el modo de verificación)
+**Stories:** S-005, S-012, S-013, S-014, S-015, S-016
 
 ## Descripción
 
-Flujo de publicación del comando `requirements.new` al bus de Jiku y traducción de su respuesta. En
-este alcance (FG-1) lo dispara el **modo de verificación** —un script explícito del repositorio,
-separado del arranque normal— con un payload **fijo**. Cubre el armado y la validación del payload, la
-publicación vía `client.command()`, la reply por `_INBOX`, y **la traducción de las 7 clases de error
-del SDK a un diagnóstico que dice cuál de los tres sistemas rechazó**.
+Flujo de publicación del comando `requirements.new` al bus de Jiku y traducción de su respuesta.
+**Dos disparadores, desde S-015:** el **modo de verificación** —un script explícito del repositorio,
+separado del arranque normal— con un payload **fijo**; y el **tick** (FG-3), con un payload
+**derivado del mail** vía `publishRequirementFromMail()`. Cubre el armado y la validación del payload,
+la publicación vía `client.command()`, la reply por `_INBOX`, y **la traducción de las 9 ramas de
+diagnóstico del SDK a cuál de los tres sistemas rechazó**.
 
 Reusa completo el flujo [arranque-y-conexion-al-bus](arranque-y-conexion-al-bus.md): misma
-configuración, mismo logger, misma identidad, **una sola conexión**.
+configuración, mismo logger, misma identidad, **una sola conexión**. El árbol de decisión que resuelve
+el proyecto y arma el payload del camino del mail está documentado en
+[ruteo-y-alta-del-requisito](ruteo-y-alta-del-requisito.md).
 
-> **Nota para FG-3:** este flujo se **extiende, no se reescribe**. Cambia el origen del payload (fijo
-> → derivado de un mail real, C-16) y se agrega el registro del alta con `messageId` (C-18). La
-> traducción de errores queda igual.
+**El flujo se extiende, no se reescribe** — como ya anticipaba su propia nota de FG-3. Lo que cambió
+es el **origen del payload** en el segundo disparador (derivado del mail, con el orden
+recortar → truncar → placeholder) y que la línea de éxito del camino del mail suma el `messageId`. **La
+traducción de errores queda igual**, y el punto de log también: la línea vive dentro de
+`publishVerificationRequirement()` / `publishRequirementFromMail()`, nunca en el entry point.
 
 ## Servicios Involucrados
 
 | Servicio | Rol | Tipo de Participación |
 |----------|-----|-----------------------|
-| jiku-mail-connector | Arma el payload fijo, publica el comando y traduce la respuesta | Iniciador |
+| jiku-mail-connector | Arma el payload (fijo o derivado del mail), publica el comando y traduce la respuesta | Iniciador |
 | Bus NATS + auth-callout | Autoriza el subject y entrega el comando a `core`; devuelve la reply por `_INBOX` | Procesador |
 | Jiku (`core`) | Autoriza el caller por rol, resuelve el actor del subject, valida la forma y crea el requisito | Procesador |
 | PostgreSQL de Jiku | Persiste el requisito (escrito por `core`, no por el conector) | Consumidor |
@@ -50,7 +56,11 @@ sequenceDiagram
     participant DB as PostgreSQL de Jiku
 
     MC->>MC: arranque completo (config, logger, identidad, 1 connect)
-    MC->>MC: armar payload FIJO + safeParse (Zod)
+    alt disparador: modo de verificacion
+        MC->>MC: armar payload FIJO + safeParse (Zod)
+    else disparador: tick (mail ruteado)
+        MC->>MC: buildRequirementPayload(): recortar -> truncar -> placeholder + safeParse (Zod)
+    end
     MC->>BUS: client.command('requirements.new', payload)
     alt sin permiso sobre el subject
         BUS-->>MC: JikuPermissionDenied → el BUS rechazó por subject (Zitadel)
@@ -69,44 +79,62 @@ sequenceDiagram
                 CORE->>DB: INSERT requirements (state: analisis)
                 DB-->>CORE: id
                 CORE-->>MC: success { id }
-                MC-->>MC: log { projectId, requirementId }
+                alt disparador: modo de verificacion
+                    MC-->>MC: log { projectId, requirementId }
+                else disparador: tick (mail ruteado)
+                    MC-->>MC: log { messageId, projectId, requirementId }
+                end
             end
         end
     end
-    Note over MC: en los 8 casos de error: SIN reintento
+    Note over MC: en las 9 ramas de diagnostico: SIN reintento
 ```
 
-### Paso 1: Arranque y conexión
+### Paso 1: Arranque y conexión, con dos disparadores
 
 **Origen:** jiku-mail-connector
 **Destino:** (interno)
 **Tipo:** Interno
 
-**Acción:** el modo de verificación reusa los pasos 1-5 del flujo
+**Acción:** los dos disparadores reusan los pasos 1-5 del flujo
 [arranque-y-conexion-al-bus](arranque-y-conexion-al-bus.md): misma configuración, mismo logger, misma
 identidad, **una sola conexión**.
 
-**Trigger del flujo:** ejecución **explícita** de un script del repositorio (p. ej. `npm run verify`),
-**nunca un efecto secundario de `start`** ni del `CMD` del contenedor.
+**Dos disparadores, ambos sobre la misma publicación de fondo** (`client.command('requirements.new',
+...)`, una sola constante `COMMAND`, un único punto de invocación en todo el código —verificado por
+`test/publicacion/source-properties.test.ts`, *"invokes client.command in exactly one file"*):
 
-> **Por qué separado:** invariante 9 — un requisito creado no se modifica ni se borra nunca. Si la
-> publicación ocurriera en cada arranque, **cada reinicio dejaría basura permanente** en el proyecto
-> de Jiku.
+1. **El script de verificación** (`npm run verify`) — **sin cambios desde S-005**: ejecución
+   **explícita** de un script del repositorio, **nunca un efecto secundario de `start`** ni del `CMD`
+   del contenedor, con un payload **fijo**.
+2. **El tick** (FG-3, desde S-015) — dentro del `for` de `runTick()`, cuando `routeMail()` resuelve un
+   proyecto para el mail (ver [ruteo-y-alta-del-requisito](ruteo-y-alta-del-requisito.md)), con un
+   payload **derivado del mail**.
 
-**Ref:** S-005 CA-2; S-006 CA-7; RF-13
+> **Por qué el script de verificación sigue separado del arranque:** invariante 9 — un requisito
+> creado no se modifica ni se borra nunca. Si la publicación ocurriera en cada arranque, **cada
+> reinicio dejaría basura permanente** en el proyecto de Jiku. El tick, en cambio, sí publica como
+> parte de su ciclo normal — pero cada publicación corresponde a un mail nuevo `\Unseen`, nunca a un
+> reinicio del proceso: el test de S-011 que afirma que `scheduleTick()` no dispara ningún tick antes
+> del primer cron es la defensa de que esta propiedad se mantiene ahora que existe un camino de código
+> de `index.ts` a `publicacion` vía el tick (S-016 CA-8).
+
+**Ref:** S-005 CA-2; S-006 CA-7; S-015; RF-13
 
 ---
 
-### Paso 2: Armar y validar el payload fijo
+### Paso 2: Armar y validar el payload
 
 **Origen:** jiku-mail-connector
 **Destino:** (interno)
 **Tipo:** Interno
 
-**Acción:** `src/domain/publicacion/` arma el payload **fijo** y lo valida con el schema Zod del
-comando usando `safeParse`. Los tipos están inferidos del schema (`z.infer`), no escritos a mano.
+**Acción:** `src/domain/publicacion/` arma el payload y lo valida con el schema Zod del comando usando
+`safeParse`. Los tipos están inferidos del schema (`z.infer`), no escritos a mano. **La forma del
+payload es idéntica en los dos disparadores** — sólo cambia de dónde salen `title`, `description` y
+`projectId`.
 
-**Payload:**
+**Payload del modo de verificación (fijo, `buildVerificationPayload()`):**
 ```json
 {
   "title": "string — req, max 255. Literal del código",
@@ -118,19 +146,46 @@ comando usando `safeParse`. Los tipos están inferidos del schema (`z.infer`), n
 }
 ```
 
+**Payload del tick (derivado del mail, `buildRequirementPayload()`, en alcance desde S-015):**
+
+| Campo | Valor |
+|---|---|
+| `title` | `mail.subject.trim()` → `.slice(0, 255)` → si queda `''`, `config.ruteo.placeholderTitle` |
+| `description` | `mail.body.trim()` → si queda `''`, `config.ruteo.placeholderBody` |
+| `projectId` | El resuelto por `routeMail()` |
+| `type` | `'incidencia'` — fijo, misma política que el modo de verificación |
+| `priority` | `'sin_prioridad'` — fijo |
+| `visibilityLevel` | `'public'` — fijo |
+| `creator` | `client.userId` — el único campo que el payload fijo NO lleva (ver tabla de exclusiones) |
+
+**Orden exacto en `title`/`description`, no intercambiable:** recortar (`.trim()`) → truncar
+(`.slice(0, TITLE_MAX_LENGTH)`, sólo para `title`) → placeholder (si el resultado quedó `''`).
+Invertirlo produciría, para un asunto de 400 espacios, un `title` vacío que el schema rechaza con
+`min(1)` — el mail se perdería por un error de armado en vez de crear el requisito con el placeholder.
+Detalle completo en [ruteo-y-alta-del-requisito](ruteo-y-alta-del-requisito.md).
+
 **Lo que el payload NO lleva, con su fuente:**
 
 | Campo excluido | Por qué |
 |---|---|
 | `state` | El requisito nace en `analisis`, default de Jiku (invariante 6, ADR-003) |
 | `actor` | **La única clave de identidad que el plano de escritura rechaza de plano** (invariante 18) |
-| `fileIds` | Se envía **sólo si hay al menos uno** (ADR-003); no hay adjuntos acá. Es de FG-4 |
-| `creator` | `core` resuelve el actor **del subject** e ignora lo que el cuerpo declare (ADR-005) |
+| `fileIds` | Se envía **sólo si hay al menos uno** (ADR-003); no hay adjuntos en ninguno de los dos disparadores. Es de FG-4 |
+| `creator` | **Cambia según el disparador** — ver abajo |
 
-La lógica de C-16 —payload derivado del mail, truncado a 255, placeholders por asunto/cuerpo vacío,
-composición de la descripción— **queda fuera de este alcance** y pertenece a FG-3.
+**La única fila que cambia respecto de la versión anterior de este documento es `creator`:**
 
-**Ref:** S-005 CA-3, CA-4; ADR-003; convención `validation`
+| Disparador | `creator` | Efecto en `core` |
+|---|---|---|
+| Modo de verificación (sin cambios) | No va | Actor resuelto sólo del `sub` del subject |
+| Tick (desde S-015) | **Va** — `client.userId` | `core` lo **ignora**: resuelve el actor del `sub` del subject igual (ADR-005). El campo es informativo, no una fuente de verdad |
+
+Las filas de `state`, `actor` y `fileIds` **no cambian**: siguen excluidas en los dos disparadores por
+las mismas razones. La lógica de payload derivado del mail —truncado a 255, placeholders por
+asunto/cuerpo vacío— que la versión anterior de este documento marcaba como *"fuera de este
+alcance"* **ya está en alcance**, implementada desde S-015.
+
+**Ref:** S-005 CA-3, CA-4; S-015; ADR-003, ADR-005; convención `validation`
 
 ---
 
@@ -187,17 +242,26 @@ ejecuta, `core` escribe (ADR-001).
 **Destino:** stdout
 **Tipo:** Interno
 
-**Acción (éxito):** loguea el `id` del requisito **junto con el `projectId`**, en la misma línea:
-`{ projectId, requirementId }`.
+**Acción (éxito, modo de verificación):** loguea el `id` del requisito **junto con el `projectId`**,
+en la misma línea: `{ projectId, requirementId }`.
 
-**Acción (error):** traduce la clase del SDK al diagnóstico de **quién rechazó** (ver Manejo de
-Errores). **No reintenta nada.**
+**Acción (éxito, tick):** loguea los **tres identificadores juntos**, en la misma línea:
+`{ messageId, projectId, requirementId }` — el `messageId` es lo que suma este disparador, cerrando
+la nota que la versión anterior de este documento ya anticipaba (*"el registro con `messageId` es de
+FG-3"*).
 
-**Ref:** S-005 CA-1, CA-7..CA-14; ADR-006
+**Acción (error, en cualquiera de los dos disparadores):** traduce la clase del SDK al diagnóstico de
+**quién rechazó** (ver Manejo de Errores). En el camino del mail, la línea de error también suma el
+`messageId` — `logContext()` en sí **no cambia**, el `messageId` se agrega al objeto de log por fuera.
+**No reintenta nada, en ningún disparador.**
+
+**Ref:** S-005 CA-1, CA-7..CA-14; S-015; ADR-006
 
 ## Manejo de Errores
 
-**Esta tabla es el entregable central del flujo** (copiada de ADR-006 y del PRD de arquitectura):
+**Esta tabla es el entregable central del flujo** (copiada de ADR-006 y del PRD de arquitectura). **Su
+contenido no cambia respecto de S-005** — las nueve ramas de diagnóstico son las mismas para los dos
+disparadores. Lo que cambia es que, en el camino del mail, cada línea lleva además el `messageId`:
 
 | Paso | Clase del SDK | `errorCode` | Quién rechazó | Qué dice el log | CA |
 |------|---------------|-------------|---------------|-----------------|-----|
@@ -205,31 +269,37 @@ Errores). **No reintenta nada.**
 | 3 | `JikuNoEndpoint` | — | El bus dice **de inmediato** que nada está suscripto | Se loguea sin esperar el timeout | S-005 CA-12 |
 | 3 | `JikuInvalidRequest` | — | Rechazado **localmente**: nada llegó a la red | **Error de armado del conector** | S-005 CA-12 |
 | 4 | `JikuFailure` | `caller_not_authorized` | El bus dejó pasar; **`core` rechazó por rol** | Típicamente **sin fila en `users`**. **Reconectar lo corrige solo**, y una corrida posterior tiene éxito | S-005 CA-8 |
+| 4 | `JikuFailure` | `unknown_caller` | El bus dejó pasar; **`core` rechazó por rol** | Mismo diagnóstico que `caller_not_authorized`: mismo arreglo (reconectar) | S-016 |
 | 4 | `JikuFailure` | `invalid_fields` | `core` aceptó el caller y rechazó **la forma** | El payload. **Es prueba de que el plano de escritura está abierto** | S-005 CA-10 |
 | 4 | `JikuFailure` | `project_not_found` | `core`: el proyecto no existe | Se loguea **con el `projectId` usado**. También prueba que el plano está abierto | S-005 CA-9 |
 | 3-4 | `JikuTimeout` | — | Nada respondió: `core` caído o lento | A los **15 s**, con la clase. **Sin `hint()`: la clase no lo declara** (ver Nota sobre `hint()`) | S-005 CA-11 |
 | 4 | cualquiera | **desconocido** | — | Se loguea con su `code` y su `errorMessage` **y no se mapea a nada**. Su `hint()` es `undefined` (ver Nota sobre `hint()`) | S-005 CA-13 |
+| — | (respuesta sin `id` usable) | — | `core` contestó éxito pero sin dato usable (`respuesta_ilegible`) | Prueba igual que el plano está abierto: `core` contestó | S-005 |
 
-**En los ocho casos: no hay reintento** (C-19, NFR-R03). El resultado del modo de verificación es
-informar el fallo con la clase del SDK, el `code` y —cuando existe— el `hint()`.
+**En todos los casos: no hay reintento** (C-19, NFR-R03). El resultado es informar el fallo con la
+clase del SDK, el `code` y —cuando existe— el `hint()`, más el `messageId` cuando el disparador es el
+tick.
 
-**El eje del diagnóstico:** las tres primeras filas son **el bus**; las tres siguientes son **`core`**,
-y entre ellas se distingue **por rol** (`caller_not_authorized`) de **por forma** (`invalid_fields`,
-`project_not_found`). Esa distinción es la que le dice a U-02 si el arreglo está en Zitadel, en la fila
-de `users`, o en el payload.
+**El eje del diagnóstico:** las tres primeras filas son **el bus**; las cuatro siguientes son
+**`core`**, y entre ellas se distingue **por rol** (`caller_not_authorized`, `unknown_caller`) de
+**por forma** (`invalid_fields`, `project_not_found`). Esa distinción es la que le dice a U-02 si el
+arreglo está en Zitadel, en la fila de `users`, o en el payload.
 
 ## Resultado
 
-**Éxito:** un Requisito visible en Jiku, en el proyecto de prueba, con `type: incidencia`,
-`priority: sin_prioridad`, `visibilityLevel: public` y `state: analisis`; y una línea de log con
-`{ projectId, requirementId }`.
+**Éxito (modo de verificación):** un Requisito visible en Jiku, en el proyecto de prueba, con
+`type: incidencia`, `priority: sin_prioridad`, `visibilityLevel: public` y `state: analisis`; y una
+línea de log con `{ projectId, requirementId }`.
+
+**Éxito (tick):** un Requisito visible en Jiku, en el proyecto que `routeMail()` resolvió del slug del
+mail, con los mismos cuatro campos fijos más `creator` (informativo); y una línea de log con
+`{ messageId, projectId, requirementId }`.
 
 **Estado final:**
 - `requirements` (base de Jiku): un requisito nuevo, escrito por `core`. **Nunca se modifica ni se
   borra**
-- Conector: sin estado persistido de ninguna clase — no hay base, ni volumen, ni registro del alta en
-  este alcance (el registro con `messageId` es de FG-3)
-- Logs: una línea con el `id` y el `projectId`
+- Conector: sin estado persistido de ninguna clase — no hay base, ni volumen
+- Logs: una línea con el `id`, el `projectId`, y —en el camino del mail— el `messageId`
 
 ## Notas
 
@@ -272,8 +342,10 @@ de `users`, o en el payload.
   verbatim**. Para esos dos casos ése es el dato de diagnóstico real. **No inventar texto para tapar
   la ausencia de `hint()`.**
 
-- **Nota para FG-3:** este flujo se **extiende**, no se reescribe. Lo que cambia es el **origen del
-  payload** (fijo → derivado del mail, con truncado y placeholders) y se agrega el registro del alta
-  con `messageId`. **La traducción de errores queda igual**, y el punto de log también: la línea vive
-  dentro de `publishVerificationRequirement()` y no en el entry point, precisamente para que siga
-  existiendo cuando el llamador pase a ser el tick en vez del script.
+- **La nota original para FG-3 se cumplió, sin sorpresas.** Decía que este flujo se extendería sin
+  reescribirse, cambiando sólo el origen del payload y sumando el registro del alta con `messageId`.
+  S-015 lo implementó exactamente así: `publishRequirementFromMail()` es hermana de
+  `publishVerificationRequirement()`, comparte el mismo `try/catch/log/relanza` y el mismo
+  `client.command()`, y la única diferencia observable es de dónde sale el payload y que el
+  `messageId` viaja en ambos objetos de log. La traducción de errores (`diagnosePublishFailure()`,
+  `logContext()`) **no se tocó**.

@@ -726,7 +726,13 @@ describe('runTick — slug_no_mapeado incluye el slug en la linea (CA-1, CA-2, C
   });
 
   // TS-4
-  it('el slug se loguea literal en la salida cruda, no [REDACTED] (CA-5)', async () => {
+  //
+  // Esta es TAMBIEN la defensa permanente de CA-6 de S-016 (Riesgo 3 de REQ-003): sin este test,
+  // un campo llamado `key` en el contexto de log produciria una linea inutil `"slug":"[REDACTED]"`
+  // SIN FALLAR y SIN AVISAR, porque `REDACT_PATHS` (`src/shared/log-redaction.ts`) incluye `'key'`
+  // y `'*.key'`. No se elimina por "redundante": es la unica asercion de todo el repo sobre la
+  // salida CRUDA (no el objeto parseado) para este caso puntual.
+  it('el slug se loguea literal en la salida cruda, no [REDACTED] (CA-5, S-016 CA-6)', async () => {
     const { logger, capture } = testLoggerWithCapture();
     const source = fakeMailSource({
       uidsUnseen: [1],
@@ -1103,6 +1109,10 @@ describe('runTick — escenarios de publicacion de S-015 (Tarea 4)', () => {
 
   // TS-20, CA-21: 3 mails a 3 proyectos DISTINTOS se crean cada uno en su proyecto, procesados de a
   // uno en serie, en el orden de UID descendente.
+  // Tambien es la cobertura de comportamiento de S-016 TS-7/CA-9: el lote de varios mails se
+  // publica uno por uno, sin evidencia de acumulacion (no se reprueba el orden secuencial, ya
+  // cubierto por S-010/S-011 — ver `tick-memory.test.ts` para la propiedad de ausencia de arrays
+  // acumuladores por inspeccion de codigo).
   it('3 mails a proyectos distintos crean 3 requisitos, cada uno en su proyecto, en orden UID descendente', async () => {
     await responder?.stop();
 
@@ -1144,6 +1154,112 @@ describe('runTick — escenarios de publicacion de S-015 (Tarea 4)', () => {
         ingestados: 3,
         parseados: 3,
         creados: 3,
+        descartados: 0,
+        fallidos: 0,
+      });
+    } finally {
+      await local.stop();
+      responder = await respondTo(
+        bus.connection,
+        'requirements.new',
+        Array.from({ length: 200 }, (_, i) => ({ status: 'success' as const, data: { id: i + 1 } })),
+      );
+    }
+  });
+});
+
+/**
+ * S-016 Tarea 3 — TS-10 (CA-13, CA-10): el escenario de extremo a extremo completo. Un cliente
+ * externo manda un mail a `tickets+alfa@grava.io`; el tick lo ingesta, normaliza, rutea y publica;
+ * el responder de `core` (`respondTo()`) valida el payload REALMENTE recibido por el bus -- no el
+ * objeto local que `buildRequirementPayload()` devuelve en memoria -- y contesta exito. Es la
+ * unica story que puede verificar esto: exige S-012 a S-015 terminadas.
+ *
+ * `Client.fromConnection()` (via `setupTestBus()`, ya usado por todo este archivo) es lo que
+ * permite este test sin desplegar Jiku ni pasar por Zitadel (ADR-002).
+ */
+describe('runTick — el escenario de extremo a extremo: mail de un cliente externo se convierte en requisito (S-016 CA-13, CA-10)', () => {
+  it('el payload observado por el responder tiene exactamente las siete claves esperadas, y el tick reporta los cinco contadores reales', async () => {
+    await responder?.stop();
+
+    const { logger, capture } = testLoggerWithCapture();
+    const configWithAlfa: AppConfig = {
+      ...BASE_CONFIG,
+      ruteo: { ...BASE_CONFIG.ruteo, ticketMap: new Map([['alfa', 42]]) },
+    };
+
+    const messageId = '<s016-e2e-alfa@fixtures.local>';
+    const source: MailSource = {
+      async searchUnseen(): Promise<number[]> {
+        return [1];
+      },
+      async fetch(): Promise<RawMessage> {
+        return {
+          uid: 1,
+          source: Buffer.from(
+            `Message-Id: ${messageId}\r\n` +
+              'From: "Cliente Externo" <cliente-externo@ejemplo.com>\r\n' +
+              'To: tickets+alfa@grava.io\r\n' +
+              'Subject: Pedido de un cliente externo\r\n' +
+              'Content-Type: text/plain; charset=utf-8\r\n' +
+              'MIME-Version: 1.0\r\n\r\n' +
+              'El pedido concreto que el cliente necesita resolver.\r\n',
+          ),
+        };
+      },
+      async markSeen(): Promise<void> {
+        // no-op
+      },
+    };
+
+    // El doble de `core` sobre el BUS REAL de Testcontainers, con `Client.fromConnection()` ya
+    // conectado desde el `beforeAll` de este archivo (`bus.client`) -- saltea el handshake de auth
+    // por completo (ADR-002), que es lo que hace posible este test sin una instancia de Jiku.
+    const local = await respondTo(bus.connection, 'requirements.new', {
+      status: 'success',
+      data: { id: 999 },
+    });
+
+    try {
+      await runTick(source, configWithAlfa, logger, bus.client);
+
+      // El payload observado por el responder -- lo que REALMENTE viajo por el bus, no una
+      // reimplementacion en el test de lo que buildRequirementPayload() deberia producir.
+      const payloads = local.payloads();
+      expect(payloads).toHaveLength(1);
+
+      const payload = payloads[0] as Record<string, unknown>;
+      expect(Object.keys(payload).sort()).toEqual(
+        ['title', 'description', 'projectId', 'type', 'priority', 'visibilityLevel', 'creator'].sort(),
+      );
+      expect(payload).toMatchObject({
+        projectId: 42,
+        type: 'incidencia',
+        priority: 'sin_prioridad',
+        visibilityLevel: 'public',
+      });
+      expect(payload['title']).toBe('Pedido de un cliente externo');
+      expect(payload['description']).toBe('El pedido concreto que el cliente necesita resolver.');
+      expect(typeof payload['creator']).toBe('string');
+      expect(payload).not.toHaveProperty('state');
+      expect(payload).not.toHaveProperty('actor');
+      expect(payload).not.toHaveProperty('fileIds');
+
+      // La linea de exito con los tres identificadores juntos.
+      const successLine = capture
+        .lines()
+        .find((line) => line['msg'] === 'requisito creado en Jiku');
+      expect(successLine).toMatchObject({
+        messageId,
+        projectId: 42,
+        requirementId: 999,
+      });
+
+      // Los cinco contadores reales de la linea 'tick completado'.
+      expect(tickLine(capture)).toMatchObject({
+        ingestados: 1,
+        parseados: 1,
+        creados: 1,
         descartados: 0,
         fallidos: 0,
       });

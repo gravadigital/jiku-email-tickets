@@ -256,8 +256,28 @@ test/fixtures/mails/
 ├── with-attachments.eml
 ├── duplicate-attachments.eml    # same checksum twice -> collapses to one
 ├── inline-image.eml             # treated as a normal attachment in v1
-└── in-reply-to.eml              # a thread reply -> actively discarded
+└── in-reply-to.eml              # a thread reply -> actively discarded (also exercises es_respuesta)
 ```
+
+**The routing scenarios (S-013, `test/ruteo/route-mail.test.ts`) are the one deliberate exception to
+"fixtures are real `.eml` bytes".** `routeMail()` takes `Pick<IncomingMail, 'referenceIds' |
+'recipient'>` — a plain object, not a raw mail — so its test suite builds that object inline instead
+of parsing a file. There is no `mailparser` step to exercise for real here, unlike the fixtures above.
+The scenarios CA-18 of S-016 asks for are already covered this way, not by new `.eml` files:
+
+- **Mixed-case subaddress** (`TICKETS+Alfa@grava.io`, `tickets+ALFA@grava.io`) — resolves the same
+  slug regardless of casing.
+- **No `+` in the recipient** (`soporte@grava.io`) — falls through to `sin_slug`.
+- **Empty slug** (`tickets+@grava.io`) — also `sin_slug`, not `slug_no_mapeado`.
+- **A thread reply** (`In-Reply-To` populated) — `es_respuesta`, evaluated before the slug is even
+  touched. Covered both inline in `route-mail.test.ts` and by the real `.eml` fixture
+  `in-reply-to.eml` above, exercised at the `tick.ts` integration level.
+
+If a future story needs `routeMail()` exercised against real RFC 822 bytes end-to-end (recipient
+parsed by `mailparser`, not handed in already-isolated), reuse `in-reply-to.eml` for the reply case and
+`with-attachments.eml`/`plain-text.eml` with a rewritten `To:` header for the resolved case (see
+`withResolvableRecipient()` in `test/publicacion/source-properties.test.ts` for the pattern) — do not
+duplicate `route-mail.test.ts`'s inline scenarios as new `.eml` files.
 
 ## Unit tests
 

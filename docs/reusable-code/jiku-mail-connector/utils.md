@@ -161,3 +161,51 @@ import { trimQuotedText } from '#domain/ingesta/body.js';
 
 trimQuotedText('Se soluciona reiniciando\n> No arranca'); // 'Se soluciona reiniciando'
 ```
+
+---
+
+## buildRequirementPayload
+
+**Location:** `src/domain/publicacion/mail-payload.ts`
+
+**Description:** Builds the `requirements.new` payload derived from an already-normalized and routed
+mail. Pure: only assembles the object, never validates (that is `parseNewRequirement()`, invoked from
+`publish-requirement.ts`) and never publishes. `title` and `description` follow a strict **trim →
+truncate → placeholder** order that is not interchangeable: `title` is trimmed, sliced to
+`TITLE_MAX_LENGTH` (255, imported from `requirement.schema.ts`, never redeclared as a literal), and
+replaced with `ruteoConfig.placeholderTitle` only if the result is `''`; `description` is trimmed and
+replaced with `ruteoConfig.placeholderBody` under the same empty-string condition, with no length cap.
+Reversing the order — placeholder before truncate — would let a 400-space subject produce an empty
+`title` that the schema's `min(1)` rejects, losing the mail to a connector assembly error instead of
+creating the requirement with the placeholder. `type`, `priority` and `visibilityLevel` are fixed
+connector policy, not contract defaults. `creator` carries `userId` even though `core` ignores it and
+resolves the actor from the subject's `sub` (ADR-005) — sent because the request asks for it
+explicitly, not because the connector decides identity. Renamed in the S-016 catalog cleanup: the
+original story (REQ-003) anticipated a `buildMailPayload()`/`truncateTitle()` pair that does not exist
+in the implemented code — the truncation lives inline inside this single function instead.
+
+**Signature:**
+
+```ts
+function buildRequirementPayload(
+  mail: Pick<IncomingMail, 'subject' | 'body'>,
+  projectId: number,
+  userId: string,
+  ruteoConfig: Pick<RuteoConfig, 'placeholderTitle' | 'placeholderBody'>,
+): NewRequirementPayload
+```
+
+**Usage example:**
+
+```ts
+import { buildRequirementPayload } from '#domain/publicacion/mail-payload.js';
+
+buildRequirementPayload(
+  { subject: 'Falla en el login', body: 'No puedo entrar' },
+  42,
+  'machine-user-abc',
+  { placeholderTitle: 'Ticket recibido por mail', placeholderBody: '(mail sin contenido)' },
+);
+// { title: 'Falla en el login', description: 'No puedo entrar', projectId: 42,
+//   type: 'incidencia', priority: 'sin_prioridad', visibilityLevel: 'public', creator: 'machine-user-abc' }
+```
