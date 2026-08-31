@@ -5,14 +5,19 @@ import { describe, expect, it } from 'vitest';
 import { readSource } from '../shared/source-scan.js';
 
 import {
+  DEFAULT_ALLOWED_EXTENSIONS,
+  DEFAULT_ALLOWED_MIME_TYPES,
   DEFAULT_IMAP_PORT,
   DEFAULT_ISSUER,
+  DEFAULT_MAX_ATTACHMENT_SIZE_BYTES,
   DEFAULT_PLACEHOLDER_BODY,
   DEFAULT_PLACEHOLDER_TITLE,
   DEFAULT_POLL_CRON,
   DEFAULT_POLL_MAX_PER_TICK,
+  DEFAULT_PUT_TIMEOUT_MS,
   DEFAULT_SERVERS_URL,
   DEFAULT_SUBADDRESS_PREFIX,
+  MAX_ATTACHMENTS_PER_REQUIREMENT,
   MIN_TIMEOUT_MS,
   envSchema,
 } from '#config/schema.js';
@@ -125,11 +130,11 @@ describe('envSchema', () => {
   // ruteo en alcance el mapa pasa a ser requerido, y un test borrado no dejaria rastro de que la
   // regla cambio a proposito.
   // (TS-25, TS-36, TS-42)
-  it('declares the four IMAP and three POLL variables, and the five routing ones', () => {
+  it('declares the four IMAP and three POLL variables, the five routing ones, and the four attachment policy ones', () => {
     const declared = Object.keys(envSchema);
 
-    // Veintidos desde S-012: las diecisiete de S-007 mas las cinco del ruteo.
-    expect(declared).toHaveLength(22);
+    // Veintiseis desde S-017: las veintidos de S-012 mas las cuatro de la politica de archivos.
+    expect(declared).toHaveLength(26);
     for (const name of ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASSWORD']) {
       expect(declared, name).toContain(name);
     }
@@ -142,6 +147,14 @@ describe('envSchema', () => {
       'SUBADDRESS_PREFIX',
       'PLACEHOLDER_TITLE',
       'PLACEHOLDER_BODY',
+    ]) {
+      expect(declared, name).toContain(name);
+    }
+    for (const name of [
+      'ATTACHMENT_ALLOWED_EXTENSIONS',
+      'ATTACHMENT_ALLOWED_MIME_TYPES',
+      'ATTACHMENT_MAX_SIZE_BYTES',
+      'PUT_TIMEOUT_MS',
     ]) {
       expect(declared, name).toContain(name);
     }
@@ -509,5 +522,94 @@ describe('envSchema routing defaults', () => {
       expect(result.success, name).toBe(false);
       expect(result.error?.issues.map((i) => i.path[0]), name).toContain(name);
     }
+  });
+});
+
+/**
+ * La politica local de archivos de adjuntos (S-017, Task 1). Las cuatro claves son independientes
+ * entre si -- ninguna es cross-field -- asi que se prueban directo contra `schema`, igual que
+ * IMAP_PORT o POLL_MAX_PER_TICK.
+ */
+describe('envSchema attachment policy defaults', () => {
+  it('exposes the four defaults and the fixed cap as named constants', () => {
+    expect(DEFAULT_ALLOWED_EXTENSIONS).toBe(
+      '.png,.jpg,.jpeg,.gif,.pdf,.doc,.docx,.xls,.xlsx,.txt,.log,.zip',
+    );
+    expect(DEFAULT_ALLOWED_MIME_TYPES).toContain('image/png');
+    expect(DEFAULT_MAX_ATTACHMENT_SIZE_BYTES).toBe(10_485_760);
+    expect(DEFAULT_PUT_TIMEOUT_MS).toBe(30_000);
+    expect(MAX_ATTACHMENTS_PER_REQUIREMENT).toBe(10);
+  });
+
+  // TS-21. Las cuatro claves nuevas arrancan con sus defaults si no se declaran.
+  it('applies the four defaults when only the required variables are present', () => {
+    const parsed = schema.parse(VALID_ENV);
+
+    expect(parsed.ATTACHMENT_ALLOWED_EXTENSIONS).toEqual(
+      DEFAULT_ALLOWED_EXTENSIONS.split(','),
+    );
+    expect(parsed.ATTACHMENT_ALLOWED_MIME_TYPES).toEqual(DEFAULT_ALLOWED_MIME_TYPES.split(','));
+    expect(parsed.ATTACHMENT_MAX_SIZE_BYTES).toBe(10_485_760);
+    expect(typeof parsed.ATTACHMENT_MAX_SIZE_BYTES).toBe('number');
+    expect(parsed.PUT_TIMEOUT_MS).toBe(30_000);
+  });
+
+  // TS-19. Una lista blanca vacia tras el parseo no es un modo valido.
+  it('rejects an empty allow-list after parsing', () => {
+    for (const name of ['ATTACHMENT_ALLOWED_EXTENSIONS', 'ATTACHMENT_ALLOWED_MIME_TYPES'] as const) {
+      const result = schema.safeParse({ ...VALID_ENV, [name]: ',, ,' });
+
+      expect(result.success, name).toBe(false);
+      expect(result.error?.issues.map((i) => i.path[0]), name).toContain(name);
+    }
+  });
+
+  // TS-20. No numerico o <= 0 no arranca.
+  it('rejects a non-numeric or non-positive max size', () => {
+    for (const raw of ['0', '-1', 'abc']) {
+      const result = schema.safeParse({ ...VALID_ENV, ATTACHMENT_MAX_SIZE_BYTES: raw });
+
+      expect(result.success, raw).toBe(false);
+      expect(result.error?.issues.map((i) => i.path[0]), raw).toContain('ATTACHMENT_MAX_SIZE_BYTES');
+    }
+  });
+
+  it('rejects a non-numeric or non-positive PUT timeout', () => {
+    for (const raw of ['0', '-1', 'abc']) {
+      const result = schema.safeParse({ ...VALID_ENV, PUT_TIMEOUT_MS: raw });
+
+      expect(result.success, raw).toBe(false);
+      expect(result.error?.issues.map((i) => i.path[0]), raw).toContain('PUT_TIMEOUT_MS');
+    }
+  });
+
+  // Cada elemento se recorta, incluso con espacios extra alrededor de las comas.
+  it('trims each element of a comma-separated list with extra whitespace', () => {
+    const parsed = schema.parse({
+      ...VALID_ENV,
+      ATTACHMENT_ALLOWED_EXTENSIONS: ' .png , .pdf ',
+    });
+
+    expect(parsed.ATTACHMENT_ALLOWED_EXTENSIONS).toEqual(['.png', '.pdf']);
+  });
+
+  // Las extensiones se normalizan a minusculas al parsear; los MIME no.
+  it('lowercases extensions but not MIME types while parsing', () => {
+    const parsed = schema.parse({
+      ...VALID_ENV,
+      ATTACHMENT_ALLOWED_EXTENSIONS: '.PNG,.PDF',
+      ATTACHMENT_ALLOWED_MIME_TYPES: 'image/png,application/pdf',
+    });
+
+    expect(parsed.ATTACHMENT_ALLOWED_EXTENSIONS).toEqual(['.png', '.pdf']);
+    expect(parsed.ATTACHMENT_ALLOWED_MIME_TYPES).toEqual(['image/png', 'application/pdf']);
+  });
+
+  // Cada clave es independiente: declarar solo una de las dos listas arranca igual.
+  it('starts with only one of the two allow-lists declared', () => {
+    const parsed = schema.parse({ ...VALID_ENV, ATTACHMENT_ALLOWED_EXTENSIONS: '.png' });
+
+    expect(parsed.ATTACHMENT_ALLOWED_EXTENSIONS).toEqual(['.png']);
+    expect(parsed.ATTACHMENT_ALLOWED_MIME_TYPES).toEqual(DEFAULT_ALLOWED_MIME_TYPES.split(','));
   });
 });

@@ -191,6 +191,72 @@ const DEFAULT_PLACEHOLDER_BODY = '(mail sin contenido)';
 
 ---
 
+## DEFAULT_ALLOWED_EXTENSIONS / DEFAULT_ALLOWED_MIME_TYPES
+
+**Location:** `src/config/schema.ts`
+
+**Description:** Default comma-separated allow-lists of the local attachment policy (S-017): a
+broad office/image set of extensions, and the MIME types matching it. Extensions are normalized to
+lowercase while parsing (`particionar()` compares case-insensitively); MIME types are not.
+
+**Signature:**
+
+```ts
+const DEFAULT_ALLOWED_EXTENSIONS =
+  '.png,.jpg,.jpeg,.gif,.pdf,.doc,.docx,.xls,.xlsx,.txt,.log,.zip';
+const DEFAULT_ALLOWED_MIME_TYPES =
+  'image/png,image/jpeg,image/gif,application/pdf,application/msword,...';
+```
+
+---
+
+## DEFAULT_MAX_ATTACHMENT_SIZE_BYTES
+
+**Location:** `src/config/schema.ts`
+
+**Description:** Default max attachment size, 10 MB **in bytes** (not MB, to avoid unit ambiguity
+in the schema itself). Evaluated against the real in-memory `Buffer` length, never the mail's
+declared `size`.
+
+**Signature:**
+
+```ts
+const DEFAULT_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+```
+
+---
+
+## DEFAULT_PUT_TIMEOUT_MS
+
+**Location:** `src/config/schema.ts`
+
+**Description:** Default timeout for the attachment byte's `PUT`, 30000 ms. Not consumed by S-017 —
+declared here because it is the same configuration extension; S-019 consumes it.
+
+**Signature:**
+
+```ts
+const DEFAULT_PUT_TIMEOUT_MS = 30_000;
+```
+
+---
+
+## MAX_ATTACHMENTS_PER_REQUIREMENT
+
+**Location:** `src/config/schema.ts`
+
+**Description:** The fixed cap of attachments per requirement, `10`. **Not an env var** — it is the
+bus contract's `maxItems` (ADR-003), fixed in code on purpose. `aplicarTope()`
+(`src/domain/adjuntos/tope.ts`) imports it; never read from configuration.
+
+**Signature:**
+
+```ts
+const MAX_ATTACHMENTS_PER_REQUIREMENT = 10;
+```
+
+---
+
 ## TEST_USER_ID
 
 **Location:** `test/bus/helpers.ts`

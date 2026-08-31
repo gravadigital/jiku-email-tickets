@@ -75,6 +75,10 @@ async function withEnv(
     'SUBADDRESS_PREFIX',
     'PLACEHOLDER_TITLE',
     'PLACEHOLDER_BODY',
+    'ATTACHMENT_ALLOWED_EXTENSIONS',
+    'ATTACHMENT_ALLOWED_MIME_TYPES',
+    'ATTACHMENT_MAX_SIZE_BYTES',
+    'PUT_TIMEOUT_MS',
   ];
   const saved = new Map(keys.map((key) => [key, process.env[key]]));
   for (const key of keys) delete process.env[key];
@@ -195,7 +199,7 @@ describe('loadAppConfig', () => {
     });
   });
 
-  it('exposes exactly the thirteen documented fields', async () => {
+  it('exposes exactly the fourteen documented fields', async () => {
     loadConfigMock.mockResolvedValue(sdkResult());
     const { loadAppConfig } = await import('#config/index.js');
 
@@ -203,6 +207,9 @@ describe('loadAppConfig', () => {
       const config = await loadAppConfig();
 
       expect(Object.keys(config).sort()).toEqual([
+        // El bloque de la politica de archivos lo agrega S-017: particionar() (FG-4) la recibe
+        // ENTERA, con el mismo criterio que `imap`, `poll` y `ruteo`.
+        'adjuntos',
         'credsFile',
         // Los dos bloques anidados los agrega S-007: el adaptador IMAP (S-009) y el tick (S-011)
         // reciben cada uno su configuracion ENTERA, no campos sueltos.
@@ -222,6 +229,45 @@ describe('loadAppConfig', () => {
         'verifyProjectId',
         'zitadelProjectId',
       ]);
+    });
+  });
+
+  it('composes the adjuntos block entirely from the validated env, with no fallback', async () => {
+    loadConfigMock.mockResolvedValue(sdkResult());
+    const { loadAppConfig } = await import('#config/index.js');
+
+    await withEnv(
+      {
+        ...VALID_ENV,
+        ATTACHMENT_ALLOWED_EXTENSIONS: '.png,.pdf',
+        ATTACHMENT_ALLOWED_MIME_TYPES: 'image/png,application/pdf',
+        ATTACHMENT_MAX_SIZE_BYTES: '5000000',
+        PUT_TIMEOUT_MS: '20000',
+      },
+      async () => {
+        const config = await loadAppConfig();
+
+        expect(config.adjuntos).toEqual({
+          allowedExtensions: ['.png', '.pdf'],
+          allowedMimeTypes: ['image/png', 'application/pdf'],
+          maxSizeBytes: 5_000_000,
+          putTimeoutMs: 20_000,
+        });
+      },
+    );
+  });
+
+  it('applies the four attachment policy defaults when nothing is configured', async () => {
+    loadConfigMock.mockResolvedValue(sdkResult());
+    const { loadAppConfig } = await import('#config/index.js');
+
+    await withEnv(VALID_ENV, async () => {
+      const config = await loadAppConfig();
+
+      expect(config.adjuntos.maxSizeBytes).toBe(10_485_760);
+      expect(config.adjuntos.putTimeoutMs).toBe(30_000);
+      expect(config.adjuntos.allowedExtensions.length).toBeGreaterThan(0);
+      expect(config.adjuntos.allowedMimeTypes.length).toBeGreaterThan(0);
     });
   });
 

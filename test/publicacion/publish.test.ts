@@ -59,6 +59,12 @@ function configWith(overrides: Partial<AppConfig> = {}): AppConfig {
       placeholderTitle: 'Ticket recibido por mail',
       placeholderBody: '(mail sin contenido)',
     },
+    adjuntos: {
+      allowedExtensions: ['.png', '.jpg', '.jpeg', '.gif', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt', '.log', '.zip'],
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'application/pdf'],
+      maxSizeBytes: 10_485_760,
+      putTimeoutMs: 30_000,
+    },
     ...overrides,
   };
 }

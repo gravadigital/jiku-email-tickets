@@ -692,6 +692,81 @@ explicitly is S-014's job, once the tick composes `ingesta` and `ruteo` together
 
 ---
 
+## AdjuntosConfig
+
+**Location:** `src/config/index.ts`
+
+**Description:** The local attachment policy's whole configuration (`allowedExtensions`,
+`allowedMimeTypes`, `maxSizeBytes`, `putTimeoutMs`), nested on the same criterion as `ImapConfig` /
+`PollConfig` / `RuteoConfig`: `particionar()` (S-017) receives it complete, or the `Pick` subset it
+needs, instead of four loose parameters.
+
+**Interface:**
+
+```ts
+interface AdjuntosConfig {
+  allowedExtensions: readonly string[];
+  allowedMimeTypes: readonly string[];
+  maxSizeBytes: number;
+  putTimeoutMs: number;
+}
+```
+
+**Notes:** `putTimeoutMs` is not consumed by S-017 — it is declared here because it is the same
+configuration extension, and S-019 (the `PUT` of the attachment byte) consumes it.
+
+---
+
+## AdjuntoParticionado / AdjuntoAceptado / AdjuntoRechazado / ReglaRechazo / ParticionResult
+
+**Location:** `src/domain/adjuntos/types.ts`
+
+**Description:** The pure pipeline's domain types (S-017). `AdjuntoParticionado` is an attachment
+that passed the local policy but has no checksum yet (filename/mimeType already resolved with the
+generated-name and default-MIME rules). `AdjuntoAceptado` extends it with `checksum` once
+`deduplicar()` computes it. `ReglaRechazo` is the closed catalog of rejection rules
+(`'extension' | 'mime' | 'tamano' | 'tamano_cero' | 'tope_excedido' | 'error_interno'`), a
+string-literal union — never an `enum` — following the same precedent as `MotivoDescarte`.
+`AdjuntoRechazado` is exactly `{ nombre, mime, regla }`, no extra fields. `ParticionResult<TAceptado>`
+is the common `{ aceptados, rechazados }` shape shared by `particionar()`, `deduplicar()`,
+`aplicarTope()` and `procesarAdjuntos()`, parameterized because `particionar()`'s accepted items
+have no checksum yet while the later stages' do.
+
+**Interface:**
+
+```ts
+interface AdjuntoParticionado {
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly content: Buffer;
+}
+
+interface AdjuntoAceptado extends AdjuntoParticionado {
+  readonly checksum: string;
+}
+
+type ReglaRechazo =
+  | 'extension' | 'mime' | 'tamano' | 'tamano_cero' | 'tope_excedido' | 'error_interno';
+
+interface AdjuntoRechazado {
+  readonly nombre: string;
+  readonly mime: string;
+  readonly regla: ReglaRechazo;
+}
+
+interface ParticionResult<TAceptado = AdjuntoAceptado> {
+  readonly aceptados: TAceptado[];
+  readonly rechazados: AdjuntoRechazado[];
+}
+```
+
+**Notes:** No field is named `key` — `REDACT_PATHS` includes `'key'` and `'*.key'`, and a `key`
+field would be redacted silently. `AdjuntoRechazado` is intentionally its own type, not an
+extension of `MotivoDescarte`/`RouteResult`: those describe why a whole *mail* is discarded, this
+describes why one *attachment* inside a mail that IS processed is rejected.
+
+---
+
 ## RouteResult
 
 **Location:** `src/shared/motivo-descarte.ts`

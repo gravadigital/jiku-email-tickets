@@ -882,3 +882,100 @@ routeMail(
   (`'slug' in result`, not `result.slug !== undefined`) — see `RouteResult` in types.md.
 
 ---
+
+## particionar()
+
+**Location:** `src/domain/adjuntos/particionar.ts`
+
+**Description:** First stage of the attachment pipeline (S-017). Resolves a generated filename
+(position-based, e.g. `adjunto-1.png`) when `filename` is missing, defaults `mimeType` to
+`application/octet-stream` when missing (no content-sniffing inference), then evaluates the local
+policy in a fixed order — 0-byte size (unconditional) → extension → MIME → max size — over
+`content.length` (the real in-memory `Buffer`), never the mail's declared `size`. Pure, never
+throws: an unexpected error on one attachment is captured and rejected with `regla:
+'error_interno'`, without aborting the rest.
+
+**Signature:**
+
+```ts
+function particionar(
+  attachments: readonly MailAttachment[],
+  config: Pick<AdjuntosConfig, 'allowedExtensions' | 'allowedMimeTypes' | 'maxSizeBytes'>,
+): ParticionResult<AdjuntoParticionado>;
+```
+
+**Notes:**
+
+- A filename with no dot (`path.extname()` returns `''`) is treated as passing the extension rule
+  and falls through to the MIME rule — there is nothing to compare an absent extension against,
+  and the MIME whitelist is the real gate for that case.
+- `content.length`, never `size`: the declared value is deliberately never read for this rule.
+
+---
+
+## deduplicar()
+
+**Location:** `src/domain/adjuntos/dedup.ts`
+
+**Description:** Second stage: deduplicates already-partitioned attachments by sha256 checksum
+(`node:crypto`) of `content`, keeping the first in mail order and silently discarding the rest — no
+rejection entry, no log, no warning for a collapsed duplicate. The declared `mimeType` never
+participates in the comparison. The `Set<string>` of seen checksums is scoped to a single
+invocation — no module-level state survives between mails. `O(n)`.
+
+**Signature:**
+
+```ts
+function deduplicar(
+  particionados: readonly AdjuntoParticionado[],
+): ParticionResult<AdjuntoAceptado>;
+```
+
+**Notes:** An unexpected error computing one attachment's checksum is captured and rejected with
+`regla: 'error_interno'`, without aborting the rest.
+
+---
+
+## aplicarTope()
+
+**Location:** `src/domain/adjuntos/tope.ts`
+
+**Description:** Third stage: keeps the first `MAX_ATTACHMENTS_PER_REQUIREMENT` (10) deduplicated
+attachments in order, moving the rest to rejections with `regla: 'tope_excedido'`. The cap is
+imported from `#config/schema.js`, never a bare literal and never read from configuration — it is
+the bus contract's `maxItems`.
+
+**Signature:**
+
+```ts
+function aplicarTope(aceptados: readonly AdjuntoAceptado[]): ParticionResult<AdjuntoAceptado>;
+```
+
+---
+
+## procesarAdjuntos()
+
+**Location:** `src/domain/adjuntos/procesar.ts`
+
+**Description:** Composes the three stages in the one order that produces correct results:
+**particionar → deduplicar → aplicarTope**. Partition first so two identical rejected files (e.g.
+two identical `.exe`s) produce two independent rejection entries rather than a spurious
+duplicate-notice; dedup before the cap so N identical acceptable copies collapse to one before the
+cap ever evaluates anything. Accumulates the three stages' rejections into one final array, in
+production order. No barrel file for this module — same precedent as `ruteo` and `publicacion`,
+which use direct per-file imports.
+
+**Signature:**
+
+```ts
+function procesarAdjuntos(
+  attachments: readonly MailAttachment[],
+  config: Pick<AdjuntosConfig, 'allowedExtensions' | 'allowedMimeTypes' | 'maxSizeBytes'>,
+): ParticionResult<AdjuntoAceptado>;
+```
+
+**Notes:** Pure end to end — no `files.request-upload`, no `PUT`, no description composition, no
+logging. Those are S-018, S-019, S-020 and S-021 respectively. Not yet wired into the tick
+(`src/domain/ingesta/tick.ts`) — that integration is S-021.
+
+---

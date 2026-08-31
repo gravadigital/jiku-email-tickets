@@ -62,6 +62,12 @@ function configWith(overrides: Partial<AppConfig> = {}): AppConfig {
       placeholderTitle: RUTEO_CONFIG.placeholderTitle,
       placeholderBody: RUTEO_CONFIG.placeholderBody,
     },
+    adjuntos: {
+      allowedExtensions: ['.png', '.jpg', '.jpeg', '.gif', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt', '.log', '.zip'],
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'application/pdf'],
+      maxSizeBytes: 10_485_760,
+      putTimeoutMs: 30_000,
+    },
     ...overrides,
   };
 }
