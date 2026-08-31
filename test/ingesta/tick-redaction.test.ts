@@ -293,3 +293,247 @@ describe('tick — contenido real de cliente nunca se filtra, en exito y en fall
     expect(tick).toMatchObject({ fallidos: 1, creados: 0 });
   });
 });
+
+/**
+ * S-016 Tarea 2 — TS-2, TS-8, TS-9, TS-12 (CA-7, CA-11, CA-12, CA-19): un tick COMPLETO con las
+ * tres categorias de resultado a la vez (alta exitosa, descartes de motivos distintos, y dos
+ * rechazos DISTINTOS del bus) no filtra ningun dato sensible, y cada mail deja al menos una linea
+ * distinguible por su resultado.
+ *
+ * Este escenario es mas amplio que el de arriba (CA-25/Tarea 5 de S-015): ese cubria exito y
+ * fallo por separado, con un secreto generico. Este pide EXACTAMENTE el contenido de CA-7 —un
+ * numero de tarjeta en el cuerpo y un asunto que lo nombra— para que el fallo sea evidente al leer
+ * el output del test, no solo una asercion abstracta; y pide las TRES categorias en el MISMO tick.
+ */
+describe('tick — un tick completo con alta, descartes y rechazo del bus no filtra nada sensible (S-016 CA-7, CA-11, CA-12, CA-19)', () => {
+  const CARD_BODY = 'mi tarjeta es 4111 1111 1111 1111';
+  const CARD_SUBJECT = 'Datos de mi tarjeta';
+
+  /** Un mail RFC 822 minimo, parseable, con Message-Id, subject y body configurables. */
+  function buildMail(options: {
+    uid: number;
+    messageId: string;
+    recipient: string;
+    subject: string;
+    body: string;
+    referenceIds?: string;
+  }): Buffer {
+    const referenceHeader =
+      options.referenceIds !== undefined ? `In-Reply-To: ${options.referenceIds}\r\n` : '';
+    return Buffer.from(
+      `Message-Id: ${options.messageId}\r\n` +
+        'From: "Cliente" <cliente@cliente.com>\r\n' +
+        `To: ${options.recipient}\r\n` +
+        `Subject: ${options.subject}\r\n` +
+        referenceHeader +
+        'Content-Type: text/plain; charset=utf-8\r\n' +
+        'MIME-Version: 1.0\r\n\r\n' +
+        `${options.body}\r\n`,
+    );
+  }
+
+  it('el tarjeta-en-cuerpo, dos descartes distintos y dos rechazos del bus dejan rastro sin filtrar nada', async () => {
+    await responder?.stop();
+
+    const { logger, capture } = testLoggerWithCapture();
+
+    // Cinco mails, cinco resultados distintos, en un unico tick:
+    //   uid 5: alta EXITOSA, con el contenido sensible de CA-7 (proyecto alfa, mapeado)
+    //   uid 4: descartado, es_respuesta (reenvio con References poblado — TS-12/CA-19)
+    //   uid 3: descartado, slug_no_mapeado (proyecto beta, no mapeado)
+    //   uid 2: fallo de publicacion, caller_not_authorized -> core_rechazo_por_rol
+    //   uid 1: fallo de publicacion, invalid_fields -> core_rechazo_por_forma
+    const mails = new Map<number, Buffer>([
+      [
+        5,
+        buildMail({
+          uid: 5,
+          messageId: '<s016-card@fixtures.local>',
+          recipient: 'tickets+alfa@grava.io',
+          subject: CARD_SUBJECT,
+          body: CARD_BODY,
+        }),
+      ],
+      [
+        4,
+        buildMail({
+          uid: 4,
+          messageId: '<s016-forward@fixtures.local>',
+          recipient: 'tickets+alfa@grava.io',
+          subject: 'Fwd: Pedido nuevo',
+          body: 'Un pedido nuevo legitimo, reenviado desde un hilo interno.',
+          referenceIds: '<hilo-interno@grava.io>',
+        }),
+      ],
+      [
+        3,
+        buildMail({
+          uid: 3,
+          messageId: '<s016-unmapped@fixtures.local>',
+          recipient: 'tickets+beta@grava.io',
+          subject: 'Consulta beta',
+          body: 'Contenido de un proyecto sin mapear.',
+        }),
+      ],
+      [
+        2,
+        buildMail({
+          uid: 2,
+          messageId: '<s016-role@fixtures.local>',
+          recipient: 'tickets+alfa@grava.io',
+          subject: 'Rechazo por rol',
+          body: 'Este mail dispara caller_not_authorized.',
+        }),
+      ],
+      [
+        1,
+        buildMail({
+          uid: 1,
+          messageId: '<s016-shape@fixtures.local>',
+          recipient: 'tickets+alfa@grava.io',
+          subject: 'Rechazo por forma',
+          body: 'Este mail dispara invalid_fields.',
+        }),
+      ],
+    ]);
+
+    const source: MailSource = {
+      async searchUnseen(): Promise<number[]> {
+        return [...mails.keys()];
+      },
+      async fetch(uid: number): Promise<RawMessage> {
+        const buffer = mails.get(uid);
+        if (buffer === undefined) throw new Error(`no fixture for uid ${uid}`);
+        return { uid, source: buffer };
+      },
+      async markSeen(): Promise<void> {
+        // no-op
+      },
+    };
+
+    // Un unico responder que distingue por CANTIDAD de mensajes recibidos: el primero (uid 5, el
+    // unico que resuelve y no es rechazado) contesta exito; los otros dos que llegan a publicarse
+    // (uid 2 y uid 1) reciben cada uno su propio rechazo, en el orden en que la publicacion ocurre
+    // (UID descendente: 5, luego 2, luego 1 — los descartes de uid 4 y 3 nunca publican nada).
+    //
+    // El tercer rechazo posible (rechazo del BUS por subject, JikuPermissionDenied) NO se cubre en
+    // este tick: requeriria un NATS con `--auth` y una identidad sin permiso sobre el subject
+    // (ver `test/bus/auth-helpers.ts`), infraestructura pensada para los tests de CONEXION, no de
+    // publicacion. El costo de levantar un segundo contenedor para un solo escenario adicional no
+    // se justifica aca; ese rechazo ya esta cubierto en el contexto de conexion por
+    // `test/bus/connection.test.ts`, y `diagnosePublishFailure()` lo traduce con el mismo criterio
+    // estructural que las otras ocho ramas (ver `publish-errors.ts` y `source-properties.test.ts`).
+    const local = await respondTo(bus.connection, 'requirements.new', [
+      { status: 'success', data: { id: 555 } },
+      { status: 'failure', errorCode: 'caller_not_authorized' },
+      { status: 'failure', errorCode: 'invalid_fields' },
+    ]);
+
+    try {
+      await runTick(source, BASE_CONFIG, logger, bus.client);
+    } finally {
+      await local.stop();
+      responder = await respondTo(bus.connection, 'requirements.new', {
+        status: 'success',
+        data: { id: 1 },
+      });
+    }
+
+    // --- CA-7: nada sensible en TODA la salida cruda, y toda linea es JSON valido ---
+    const rawLines = capture.raw();
+    expect(rawLines.length).toBeGreaterThan(0);
+    const fullOutput = rawLines.join('\n');
+
+    expect(fullOutput).not.toContain('4111 1111 1111 1111');
+    expect(fullOutput).not.toContain(CARD_SUBJECT);
+    expect(fullOutput).not.toContain(CARD_BODY);
+    expect(fullOutput).not.toContain('cliente@cliente.com');
+    // El recipient COMPLETO (como valor de un campo) no aparece — el slug si puede aparecer
+    // (CA-6), pero nunca la direccion entera del subaddress.
+    expect(fullOutput).not.toMatch(/"recipient"\s*:\s*"tickets\+alfa@grava\.io"/);
+
+    for (const line of rawLines) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+
+    // --- CA-11: ningun mail termina sin rastro — una linea por UID, con su resultado ---
+    const lines = capture.lines();
+
+    const successLine = lines.find((l) => l['messageId'] === '<s016-card@fixtures.local>');
+    expect(successLine).toMatchObject({
+      msg: 'requisito creado en Jiku',
+      projectId: 42,
+      requirementId: 555,
+    });
+
+    const forwardLine = lines.find((l) => l['messageId'] === '<s016-forward@fixtures.local>');
+    expect(forwardLine).toMatchObject({ msg: 'mail descartado', motivo: 'es_respuesta' });
+
+    const unmappedLine = lines.find((l) => l['messageId'] === '<s016-unmapped@fixtures.local>');
+    expect(unmappedLine).toMatchObject({
+      msg: 'mail descartado',
+      motivo: 'slug_no_mapeado',
+      slug: 'beta',
+    });
+
+    const roleFailureLine = lines.find((l) => l['messageId'] === '<s016-role@fixtures.local>');
+    const shapeFailureLine = lines.find((l) => l['messageId'] === '<s016-shape@fixtures.local>');
+
+    // --- CA-12: los sistemas que rechazan quedan distinguidos, con messageId y projectId ---
+    expect(roleFailureLine).toMatchObject({
+      msg: 'fallo la publicacion de requirements.new',
+      diagnosis: 'core_rechazo_por_rol',
+      sdkErrorClass: 'JikuFailure',
+      code: 'caller_not_authorized',
+      projectId: 42,
+      messageId: '<s016-role@fixtures.local>',
+    });
+    expect(shapeFailureLine).toMatchObject({
+      msg: 'fallo la publicacion de requirements.new',
+      diagnosis: 'core_rechazo_por_forma',
+      sdkErrorClass: 'JikuFailure',
+      code: 'invalid_fields',
+      projectId: 42,
+      messageId: '<s016-shape@fixtures.local>',
+    });
+
+    // --- CA-19: el falso positivo del reenvio queda contable por su motivo, junto a otros descartes ---
+    const discardMotivos = lines
+      .filter((l) => l['msg'] === 'mail descartado')
+      .map((l) => l['motivo']);
+    expect(discardMotivos).toContain('es_respuesta');
+    expect(discardMotivos).toContain('slug_no_mapeado');
+
+    // --- Los cinco contadores reales, en la linea de metricas del tick ---
+    const tick = capture.lines().find((line) => line['msg'] === 'tick completado');
+    expect(tick).toMatchObject({
+      ingestados: 5,
+      parseados: 5,
+      creados: 1,
+      descartados: 2,
+      fallidos: 2,
+    });
+  });
+});
+
+/**
+ * S-016 Tarea 2 — TS-3 (parcial de CA-7): confirma por CONSTRUCCION que ninguna linea de la suite
+ * de arriba pudo haberse escrito a un archivo, porque el unico destino que `testLoggerWithCapture()`
+ * le pasa a `createLogger()` es el stream en memoria de `createLogCapture()`. `createLogger()`
+ * (`src/shared/logger.ts`) acepta un `destination` y un `transportTarget` opcionales — ninguno de
+ * los dos configura un transport de ARCHIVO en ningun entorno (ADR-006: "MUST NOT configurarse
+ * ningun transport de archivo").
+ */
+describe('tick — ninguna linea de log se escribe a un archivo (S-016 CA-7)', () => {
+  it('createLogger() nunca recibe ni construye un transport de archivo', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('../../src/shared/logger.ts', import.meta.url)),
+      'utf8',
+    );
+    // Ningun transport target de pino apunta a un sink de archivo (pino/file, pino-roll, etc.):
+    // el unico transportTarget que existe en el codigo es el de desarrollo, 'pino-pretty', que
+    // escribe a stdout formateado, no a un archivo.
+    expect(source).not.toMatch(/pino\/file|pino-roll|createWriteStream/);
+    expect(source).toMatch(/pino-pretty/);
+  });
+});

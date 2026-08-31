@@ -8,10 +8,12 @@ redaction), S-004 (identity and the single bus connection), S-005 (publishing `r
 translating its errors), S-008 (pure mail normalization), S-009 (the `MailSource` port and its
 `imapflow` adapter), S-010 (the tick: cap, order, marking and failure isolation), S-011 (the
 no-overlap scheduler guard, `cron.schedule()` wiring, and the ordered shutdown on `SIGTERM`/`SIGINT`),
-S-012 (the Ticket Map with its two exclusive sources, the subaddress prefix and the placeholders) and
+S-012 (the Ticket Map with its two exclusive sources, the subaddress prefix and the placeholders),
 S-013 (the pure `routeMail()` decision tree and the single-source `MotivoDescarte`/`RouteResult`
-types). The service is a `worker` in Node.js with no HTTP surface and no database, so several
-categories do not apply and stay empty until a story creates them.
+types), S-015 (the mail-derived payload, `buildRequirementPayload()`) and S-016 (closing the catalog
+with the real names the implementation settled on — see the note under `buildRequirementPayload()` and
+`MotivoDescarte`/`RouteResult` below). The service is a `worker` in Node.js with no HTTP surface and no
+database, so several categories do not apply and stay empty until a story creates them.
 
 ## Components
 
@@ -19,7 +21,7 @@ N/A (Backend service)
 
 ## Utils/Helpers
 
-**Total: 6**
+**Total: 7**
 
 - **cleanSubject()** (`src/domain/ingesta/subject.ts`) - Strips `Re:`/`Fwd:`/`RV:` prefixes
   iteratively and case-insensitively. An all-prefix subject is left as `''`, a valid state.
@@ -36,6 +38,9 @@ N/A (Backend service)
   time or its branch selection breaks silently.
 - **trimQuotedText()** (`src/domain/ingesta/body.ts`) - Best-effort trim of quoted thread text by
   five markers. Ported unchanged from the service in production; never reinvented.
+- **buildRequirementPayload()** (`src/domain/publicacion/mail-payload.ts`) - Builds the
+  `requirements.new` payload from a routed mail: trim → truncate → placeholder, in that exact order,
+  for `title` and `description`. Pure; validates nothing and publishes nothing.
 
 See full details in [utils.md](./utils.md)
 

@@ -2,19 +2,23 @@
 id: arranque-y-conexion-al-bus
 title: Arranque y conexión al bus
 type: event
-status: Draft
+status: Active
 created: 2026-08-27
-last_updated: 2026-08-28
-stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012]
+last_updated: 2026-08-31
+stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016]
 ---
 
 # Arranque y Conexión al Bus
 
 **Tipo:** Evento
-**Status:** Draft
+**Status:** Active
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-28 (S-011 implementada: el Paso 8 — schedular el tick y el apagado ordenado — ya está implementado, no pendiente. S-012 implementada: el Paso 1 valida también el Mapa de Tickets, el prefijo y los placeholders — ya no queda nada fuera del arranque)
-**Stories:** S-002, S-003, S-004, S-006, S-007, S-011, S-012
+**Última actualización:** 2026-08-31 (S-011 implementada: el Paso 8 — schedular el tick y el apagado
+ordenado — ya está completo. S-012 implementada: el Paso 1 valida también el Mapa de Tickets, el
+prefijo y los placeholders. S-016 implementada: el documento estaba completo desde S-012 — no se
+reescribe ningún paso de contenido — y S-016 cierra el estado formal: `Status` pasa de `Draft` a
+`Active` y se suman las stories del feature group que lo cerró)
+**Stories:** S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016
 
 ## Descripción
 
