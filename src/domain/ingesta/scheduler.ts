@@ -1,3 +1,4 @@
+import type { Client } from '@gravadigital/jiku';
 import { schedule as cronSchedule, type ScheduledTask } from 'node-cron';
 import type { Logger } from 'pino';
 
@@ -51,7 +52,7 @@ let inFlightPromise: Promise<void> | undefined;
  * retorna sin invocar `runTick` — el disparo salteado NO se encola, se pierde: el proximo disparo
  * del cron es la unica oportunidad siguiente.
  *
- * Si `tickInFlight === false`: lo marca `true`, invoca `runTick(config, logger)`, y el `finally`
+ * Si `tickInFlight === false`: lo marca `true`, invoca `runTick(config, logger, client)`, y el `finally`
  * lo devuelve a `false` SIEMPRE — con exito o con excepcion de `runTick` (CA-6). `runIngestaTick`
  * (S-010) ya no relanza nada por su cuenta, asi que esta funcion no necesita un `catch` adicional
  * sobre el resultado del tick: solo el `finally` sobre el indicador.
@@ -59,7 +60,8 @@ let inFlightPromise: Promise<void> | undefined;
 export async function triggerTick(
   config: AppConfig,
   logger: Logger,
-  runTick: (config: AppConfig, logger: Logger) => Promise<void> = runIngestaTick,
+  client: Client,
+  runTick: (config: AppConfig, logger: Logger, client: Client) => Promise<void> = runIngestaTick,
 ): Promise<void> {
   if (tickInFlight) {
     logger.warn({}, 'tick salteado: hay uno en curso');
@@ -69,7 +71,7 @@ export async function triggerTick(
   tickInFlight = true;
   const run = (async () => {
     try {
-      await runTick(config, logger);
+      await runTick(config, logger, client);
     } catch (err) {
       // `runIngestaTick` real (S-010) ya no relanza nada por su cuenta — este catch solo importa
       // para un doble de test inyectado que lanza deliberadamente (AC-5): el guard nunca propaga
@@ -123,7 +125,8 @@ export function waitForCurrentTick(): Promise<void> {
 export function scheduleTick(
   config: AppConfig,
   logger: Logger,
-  runTick: (config: AppConfig, logger: Logger) => Promise<void> = runIngestaTick,
+  client: Client,
+  runTick: (config: AppConfig, logger: Logger, client: Client) => Promise<void> = runIngestaTick,
   cronScheduleFn: typeof cronSchedule = cronSchedule,
 ): ScheduledTask | undefined {
   if (!config.poll.enabled) {
@@ -131,5 +134,5 @@ export function scheduleTick(
     return undefined;
   }
 
-  return cronScheduleFn(config.poll.cron, () => triggerTick(config, logger, runTick));
+  return cronScheduleFn(config.poll.cron, () => triggerTick(config, logger, client, runTick));
 }

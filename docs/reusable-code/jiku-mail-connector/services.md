@@ -411,6 +411,54 @@ const { requirementId } = await publishVerificationRequirement({
 
 ---
 
+## publishRequirementFromMail()
+
+**Location:** `src/domain/publicacion/publish-requirement.ts`
+
+**Description:** Sibling of `publishVerificationRequirement()`: publishes the `requirements.new`
+payload derived from an incoming mail (via `buildRequirementPayload()`), validates the reply, and
+logs success or failure with the mail's `messageId` added to the log context. The alta path the tick
+uses once a mail resolves to a project.
+
+**Signature:**
+
+```ts
+interface PublishRequirementFromMailDeps {
+  readonly client: Client;
+  readonly logger: Logger;
+}
+
+function publishRequirementFromMail(
+  mail: Pick<IncomingMail, 'messageId' | 'subject' | 'body'>,
+  projectId: number,
+  ruteoConfig: Pick<RuteoConfig, 'placeholderTitle' | 'placeholderBody'>,
+  deps: PublishRequirementFromMailDeps,
+): Promise<{ requirementId: number }>;
+```
+
+**Usage:**
+
+```ts
+const { requirementId } = await publishRequirementFromMail(mail, route.projectId, config.ruteo, {
+  client,
+  logger,
+});
+```
+
+**Notes:**
+
+- Shares the same `client.command()` mechanics as `publishVerificationRequirement()` — same
+  `COMMAND` constant, same two-argument call, same 15000 ms timeout — and reuses
+  `diagnosePublishFailure()`/`PublishError`/`newRequirementReplySchema` without modification.
+- The only observable difference from its sibling: the payload comes from
+  `buildRequirementPayload()` instead of a fixed literal, and `messageId` is added to **both** the
+  success and the error log objects — never inside `logContext()`, which stays shared with the
+  verification path.
+- Rethrows on failure and never retries; the caller (the tick) decides what to count and whether to
+  continue the batch.
+
+---
+
 ## diagnosePublishFailure()
 
 **Location:** `src/domain/publicacion/publish-errors.ts`
@@ -543,7 +591,10 @@ batch in strict UID-descending order and sequentially (`for...of`, never `Promis
 `\Seen` one at a time immediately after each successful download (before normalizing), isolates
 any per-message failure without aborting the batch, and always emits the five counters — even if
 `searchUnseen()` itself throws — because `TickCounters` lives outside the `try` and the emission is
-in the `finally`. Receives an already-open `MailSource` (S-009); does not construct one.
+in the `finally`. Receives an already-open `MailSource` (S-009); does not construct one. Since
+S-015, a mail that `routeMail()` resolves is also published via `publishRequirementFromMail()`
+**within the same loop iteration** — never accumulated in an array first — and its outcome feeds
+`creados`/`fallidos`.
 
 **Signature:**
 
@@ -560,6 +611,7 @@ function runTick(
   mailSource: MailSource,
   config: AppConfig,
   logger: Logger,
+  client: Client, // the connected bus client; publishes requirements.new for resolved mails
   normalize?: typeof normalizeMail, // test-only, defaults to the real normalize()
 ): Promise<void>;
 ```
@@ -567,7 +619,7 @@ function runTick(
 **Usage example:**
 
 ```ts
-await withMailSource({ config, logger }, (mailSource) => runTick(mailSource, config, logger));
+await withMailSource({ config, logger }, (mailSource) => runTick(mailSource, config, logger, client));
 ```
 
 **Notes:**
@@ -576,12 +628,14 @@ await withMailSource({ config, logger }, (mailSource) => runTick(mailSource, con
   never throws, it just produces `messageId: undefined`, which is already the
   `MissingMessageIdError` path) — there is no real `.eml` fixture that forces a genuine parse
   failure distinct from "no Message-Id". Same pattern as `imapFlowCtor` in `infra/imap/client.ts`.
-- `creados`/`descartados` are literal `0` until FG-3: this story does not distinguish
-  `MissingMessageIdError` from any other `normalize()` failure — both count as `fallidos`.
 - A mail that fails to download is skipped with `warn` and never marked `\Seen` (retried next
   tick). A mail that downloads but fails to normalize stays `\Seen` and is lost — no compensation.
-- The normalized `IncomingMail` is discarded immediately after logging its result: never
-  accumulated in an array, never published (this story's pipeline ends at normalization).
+- A mail that `routeMail()` discards never reaches publication: `descartados` covers the five
+  discard reasons (`routeMail()`'s three plus `MissingMessageIdError`), completely separate from
+  `creados`/`fallidos`, which only count a publication attempt's outcome.
+- A publication failure (`PublishError`, already logged inside `publishRequirementFromMail()`) is
+  caught locally: it increments `fallidos` and lets the loop continue with the next UID — it is
+  never rethrown, never retried, and never re-logged by the tick itself.
 
 ---
 
@@ -602,13 +656,18 @@ kill the process: the worker stays alive and retries on the next cron tick.
 **Signature:**
 
 ```ts
-function runIngestaTick(config: AppConfig, logger: Logger, imapFlowCtor?: ImapFlowCtor): Promise<void>;
+function runIngestaTick(
+  config: AppConfig,
+  logger: Logger,
+  client: Client,
+  imapFlowCtor?: ImapFlowCtor,
+): Promise<void>;
 ```
 
 **Usage example:**
 
 ```ts
-await runIngestaTick(config, logger); // production; a scheduler (S-011) invokes this per cron tick
+await runIngestaTick(config, logger, client); // production; a scheduler (S-011) invokes this per cron tick
 ```
 
 **Notes:**
@@ -642,7 +701,8 @@ does not expose the same log point CA-5 requires verbatim.
 function triggerTick(
   config: AppConfig,
   logger: Logger,
-  runTick?: (config: AppConfig, logger: Logger) => Promise<void>, // defaults to runIngestaTick
+  client: Client,
+  runTick?: (config: AppConfig, logger: Logger, client: Client) => Promise<void>, // defaults to runIngestaTick
 ): Promise<void>;
 ```
 
@@ -650,10 +710,10 @@ function triggerTick(
 
 ```ts
 // production, invoked once per cron.schedule() callback:
-cron.schedule(config.poll.cron, () => triggerTick(config, logger));
+cron.schedule(config.poll.cron, () => triggerTick(config, logger, client));
 
 // test, injecting a controllable double instead of the real tick:
-await triggerTick(config, logger, fakeTick);
+await triggerTick(config, logger, client, fakeTick);
 ```
 
 **Notes:**
@@ -700,9 +760,9 @@ await closeBus();
 **Location:** `src/domain/ingesta/scheduler.ts`
 
 **Description:** Decides between the two `POLL_ENABLED` branches (Step 8 of the startup flow).
-`true`: calls `cron.schedule(config.poll.cron, () => triggerTick(config, logger, runTick))` and
-returns the `ScheduledTask` — `config.poll.cron` arrives already validated by `cron.validate()` in
-the schema (S-007), so this function never repeats that validation. `false`: logs
+`true`: calls `cron.schedule(config.poll.cron, () => triggerTick(config, logger, client, runTick))`
+and returns the `ScheduledTask` — `config.poll.cron` arrives already validated by `cron.validate()`
+in the schema (S-007), so this function never repeats that validation. `false`: logs
 `'poll deshabilitado: no se schedula ningún tick'` and returns `undefined` without ever calling
 `cron.schedule()`. Neither branch fires an immediate tick — the first one always waits for the
 cron's own first trigger, a property of `node-cron` itself, not of this function.
@@ -713,7 +773,8 @@ cron's own first trigger, a property of `node-cron` itself, not of this function
 function scheduleTick(
   config: AppConfig,
   logger: Logger,
-  runTick?: (config: AppConfig, logger: Logger) => Promise<void>, // defaults to runIngestaTick
+  client: Client,
+  runTick?: (config: AppConfig, logger: Logger, client: Client) => Promise<void>, // defaults to runIngestaTick
   cronScheduleFn?: typeof import('node-cron').schedule, // defaults to the real cron.schedule
 ): ScheduledTask | undefined;
 ```
@@ -721,7 +782,7 @@ function scheduleTick(
 **Usage example:**
 
 ```ts
-const scheduledTask = scheduleTick(config, logger); // production
+const scheduledTask = scheduleTick(config, logger, client); // production
 ```
 
 **Notes:**

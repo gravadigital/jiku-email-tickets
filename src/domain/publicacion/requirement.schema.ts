@@ -62,6 +62,13 @@ export const newRequirementSchema = z
     type: z.enum(REQUIREMENT_TYPES),
     priority: z.enum(REQUIREMENT_PRIORITIES),
     visibilityLevel: z.enum(REQUIREMENT_VISIBILITY_LEVELS),
+
+    // OPCIONAL, agregado por S-015. `core` IGNORA este valor: resuelve el actor del `sub` del
+    // subject (infalsificable, ADR-005), nunca de este campo. Es informativo y redundante por
+    // diseno, no una fuente de verdad — y por eso es opcional: `buildVerificationPayload()` no lo
+    // incluye y sigue siendo un payload valido. `actor` sigue siendo la UNICA clave de identidad
+    // que el `.strict()` rechaza de plano.
+    creator: z.string().min(1).optional(),
   })
   .strict();
 

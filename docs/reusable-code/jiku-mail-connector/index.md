@@ -45,7 +45,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 19**
+**Total: 20**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -74,6 +74,10 @@ N/A (no HTTP surface - ADR-001)
 - **publishVerificationRequirement()** (`src/domain/publicacion/publish-requirement.ts`) - Publishes
   `requirements.new` with `client.command()`, validates the reply, logs `{ projectId, requirementId }`
   on one line, and translates any failure into a `PublishError`. Never retries.
+- **publishRequirementFromMail()** (`src/domain/publicacion/publish-requirement.ts`) - Sibling of
+  `publishVerificationRequirement()`: publishes the mail-derived `requirements.new` payload, adds the
+  mail's `messageId` to both the success and the error log context, and rethrows on failure without
+  retrying.
 - **diagnosePublishFailure()** (`src/domain/publicacion/publish-errors.ts`) - Classifies a publication
   failure by **SDK class and error code**, never by message text, into the diagnosis of *which system
   refused*. An unknown code is a normal outcome and is never mapped to a known case.

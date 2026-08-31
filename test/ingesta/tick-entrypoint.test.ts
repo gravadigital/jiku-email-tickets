@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream';
 
+import type { Client } from '@gravadigital/jiku';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AppConfig } from '#config/index.js';
@@ -12,7 +13,14 @@ import { testLoggerWithCapture } from './test-logger.js';
  * TS-15 a TS-18: el punto de entrada del modulo (`runIngestaTick`), que compone `withMailSource()`
  * con `runTick()`. Dobla `ImapFlow` por fabrica inyectada (`imapFlowCtor`), mismo patron que
  * `test/infra/imap/client.test.ts` — nunca mockeando el modulo `imapflow`.
+ *
+ * `FAKE_CLIENT` es un STUB del `Client` del bus (S-015): los mails de este archivo (`To:
+ * c@d.com`) no matchean ningun subaddress y `routeMail()` los descarta como `sin_slug` antes de
+ * llegar a publicar — esta suite es sobre el arranque IMAP, no sobre publicacion, asi que no hace
+ * falta el bus real.
  */
+
+const FAKE_CLIENT = {} as unknown as Client;
 
 const BASE_CONFIG: AppConfig = {
   servers: 'nats://localhost:4222',
@@ -99,7 +107,7 @@ describe('runIngestaTick — credenciales incorrectas (CA-9)', () => {
     const client = createFakeClient({ connectError: new AuthenticationFailure('LOGIN failed') });
     const { logger, capture } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, ctorFor(client));
 
     const errorLine = capture.lines().find((line) => line['level'] === 'error' || line['msg'] === 'el tick fallo');
     expect(errorLine).toBeDefined();
@@ -133,7 +141,7 @@ describe('runIngestaTick — credenciales incorrectas (CA-9)', () => {
     const client = createFakeClient({ lockError });
     const { logger, capture } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, ctorFor(client));
 
     expect(client.messageFlagsAdd).not.toHaveBeenCalled();
     const tickLines = capture.lines().filter((line) => line['msg'] === 'tick completado');
@@ -155,7 +163,7 @@ describe('runIngestaTick — host inalcanzable (CA-10)', () => {
     const client = createFakeClient({ connectError: networkError });
     const { logger, capture } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, ctorFor(client));
 
     expect(client.messageFlagsAdd).not.toHaveBeenCalled();
     const tickLine = capture.lines().find((line) => line['msg'] === 'tick completado');
@@ -182,7 +190,7 @@ describe('runIngestaTick — corte de red a mitad de camino (CA-11, CA-12)', () 
     });
     const { logger, capture } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, ctorFor(client));
 
     const tickLine = capture.lines().find((line) => line['msg'] === 'tick completado');
     expect(tickLine).toMatchObject({ ingestados: 5, parseados: 4, fallidos: 0 });
@@ -198,7 +206,7 @@ describe('runIngestaTick — corte de red a mitad de camino (CA-11, CA-12)', () 
     });
     const { logger } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, ctorFor(client));
 
     // La 5ta llamada (uid 6) se invoco pero RECHAZO — no cuenta como "marcado con exito". Los
     // primeros 4 uids son los unicos efectivamente vistos por el proximo tick.
@@ -212,7 +220,7 @@ describe('runIngestaTick — corte de red a mitad de camino (CA-11, CA-12)', () 
     const client2 = createFakeClient({ searchResult: [6, 5, 4, 3, 2, 1] });
     const { logger: logger2 } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger2, ctorFor(client2));
+    await runIngestaTick(BASE_CONFIG, logger2, FAKE_CLIENT, ctorFor(client2));
 
     const fetchedInSecondRun = client2.download.mock.calls.length;
     expect(fetchedInSecondRun).toBe(6);

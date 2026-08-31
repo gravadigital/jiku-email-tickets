@@ -1,9 +1,12 @@
+import type { Client } from '@gravadigital/jiku';
 import type { Logger } from 'pino';
 
 import type { AppConfig } from '#config/index.js';
 import { MissingMessageIdError } from '#domain/ingesta/errors.js';
 import { normalize as normalizeMail } from '#domain/ingesta/normalize.js';
 import type { MailSource } from '#domain/ingesta/ports.js';
+import { PublishError } from '#domain/publicacion/publish-errors.js';
+import { publishRequirementFromMail } from '#domain/publicacion/publish-requirement.js';
 import { routeMail } from '#domain/ruteo/route-mail.js';
 import { type ImapFlowCtor, withMailSource } from '#infra/imap/client.js';
 
@@ -20,12 +23,12 @@ import { type ImapFlowCtor, withMailSource } from '#infra/imap/client.js';
 /**
  * Los cinco contadores que el tick emite en una unica linea, siempre — con exito o con fallo.
  *
- * `creados` sigue en `0` literal en este alcance (S-015 lo completa: el alta todavia no publica
- * nada). `descartados` ya cuenta los cinco motivos reales (S-014): los tres que decide `routeMail()`
- * (`es_respuesta`, `sin_slug`, `slug_no_mapeado`) mas `sin_message_id` (via `MissingMessageIdError`,
- * distinguido por CLASE en el `catch` de `normalize()`, nunca por texto — ADR-002). Solo
- * `no_parseable` (cualquier otro fallo de `normalize()`) sigue contando como `fallidos`: es lo que
- * salio mal, no un descarte esperado.
+ * `creados` cuenta las altas que `publishRequirementFromMail()` (S-015) confirma con exito;
+ * `fallidos` cuenta tanto un alta que esa funcion relanza como (desde S-010) un fallo de parseo
+ * generico (`no_parseable`). `descartados` cuenta los cinco motivos reales (S-014): los tres que
+ * decide `routeMail()` (`es_respuesta`, `sin_slug`, `slug_no_mapeado`) mas `sin_message_id` (via
+ * `MissingMessageIdError`, distinguido por CLASE en el `catch` de `normalize()`, nunca por texto —
+ * ADR-002).
  */
 export interface TickCounters {
   ingestados: number;
@@ -75,6 +78,7 @@ export async function runTick(
   mailSource: MailSource,
   config: AppConfig,
   logger: Logger,
+  client: Client,
   normalize: Normalize = normalizeMail,
 ): Promise<void> {
   const counters: TickCounters = {
@@ -142,10 +146,27 @@ export async function runTick(
           // (CA-11, CA-16). No publica, no responde, no mueve de carpeta, no persiste (CA-6) — el
           // alcance de esta story termina en el reporte del descarte.
         } else {
-          // Resuelto: por ahora no se hace nada mas con `route` (el alta es S-015; `creados` sigue
-          // en 0 — CA-13). La linea `'mail procesado'` marca que este mail SI se normalizo y
-          // resolvio, distinta de la linea de descarte de arriba.
-          logger.info({ messageId: mail.messageId, resultado: 'normalizado' }, 'mail procesado');
+          // El alta ocurre DENTRO de esta misma iteracion, antes de pasar al siguiente UID — nunca
+          // se acumula un array de mails ruteados para publicar al final (CA-22 de S-015). Un
+          // `try/catch` propio, anidado en el de normalizacion/ruteo, distingue un fallo de
+          // PUBLICACION (`fallidos`) de un fallo de NORMALIZACION (`descartados`/`fallidos` de
+          // arriba): son ejes distintos y no deben confundirse.
+          try {
+            await publishRequirementFromMail(mail, route.projectId, config.ruteo, {
+              client,
+              logger,
+            });
+            counters.creados += 1;
+            // `publishRequirementFromMail()` ya logueo `'requisito creado en Jiku'` con los tres
+            // identificadores (CA-14) — no se emite una segunda linea `'mail procesado'` aca: seria
+            // una linea de resultado duplicada para el mismo mail.
+          } catch (cause) {
+            // `publishRequirementFromMail()` ya logueo el fallo con su propio `catch` interno
+            // (Tarea 3, criterio 5) — este `catch` NO vuelve a loguear el error, solo cuenta y
+            // continua con el siguiente UID (CA-18): sin reintento, sin abortar el lote.
+            if (!(cause instanceof PublishError)) throw cause;
+            counters.fallidos += 1;
+          }
         }
       } catch (cause) {
         // Distincion por CLASE, nunca por texto del mensaje (ADR-002, CA-9): `MissingMessageIdError`
@@ -171,7 +192,7 @@ export async function runTick(
       {
         ingestados: counters.ingestados,
         parseados: counters.parseados,
-        creados: 0, // literal hasta S-015
+        creados: counters.creados,
         descartados: counters.descartados,
         fallidos: counters.fallidos,
       },
@@ -211,6 +232,7 @@ export async function runTick(
 export async function runIngestaTick(
   config: AppConfig,
   logger: Logger,
+  client: Client,
   imapFlowCtor?: ImapFlowCtor,
 ): Promise<void> {
   let tickBodyStarted = false;
@@ -218,7 +240,7 @@ export async function runIngestaTick(
   try {
     await withMailSource({ config, logger, imapFlowCtor }, (mailSource) => {
       tickBodyStarted = true;
-      return runTick(mailSource, config, logger);
+      return runTick(mailSource, config, logger, client);
     });
   } catch (err) {
     // El error puede ser un fallo de `withMailSource` ANTES de invocar el callback (`connect()`

@@ -17,7 +17,7 @@ import { reportStartupFailure, runStartup } from './startup.js';
  * propiedad que escanea el codigo para afirmarlo.
  */
 async function main(): Promise<void> {
-  const { config, logger } = await runStartup();
+  const { config, logger, client } = await runStartup();
 
   // Apagado ordenado (CA-8, CA-9, CA-10): los handlers de SIGTERM/SIGINT se registran ACA, ANTES
   // de `scheduleTick()`, y no despues. `shutdown` se reconstruye (mismo `waitForCurrentTick` y
@@ -46,7 +46,12 @@ async function main(): Promise<void> {
   // `scheduleTick` llama a `cron.schedule()` y devuelve la tarea programada. Con el poll
   // deshabilitado, loguea el mensaje de deshabilitado y devuelve `undefined` — sin schedular
   // nada. Ningun tick corre antes del primer disparo real del cron: no hay tick inmediato.
-  const scheduledTask = scheduleTick(config, logger);
+  //
+  // El `client` ya conectado por `runStartup()` (S-004) se propaga aca, SIN abrir ninguna conexion
+  // nueva (ADR-002): es el mismo que el tick usara para publicar `requirements.new` (S-015). Este
+  // archivo NO importa nada de `#domain/publicacion/` para lograrlo — el import queda encapsulado
+  // en `tick.ts` (CA-24).
+  const scheduledTask = scheduleTick(config, logger, client);
 
   // El proceso queda VIVO en ambas ramas. Con el poll habilitado, ademas hay un cron activo. Con
   // el poll deshabilitado (CA-3/CA-4), el proceso sigue vivo igual, pero NO por codigo de esta
