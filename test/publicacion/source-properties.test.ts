@@ -148,13 +148,15 @@ describe('src/ publication source properties', () => {
     expect(publishers).toEqual([PUBLISH_REQUIREMENT]);
   });
 
-  it('invokes client.command exactly once, with two arguments', () => {
+  it('invokes client.command exactly once per function, with two arguments', () => {
     const publisher = FILES.find((file) => file.relativePath === PUBLISH_REQUIREMENT);
     expect(publisher).toBeDefined();
 
     const invocations = publisher?.code.match(/\.command\s*\(/g) ?? [];
-    // UNA sola invocacion por llamada a la funcion: ni `for`, ni `while`, ni backoff, ni retry.
-    expect(invocations).toHaveLength(1);
+    // DOS invocaciones en el archivo desde S-015: una por funcion hermana
+    // (`publishVerificationRequirement` y `publishRequirementFromMail`), ninguna con `for`, `while`,
+    // backoff ni retry. Cada llamada a CUALQUIERA de las dos funciones sigue publicando una sola vez.
+    expect(invocations).toHaveLength(2);
 
     // DOS argumentos, no tres: el tercero (`options`) es donde se bajaria el timeout por accidente,
     // y ADR-006 lo prohibe explicitamente ("MUST NOT bajarse"). El `options` se usa SOLO desde los
@@ -290,6 +292,24 @@ describe('src/ publication source properties', () => {
         `the fixed payload must not carry ${excluded}`,
       ).not.toMatch(new RegExp(`\\b${excluded}\\s*:`));
     }
+  });
+
+  it('sends none of the three always-excluded payload keys from mail-payload.ts either (S-015)', () => {
+    // `mail-payload.ts` SI lleva `creator` (es el punto de la story) — por eso NO se incluye en
+    // esta lista, a diferencia del payload fijo de arriba. Las tres que siguen prohibidas de plano
+    // en CUALQUIER payload son `state`, `actor` y `fileIds`.
+    const payload = FILES.find((file) => file.relativePath === `${PUBLICACION}mail-payload.ts`);
+
+    expect(payload).toBeDefined();
+    for (const excluded of ['state', 'actor', 'fileIds']) {
+      expect(
+        payload?.code,
+        `the mail-derived payload must not carry ${excluded}`,
+      ).not.toMatch(new RegExp(`\\b${excluded}\\s*:`));
+    }
+    // Y la contracara positiva: `creator` SI esta, para que este test no pase vacuamente si
+    // alguien borrara la clave entera del archivo.
+    expect(payload?.code).toMatch(/\bcreator\s*:/);
   });
 
   it('declares no database client and writes no SQL, as ADR-001 forbids', () => {

@@ -89,6 +89,24 @@ describe('newRequirementSchema', () => {
     // `core`, no la politica del conector. Con defaults, esto pasaria.
     expect(newRequirementSchema.safeParse({}).success).toBe(false);
   });
+
+  // CA-3: `creator` se agrega como z.string().min(1) opcional, resto del contrato identico.
+  it('accepts a payload with creator added', () => {
+    const result = newRequirementSchema.safeParse({ ...VALID, creator: 'user-123' });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.creator).toBe('user-123');
+  });
+
+  it('still accepts a payload with no creator at all', () => {
+    // Necesario para que buildVerificationPayload() (que no lo incluye) siga validando.
+    expect('creator' in VALID).toBe(false);
+    expect(newRequirementSchema.safeParse(VALID).success).toBe(true);
+  });
+
+  it('rejects an empty string as creator', () => {
+    expect(newRequirementSchema.safeParse({ ...VALID, creator: '' }).success).toBe(false);
+  });
 });
 
 describe('parseNewRequirement', () => {

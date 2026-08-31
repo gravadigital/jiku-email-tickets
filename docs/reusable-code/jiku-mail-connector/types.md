@@ -615,9 +615,10 @@ network `errno` codes (`ECONNREFUSED`, `ENOTFOUND`, etc.) map to `host_inalcanza
 **Location:** `src/domain/ingesta/tick.ts`
 
 **Description:** The five counters a tick emits in a single log line, always — with success or
-failure. All in-memory, no persistence (ADR-001). `creados`/`descartados` are literal `0` until
-FG-3 fills them in; this story's `runTick()` counts any `normalize()` failure (including
-`MissingMessageIdError`) as `fallidos`, with no separate branch by error class.
+failure. All in-memory, no persistence (ADR-001). `descartados` covers the five discard reasons
+(the three `routeMail()` decides plus `MissingMessageIdError`, via S-014); `creados`/`fallidos`
+(S-015) count the outcome of publishing `requirements.new` for a mail that resolved to a project —
+a publication failure counts as `fallidos`, separate from a discard.
 
 **Signature:**
 

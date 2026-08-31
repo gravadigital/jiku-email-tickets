@@ -1,6 +1,9 @@
 import type { Client } from '@gravadigital/jiku';
 import type { Logger } from 'pino';
 
+import type { RuteoConfig } from '#config/index.js';
+import type { IncomingMail } from '#domain/ingesta/types.js';
+import { buildRequirementPayload } from '#domain/publicacion/mail-payload.js';
 import {
   PublishError,
   diagnosePublishFailure,
@@ -119,5 +122,81 @@ export async function publishVerificationRequirement({
 
   // El tipo de retorno nombra el campo en vez de devolver el `data` crudo: asi el `id` desnudo no
   // se propaga y nadie lo confunde con el id de otra cosa.
+  return { requirementId: reply.data.id };
+}
+
+export interface PublishRequirementFromMailDeps {
+  /** El cliente conectado. El mismo de S-004, ya con `userId` resuelto de la key. */
+  readonly client: Client;
+  readonly logger: Logger;
+}
+
+/**
+ * Publica el requisito DERIVADO DEL MAIL (FG-3) y devuelve su `id`.
+ *
+ * Hermana de `publishVerificationRequirement()`, no su reemplazo: comparte el mismo patron
+ * try/catch/log/relanza y el mismo `client.command()` reutilizado (ADR-002, dos argumentos, 15000
+ * ms). La UNICA diferencia observable es de donde sale el payload —`buildRequirementPayload()`
+ * (Tarea 2) en vez del literal fijo— y que el `messageId` del mail viaja en AMBOS objetos de log
+ * (exito y error), porque aca SI hay un mail que identificar (CA-14, CA-15).
+ *
+ * `diagnosePublishFailure()` y `logContext()` NO se tocan: sus 9 ramas ya cubren los tres sistemas
+ * que pueden rechazar, y esta funcion solo AGREGA `messageId` al objeto de log, nunca adentro de
+ * `logContext()` (que seguiria siendo el mismo para el modo de verificacion, sin mail que nombrar).
+ */
+export async function publishRequirementFromMail(
+  mail: Pick<IncomingMail, 'messageId' | 'subject' | 'body'>,
+  projectId: number,
+  ruteoConfig: Pick<RuteoConfig, 'placeholderTitle' | 'placeholderBody'>,
+  { client, logger }: PublishRequirementFromMailDeps,
+): Promise<{ requirementId: number }> {
+  // El payload se valida ANTES de publicar, igual que en el modo de verificacion — mismo criterio,
+  // ahora sobre un payload que deriva de contenido variable del cliente en vez de un literal fijo.
+  const payload = parseNewRequirement(
+    buildRequirementPayload(mail, projectId, client.userId, ruteoConfig),
+  );
+
+  let data: unknown;
+
+  try {
+    // DOS ARGUMENTOS, no tres, exactamente como en `publishVerificationRequirement()`: el mismo
+    // punto de publicacion, ahora invocado tambien desde el camino del mail.
+    data = await client.command(COMMAND, payload);
+  } catch (cause) {
+    const error = new PublishError(diagnosePublishFailure(cause), cause);
+
+    // `messageId` se agrega AL OBJETO DE LOG, no dentro de `logContext()` (que no cambia): es lo
+    // que permite que el modo de verificacion siga usando el mismo `logContext()` sin un mail que
+    // nombrar.
+    logger.error(
+      { messageId: mail.messageId, ...error.logContext(projectId) },
+      'fallo la publicacion de requirements.new',
+    );
+
+    // Relanza, nunca traga: el tick (Tarea 4) es quien decide `fallidos += 1` y sigue con el
+    // proximo UID. Esta funcion no sabe nada de contadores ni de lotes.
+    throw error;
+  }
+
+  const reply = newRequirementReplySchema.safeParse(data);
+
+  if (!reply.success) {
+    const error = new PublishError('respuesta_ilegible', undefined);
+
+    logger.error(
+      { messageId: mail.messageId, ...error.logContext(projectId) },
+      'fallo la publicacion de requirements.new',
+    );
+
+    throw error;
+  }
+
+  // La linea de exito. CA-1 y CA-14 piden los TRES identificadores juntos, en una sola linea:
+  // separarlos obliga a correlacionar por timestamp para encontrar el requisito en Jiku.
+  logger.info(
+    { messageId: mail.messageId, projectId, requirementId: reply.data.id },
+    'requisito creado en Jiku',
+  );
+
   return { requirementId: reply.data.id };
 }

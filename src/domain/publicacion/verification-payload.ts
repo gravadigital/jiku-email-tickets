@@ -67,9 +67,14 @@ export function buildVerificationPayload(projectId: number): NewRequirementPaylo
     //               antes de tocar la red.
     // - `fileIds`:  NO va. Se envia solo si hay al menos uno (ADR-003) y aca no hay adjuntos. El
     //               byte del adjunto y `files.request-upload` son de FG-4.
-    // - `creator`:  NO va. `core` resuelve el actor del subject e IGNORA lo que el cuerpo declare
-    //               (ADR-005), asi que enviarlo seria a la vez inutil y engañoso: sugeriria que el
-    //               conector elige el creador cuando no puede.
+    // - `creator`:  NO va ACA -- pero desde S-015 SI se envia en el payload derivado del mail
+    //               (`mail-payload.ts`), con `client.userId`. La clave sigue siendo opcional en el
+    //               schema, asi que este payload fijo sigue siendo valido sin ella. `core` la
+    //               IGNORA: resuelve el actor del `sub` del subject, que es infalsificable
+    //               (ADR-005). Enviarla es REDUNDANTE POR DISEÑO y no una fuente de verdad -- no es
+    //               inutil ni engañoso, es informativo y el request lo pide explicitamente (RF-32).
+    //               La clave que SIGUE PROHIBIDA de plano, en cualquier payload, es `actor`: es la
+    //               unica que el `.strict()` del schema y el chequeo local del SDK rechazan.
   };
 }
 
