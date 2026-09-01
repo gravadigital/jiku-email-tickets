@@ -14,10 +14,12 @@ types), S-015 (the mail-derived payload, `buildRequirementPayload()`), S-016 (cl
 with the real names the implementation settled on — see the note under `buildRequirementPayload()` and
 `MotivoDescarte`/`RouteResult` below), S-017 (the pure attachment pipeline — `particionar()`,
 `deduplicar()`, `aplicarTope()`, `procesarAdjuntos()` — and the four-key local file policy extension
-to the typed configuration) and S-018 (the `files.request-upload` contract and its publisher,
+to the typed configuration) S-018 (the `files.request-upload` contract and its publisher,
 `requestFileUpload()` — the second command ADR-003 allows, with the file-rejection branch that
 splits `core`'s business `failure` from any other publication failure before it reaches
-`diagnosePublishFailure()`). The service is a `worker` in Node.js with no HTTP surface and no
+`diagnosePublishFailure()`) and S-019 (`uploadFileContent()`, the direct `PUT` HTTPS client that
+resolves ADR-003's byte plane with native `fetch` — the only `publicacion/` file with no bus
+dependency at all). The service is a `worker` in Node.js with no HTTP surface and no
 database, so several categories do not apply and stay empty until a story creates them.
 
 ## Components
@@ -55,7 +57,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 25**
+**Total: 26**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -141,6 +143,10 @@ N/A (no HTTP surface - ADR-001)
   `concedido` (`fileId`/`uploadUrl`), `rechazado` (core's business `failure`, logged `warn`), or
   `fallido` (any other publication failure via `diagnosePublishFailure()`, logged `error`). Never
   throws for a rejection or a failure, never logs `uploadUrl`, never retries.
+- **uploadFileContent()** (`src/domain/publicacion/upload-byte.ts`) - Direct `PUT` HTTPS of one
+  attachment's byte to a prefigured `uploadUrl`, native `fetch` + `AbortSignal.timeout()`, no bus
+  involved at all. Returns a typed `PutResultado` (`subido`/`fallido`), never throws, never logs
+  `uploadUrl`, never retries.
 
 See full details in [services.md](./services.md)
 
@@ -185,7 +191,7 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 34**
+**Total: 35**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -278,6 +284,9 @@ See full details in [test-helpers.md](./test-helpers.md)
   failure, reusing `PublishDiagnosis` imported, never redeclared). `nombre`/`mime` match
   `AdjuntoRechazado`'s field names on purpose, so S-021 can treat both notice catalogs with the
   same shape.
+- **PutResultado** (`src/domain/publicacion/upload-byte.ts`) - `uploadFileContent()`'s return type:
+  a two-variant discriminated union on `tipo` (`subido`/`fallido`), named deliberately differently
+  from `UploadResultado` — a distinct axis ("did the byte arrive"), not the bus-rejection axis.
 
 See full details in [types.md](./types.md)
 

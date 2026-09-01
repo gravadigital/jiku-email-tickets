@@ -1037,3 +1037,61 @@ if (result.tipo === 'concedido') {
   `publish-requirement.ts`: the third (`options`) is where the timeout would accidentally get lowered.
 
 ---
+
+## uploadFileContent()
+
+**Location:** `src/domain/publicacion/upload-byte.ts`
+
+**Description:** The other half of ADR-003's contract: `requestFileUpload()` resolves the permission
+plane (`fileId` + `uploadUrl`), this function resolves the byte plane — a direct `PUT` HTTPS to the
+prefigured `uploadUrl`, with native `fetch` and `AbortSignal.timeout()`, no new npm dependency. It is
+the only file in `publicacion/` that never touches the bus — no `Client`, no `client.command()`, no
+NATS connection at all — so it is the only piece of this module unit-tested with a `fetch` stub instead
+of the shared NATS test container.
+
+**Signature:**
+
+```ts
+function uploadFileContent(
+  adjunto: Pick<AdjuntoAceptado, 'filename' | 'mimeType' | 'content'>,
+  deps: { uploadUrl: string; timeoutMs: number; logger: Logger },
+): Promise<PutResultado>;
+```
+
+**Usage:**
+
+```ts
+const result = await uploadFileContent(adjunto, {
+  uploadUrl: granted.uploadUrl, // from requestFileUpload()'s 'concedido' result
+  timeoutMs: config.adjuntos.putTimeoutMs,
+  logger,
+});
+
+if (result.tipo === 'subido') {
+  // accumulate fileId + placeholder for the requirement payload (S-021's job)
+} else {
+  // result.tipo === 'fallido' — already logged at warn, move on to the next attachment
+}
+```
+
+**Notes:**
+
+- **Never logs `uploadUrl`**, in success (which logs nothing) or failure — it is the write credential
+  this function exists to protect (RF-23 of REQ-004). Verified both at runtime
+  (`test/publicacion/upload-byte.test.ts`) and statically (`test/publicacion/source-properties.test.ts`).
+- The `try`/`catch` wraps the ENTIRE `RequestInit` construction and the `fetch` call, not just the
+  `await` — so an unexpected connector bug while building the request (CA-7) and a network/timeout
+  failure (CA-4) share the exact same `catch` block, the exact same result, and the exact same log line.
+  No branching by cause.
+- Any 2xx is `{ tipo: 'subido' }` **without reading the response body** — no `.json()`, no `.text()`,
+  not even to discard it (CA-3). Any non-2xx (including an expired URL, typically 403) is
+  `{ tipo: 'fallido' }`, same as a network error or a timeout.
+- `timeoutMs` is ALWAYS the parameter received (`config.adjuntos.putTimeoutMs` in production), never a
+  literal `30000`/`30_000` in this file — enforced by a static scan test. Independent of the bus's
+  `MIN_TIMEOUT_MS` (15000 ms): two distinct constants for two distinct kinds of operation.
+- `filename` is required in the input Pick **only** for the failure log's `nombre` field — it plays no
+  part in the `PUT` itself (no URL, no header, no body).
+- Never retries internally: `fetch` is invoked exactly once per call (NFR-R03 — requesting a new upload
+  permission for a failed `PUT` would itself be a retry, and is forbidden).
+
+---

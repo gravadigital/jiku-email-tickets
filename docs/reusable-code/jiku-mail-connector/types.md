@@ -863,3 +863,29 @@ only `codigo`: it is a domain result, not a wrapped technical error. No field is
 `REDACT_PATHS` includes `'key'` and `'*.key'`, same care as `AdjuntoRechazado`.
 
 ---
+
+## PutResultado
+
+**Location:** `src/domain/publicacion/upload-byte.ts`
+
+**Description:** `uploadFileContent()`'s return type — a two-variant discriminated union on `tipo`,
+named deliberately differently from `UploadResultado` (three variants, the "who on the bus rejected it"
+axis). This is the "did the byte arrive or not" axis, a distinct concept that shares no variant with
+that one: a `PUT` has no bus-rejection branch, only HTTP transport success or failure.
+
+**Interface:**
+
+```ts
+type PutResultado =
+  | { readonly tipo: 'subido' }
+  | { readonly tipo: 'fallido' };
+```
+
+**Notes:** `'subido'` carries no extra data — the caller (S-021) already holds the `fileId` from
+`requestFileUpload()`'s `'concedido'` result. `'fallido'` does not distinguish network error, timeout,
+or non-2xx (including an expired URL) in the type itself — CA-4 requires identical treatment, so the
+type offers no branch that would invite differentiating them later. The cause IS still logged (at
+`warn`, with `nombre`/`mime`, never `uploadUrl`) for operational traceability, but the caller does not
+need to inspect it.
+
+---
