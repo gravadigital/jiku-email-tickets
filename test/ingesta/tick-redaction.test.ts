@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 import type { Client } from '@gravadigital/jiku';
@@ -44,6 +46,11 @@ const FIXTURES_DIR = fileURLToPath(new URL('../fixtures/mails/', import.meta.url
 
 function fixture(name: string): Buffer {
   return readFileSync(`${FIXTURES_DIR}${name}`);
+}
+
+/** S-022, Task 4: la linea de metricas del tick, mismo helper que usa `tick.test.ts`. */
+function tickLine(capture: { lines(): Record<string, unknown>[] }): Record<string, unknown> | undefined {
+  return capture.lines().find((line) => line['msg'] === 'tick completado');
 }
 
 /**
@@ -532,6 +539,134 @@ describe('tick — un tick completo con alta, descartes y rechazo del bus no fil
  * los dos configura un transport de ARCHIVO en ningun entorno (ADR-006: "MUST NOT configurarse
  * ningun transport de archivo").
  */
+/**
+ * S-022, Task 4 — TS-5 (CA-8): tres adjuntos en el MISMO mail, uno aceptado con exito, uno
+ * rechazado por la politica local, uno con permiso concedido pero PUT fallido -- cada uno con
+ * contenido UNICO que simula datos de cliente. Ninguno de los tres secretos ni la uploadUrl real
+ * aparecen en la salida cruda del tick, en ningun punto de log de ningun modulo (S-017 a S-021).
+ * Amplia la cobertura de `tick-redaction.test.ts` (que ya cubria un unico adjunto aceptado) a los
+ * tres tipos de resultado combinados.
+ */
+describe('tick — ningun log de un tick con adjuntos aceptado/rechazado/fallido filtra el contenido (S-022, CA-8, TS-5)', () => {
+  const SECRET_A = 'SECRETO-CLIENTE-ADJUNTO-A';
+  const SECRET_B = 'SECRETO-CLIENTE-ADJUNTO-B';
+  const SECRET_C = 'SECRETO-CLIENTE-ADJUNTO-C';
+
+  function mailConTresAdjuntosMixtos(): Buffer {
+    const partOf = (filename: string, mimeType: string, content: string): string =>
+      '--ATT-BOUNDARY\r\n' +
+      `Content-Type: ${mimeType}\r\n` +
+      `Content-Disposition: attachment; filename="${filename}"\r\n` +
+      'Content-Transfer-Encoding: base64\r\n\r\n' +
+      `${Buffer.from(content).toString('base64')}\r\n`;
+
+    return Buffer.from(
+      'Message-Id: <s022-nolog-mixto@fixtures.local>\r\n' +
+        'From: "Cliente" <cliente@cliente.com>\r\n' +
+        'To: tickets+alfa@grava.io\r\n' +
+        'Subject: Tres adjuntos mixtos\r\n' +
+        'Content-Type: multipart/mixed; boundary="ATT-BOUNDARY"\r\n' +
+        'MIME-Version: 1.0\r\n\r\n' +
+        '--ATT-BOUNDARY\r\n' +
+        'Content-Type: text/plain; charset=utf-8\r\n\r\n' +
+        'Cuerpo con tres adjuntos.\r\n' +
+        partOf('datos-cliente.png', 'image/png', SECRET_A) +
+        partOf('informe.exe', 'application/x-msdownload', SECRET_B) +
+        partOf('factura.pdf', 'application/pdf', SECRET_C) +
+        '--ATT-BOUNDARY--\r\n',
+    );
+  }
+
+  it('el contenido de los tres adjuntos nunca aparece; sus nombres y mime si', async () => {
+    await responder?.stop();
+
+    const { logger, capture } = testLoggerWithCapture();
+
+    // Servidor HTTP local: el PUT del adjunto con permiso concedido (factura.pdf) falla con 503.
+    const failingServer = createServer((req, res) => {
+      req.on('data', () => undefined);
+      req.on('end', () => {
+        res.statusCode = 503;
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => failingServer.listen(0, '127.0.0.1', resolve));
+    const failingAddress = failingServer.address() as AddressInfo;
+    const failingUploadUrl = `http://127.0.0.1:${String(failingAddress.port)}/upload`;
+
+    // Servidor HTTP local: el PUT del adjunto aceptado con exito (datos-cliente.png) responde 200.
+    const okServer = createServer((req, res) => {
+      req.on('data', () => undefined);
+      req.on('end', () => {
+        res.statusCode = 200;
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => okServer.listen(0, '127.0.0.1', resolve));
+    const okAddress = okServer.address() as AddressInfo;
+    const okUploadUrl = `http://127.0.0.1:${String(okAddress.port)}/upload`;
+
+    // informe.exe se rechaza LOCALMENTE (extension no permitida) -- nunca pide permiso de subida.
+    // Solo datos-cliente.png y factura.pdf llegan a files.request-upload, en ese orden.
+    const uploadResponder = await respondTo(bus.connection, 'files.request-upload', [
+      { status: 'success', data: { fileId: 700, uploadUrl: okUploadUrl } },
+      { status: 'success', data: { fileId: 701, uploadUrl: failingUploadUrl } },
+    ]);
+    const local = await respondTo(bus.connection, 'requirements.new', {
+      status: 'success',
+      data: { id: 888 },
+    });
+
+    const source: MailSource = {
+      async searchUnseen(): Promise<number[]> {
+        return [1];
+      },
+      async fetch(uid: number): Promise<RawMessage> {
+        return { uid, source: mailConTresAdjuntosMixtos() };
+      },
+      async markSeen(): Promise<void> {
+        // no-op
+      },
+    };
+
+    try {
+      await runTick(source, BASE_CONFIG, logger, bus.client);
+
+      const raw = capture.raw().join('\n');
+      expect(raw).not.toContain(SECRET_A);
+      expect(raw).not.toContain(SECRET_B);
+      expect(raw).not.toContain(SECRET_C);
+      expect(raw).not.toContain('uploadUrl');
+      expect(raw).not.toContain(okUploadUrl);
+      expect(raw).not.toContain(failingUploadUrl);
+
+      // Los metadatos (nombre, mime) de los adjuntos con AVISO (rechazado/fallido) SI aparecen --
+      // la propiedad protege el contenido, no los metadatos ya permitidos. El adjunto subido con
+      // EXITO (datos-cliente.png) no genera su propia linea de metadatos -- solo
+      // `requestFileUpload()`/`uploadFileContent()` loguean nombre/mime, y ambos lo hacen
+      // exclusivamente en sus caminos de rechazo/fallo (nunca en el camino de exito, que no
+      // necesita diagnostico); el nombre del adjunto exitoso queda representado igual en el
+      // conteo agregado de la linea de alta (`archivosVinculados`), sin exponer metadatos por
+      // archivo individual.
+      expect(raw).toContain('informe.exe');
+      expect(raw).toContain('factura.pdf');
+      expect(raw).toContain('application/x-msdownload');
+      expect(raw).toContain('application/pdf');
+
+      expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
+    } finally {
+      await uploadResponder.stop();
+      await local.stop();
+      await new Promise<void>((resolve) => failingServer.close(() => resolve()));
+      await new Promise<void>((resolve) => okServer.close(() => resolve()));
+      responder = await respondTo(bus.connection, 'requirements.new', {
+        status: 'success',
+        data: { id: 1 },
+      });
+    }
+  });
+});
+
 describe('tick — ninguna linea de log se escribe a un archivo (S-016 CA-7)', () => {
   it('createLogger() nunca recibe ni construye un transport de archivo', () => {
     const source = readFileSync(

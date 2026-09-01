@@ -32,12 +32,21 @@ worker en node
   [ruteo-y-alta-del-requisito](../../flows/ruteo-y-alta-del-requisito.md).
 - **publicacion** — Los dos comandos de escritura al bus via el SDK: `files.request-upload` y
   `requirements.new`. El `PUT` del byte del adjunto a la URL prefirmada que devuelve `core`.
-  **Estado (S-005 a S-016):** `requirements.new` esta **implementado** de punta a punta —schema Zod
+  **Estado (S-005 a S-022):** `requirements.new` esta **implementado** de punta a punta —schema Zod
   del contrato, publicacion con `client.command()` y la traduccion de las 9 ramas de diagnostico del
   SDK al sistema que rechazo (S-005)— con **dos disparadores** desde S-015: el modo de verificacion
   (`npm run verify`, payload fijo, un entry point separado del arranque) y el tick (payload derivado
-  del mail, via `publishRequirementFromMail()`). **Pendientes de FG-4:** `files.request-upload`, el
-  `PUT` del adjunto y `fileIds` en el payload.
+  del mail, via `publishRequirementFromMail()`). **FG-4 completo (S-017 a S-022):**
+  `files.request-upload` esta implementado de punta a punta (permiso de subida por adjunto, con la
+  traduccion de `file_type_not_allowed`/`file_too_large` como rechazo de negocio, S-018); el `PUT`
+  del byte via `fetch` nativo directo a la `uploadUrl` prefirmada, sin credenciales de S3 (S-019); y
+  `fileIds` en el payload de `requirements.new`, condicional (sólo si hay al menos uno, nunca
+  `fileIds: []`), resuelto por el orquestador `procesarAdjuntosDelMail()` (particion → dedup → tope →
+  permiso → `PUT`, S-017 a S-021). Las propiedades del sistema completo con adjuntos —el orden
+  invariante, el tope no recalculado tras un fallo de `PUT`, el pico de memoria de un mail a la vez, y
+  que ningun log filtra el contenido de un adjunto ni la `uploadUrl`— quedan afirmadas por tests sobre
+  `runTick()`, no solo sobre los modulos puros (S-022), que tambien verifica de punta a punta el
+  camino completo con un adjunto sin instancia real de Jiku.
 
 ## Notas adicionales
 
