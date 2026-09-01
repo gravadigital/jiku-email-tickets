@@ -979,3 +979,61 @@ logging. Those are S-018, S-019, S-020 and S-021 respectively. Not yet wired int
 (`src/domain/ingesta/tick.ts`) — that integration is S-021.
 
 ---
+
+## requestFileUpload()
+
+**Location:** `src/domain/publicacion/upload-file.ts`
+
+**Description:** The second write point of the connector (alongside `publishVerificationRequirement()`/
+`publishRequirementFromMail()`). Builds and validates the `files.request-upload` payload from ONE
+`AdjuntoAceptado`, publishes it with `client.command()` (the same already-connected client, no second
+`connect()`), and translates the reply into a typed `UploadResultado`. It is the ONLY file that adds
+the branch distinguishing core's business `failure` (`file_type_not_allowed`/`file_too_large`) from any
+other publication failure, checked with `isCode()` **before** `diagnosePublishFailure()` runs — that
+function is reused unmodified.
+
+**Signature:**
+
+```ts
+function requestFileUpload(
+  adjunto: Pick<AdjuntoAceptado, 'filename' | 'mimeType' | 'content' | 'checksum'>,
+  deps: { client: Client; logger: Logger },
+): Promise<UploadResultado>;
+```
+
+**Usage:**
+
+```ts
+const result = await requestFileUpload(adjunto, { client, logger });
+
+if (result.tipo === 'concedido') {
+  // result.fileId, result.uploadUrl — hand off to S-019's PUT
+} else if (result.tipo === 'rechazado') {
+  // result.codigo — core's business rejection, already logged at warn
+} else {
+  // result.tipo === 'fallido' — result.diagnosis, already logged at error
+}
+```
+
+**Notes:**
+
+- **Deliberate divergence from `publish-requirement.ts`: this function NEVER throws** for a rejection or
+  a failure — it always resolves with a typed `UploadResultado`. Whoever orchestrates the attachment
+  loop (S-021) needs a value to inspect per file, not an exception that would interrupt the `for` unless
+  wrapped in a per-iteration `try`/`catch`.
+- Invoked **once per attachment, in series** — the signature accepts no list and no order parameter
+  (CA-9). It does not orchestrate the tick and does not decide processing order; that is S-021.
+- `fileSize` comes from `adjunto.content.length`, **never** a declared `size` (that field does not exist
+  on `AdjuntoAceptado` — S-017 already dropped it). `checksum` arrives already computed by S-017; this
+  function never calls `node:crypto`, only transports it.
+- **Never logs `uploadUrl`**, in any branch or result — it is a short-lived write credential (RF-23,
+  RF-39 of REQ-004). The success branch logs nothing at all: `fileId` is only informative until S-021
+  links it to a requirement.
+- `files.request-upload` has **no `projectId`** — the upload permission is requested before knowing
+  which requirement it will link to, unlike `requirements.new`. The error-branch log context is
+  therefore built by hand from `PublishError`'s public fields instead of reusing `logContext(projectId)`
+  with an invented `projectId` that does not apply here.
+- `DOS ARGUMENTOS`, never three, in `client.command(COMMAND, payload)` — same ADR-002 rule as
+  `publish-requirement.ts`: the third (`options`) is where the timeout would accidentally get lowered.
+
+---

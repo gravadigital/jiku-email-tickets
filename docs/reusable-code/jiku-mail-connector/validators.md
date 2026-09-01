@@ -161,3 +161,69 @@ const newRequirementReplySchema: z.ZodObject<{ id: z.ZodNumber }>; // int, posit
   `core` starts sending tomorrow must not break the connector.
 - It lives next to the payload schema because both are the contract of the **same** command; splitting
   them would send the next person adding a reply field to the wrong file.
+
+---
+
+## fileUploadRequestSchema
+
+**Location:** `src/domain/publicacion/files.schema.ts`
+
+**Description:** The `files.request-upload` payload contract: **exactly** `fileName` (string, min 1),
+`mimeType` (string, min 1), `fileSize` (int, min 1), `checksum` (string, min 1), with **`.strict()`**.
+
+**Signature:**
+
+```ts
+const fileUploadRequestSchema: z.ZodObject<{
+  fileName: z.ZodString;   // min 1
+  mimeType: z.ZodString;   // min 1
+  fileSize: z.ZodNumber;   // int, min 1 — never 0, S-017 already rejects 0-byte attachments
+  checksum: z.ZodString;   // min 1
+}>; // strict
+```
+
+**Usage:**
+
+```ts
+const result = fileUploadRequestSchema.safeParse(payload);
+```
+
+**Notes:**
+
+- **`.strict()`, not a plain `z.object`** — same reasoning as `newRequirementSchema`: it is the only
+  verifiable guard that a stray identity key (`uploader`, `actor`) **fails** instead of being silently
+  dropped (ADR-005: this payload carries no identity field at all, not even an informative one).
+- This file is the only definition of the contract in the repo — same verified finding as
+  `requirement.schema.ts`: the SDK exports nothing to derive it from.
+- `fileSize` must come from `content.length`, never a declared `size` field — that field does not exist
+  on `AdjuntoAceptado`.
+
+---
+
+## fileUploadReplySchema
+
+**Location:** `src/domain/publicacion/files.schema.ts`
+
+**Description:** The success reply of `files.request-upload`: `{ fileId, uploadUrl }`, validated.
+Named literally `fileUploadReplySchema` — the story's acceptance criteria require this exact name.
+
+**Signature:**
+
+```ts
+const fileUploadReplySchema: z.ZodObject<{
+  fileId: z.ZodNumber;      // int, positive
+  uploadUrl: z.ZodString;   // min 1 — NOT z.string().url()
+}>; // loose
+```
+
+**Notes:**
+
+- Same verified finding as `newRequirementReplySchema`: `command<T>()` does not validate `reply.data`
+  against `T`. A success reply with no usable `fileId`/`uploadUrl` is a **failure**
+  (`respuesta_ilegible`), not a success with a hole.
+- **`uploadUrl` is `z.string().min(1)`, deliberately NOT `z.string().url()`**: a signed S3 URL can carry
+  long/odd query params some URL validators reject. The connector never navigates the URL, only forwards
+  it to S-019's `PUT`.
+- **`.loose()`**, same inversion as the payload's `.strict()`: the reply is received from `core`, so
+  tolerance protects here.
+- Lives next to the payload schema — both are the contract of the **same** command.

@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest';
 const SRC_ROOT = fileURLToPath(new URL('../../src/', import.meta.url));
 const PUBLICACION = `domain${sep}publicacion${sep}`;
 const PUBLISH_REQUIREMENT = `${PUBLICACION}publish-requirement.ts`;
+const UPLOAD_FILE = `${PUBLICACION}upload-file.ts`;
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
@@ -77,7 +78,7 @@ describe('src/ publication source properties', () => {
     }
   });
 
-  it('publishes only the two commands ADR-003 allows, and only requirements.new here', () => {
+  it('publishes only the two commands ADR-003 allows', () => {
     // El nombre del comando vive en la constante `COMMAND` del publicador, no inline en la llamada:
     // por eso se buscan los NOMBRES DE COMANDO declarados en todo `src/` en vez del argumento
     // literal de `.command(`. Buscar solo el argumento daria vacio y el test pasaria sin verificar
@@ -90,9 +91,9 @@ describe('src/ publication source properties', () => {
         .filter((candidate) => /^(requirements|files|users|projects|tasks|comments)\./.test(candidate)),
     );
 
-    // `requirements.new` y nada mas en esta story. `files.request-upload` es el otro comando que
-    // ADR-003 permite, y llega con FG-4. Cualquier otro esta prohibido.
-    expect([...new Set(declared)]).toEqual(['requirements.new']);
+    // Los DOS comandos que ADR-003 permite, y ninguno mas: `requirements.new` (S-005) y
+    // `files.request-upload` (esta story). Orden no relevante.
+    expect([...new Set(declared)].sort()).toEqual(['files.request-upload', 'requirements.new']);
 
     for (const command of declared) {
       expect(['requirements.new', 'files.request-upload']).toContain(command);
@@ -138,14 +139,16 @@ describe('src/ publication source properties', () => {
     }
   });
 
-  it('invokes client.command in exactly one file', () => {
+  it('invokes client.command in exactly two files', () => {
     const publishers = FILES.filter((file) => /\.command\s*\(/.test(file.code)).map(
       (f) => f.relativePath,
     );
 
-    // Un solo punto de publicacion es lo que hace que la traduccion de errores y la linea de log no
-    // se puedan saltear: si hubiera dos, el segundo se escribiria sin el `try/catch`.
-    expect(publishers).toEqual([PUBLISH_REQUIREMENT]);
+    // DOS puntos de publicacion desde esta story: `publish-requirement.ts` (`requirements.new`) y
+    // `upload-file.ts` (`files.request-upload`). Un tercero esta prohibido — es lo que hace que la
+    // traduccion de errores y la linea de log no se puedan saltear: un archivo nuevo que publicara
+    // sin pasar por ninguno de los dos lo haria sin el `try/catch` que esta suite ya protege.
+    expect([...publishers].sort()).toEqual([PUBLISH_REQUIREMENT, UPLOAD_FILE].sort());
   });
 
   it('invokes client.command exactly once per function, with two arguments', () => {
@@ -162,6 +165,18 @@ describe('src/ publication source properties', () => {
     // y ADR-006 lo prohibe explicitamente ("MUST NOT bajarse"). El `options` se usa SOLO desde los
     // tests. Un tercer argumento aca convertiria los errores explicados de PostgreSQL —que corta a
     // los 8 s— en timeouts mudos.
+    expect(publisher?.code).toMatch(/\.command\(COMMAND,\s*payload\)/);
+    expect(publisher?.code).not.toMatch(/\.command\([^)]*timeoutMs/);
+  });
+
+  it('invokes client.command exactly once in upload-file.ts, with two arguments', () => {
+    // TS-3 de esta story: la misma propiedad que arriba, ahora sobre `upload-file.ts`.
+    const publisher = FILES.find((file) => file.relativePath === UPLOAD_FILE);
+    expect(publisher).toBeDefined();
+
+    const invocations = publisher?.code.match(/\.command\s*\(/g) ?? [];
+    expect(invocations).toHaveLength(1);
+
     expect(publisher?.code).toMatch(/\.command\(COMMAND,\s*payload\)/);
     expect(publisher?.code).not.toMatch(/\.command\([^)]*timeoutMs/);
   });
@@ -220,6 +235,20 @@ describe('src/ publication source properties', () => {
     expect(translator?.code).toMatch(/ErrorCode\.\w+/);
     expect(translator?.code).not.toMatch(/['"`]caller_not_authorized['"`]/);
     expect(translator?.code).not.toMatch(/['"`]invalid_fields['"`]/);
+  });
+
+  it('upload-file.ts also discriminates by instanceof and isCode, never by message', () => {
+    // `upload-file.ts` (esta story) agrega la UNICA rama nueva de esta suite: distingue el
+    // `failure` de negocio (`file_type_not_allowed`/`file_too_large`) ANTES de
+    // `diagnosePublishFailure()`, y tiene que hacerlo con el mismo criterio de ADR-002.
+    const uploader = FILES.find((file) => file.relativePath === UPLOAD_FILE);
+
+    expect(uploader).toBeDefined();
+    expect(uploader?.code).toMatch(/instanceof\s+JikuFailure/);
+    expect(uploader?.code).toMatch(/isCode\s*\(/);
+    expect(uploader?.code).toMatch(/ErrorCode\.(FileTypeNotAllowed|FileTooLarge)/);
+    expect(uploader?.code).not.toMatch(/['"`]file_type_not_allowed['"`]/);
+    expect(uploader?.code).not.toMatch(/['"`]file_too_large['"`]/);
   });
 
   it('never switches exhaustively on an error code', () => {
@@ -290,6 +319,31 @@ describe('src/ publication source properties', () => {
       expect(
         payload?.code,
         `the fixed payload must not carry ${excluded}`,
+      ).not.toMatch(new RegExp(`\\b${excluded}\\s*:`));
+    }
+  });
+
+  it('never logs the uploadUrl in upload-file.ts', () => {
+    // TS-15 de esta story: la `uploadUrl` es una credencial de escritura de corta duracion
+    // (RF-23, RF-39 de REQ-004) y NUNCA se loguea, en ningun resultado ni rama.
+    const uploader = FILES.find((file) => file.relativePath === UPLOAD_FILE);
+
+    expect(uploader).toBeDefined();
+    expect(uploader?.code, `${UPLOAD_FILE} must not log uploadUrl`).not.toMatch(
+      /logger\.\w+\s*\(\s*\{[^}]*\buploadUrl\b/,
+    );
+  });
+
+  it('never sends uploader or actor in the files.request-upload payload', () => {
+    // ADR-005: el payload de `files.request-upload` no lleva NINGUN campo de identidad, ni
+    // siquiera informativo — a diferencia de `requirements.new`, que si lleva `creator` opcional.
+    const uploader = FILES.find((file) => file.relativePath === UPLOAD_FILE);
+
+    expect(uploader).toBeDefined();
+    for (const excluded of ['uploader', 'actor']) {
+      expect(
+        uploader?.code,
+        `the files.request-upload payload must not carry ${excluded}`,
       ).not.toMatch(new RegExp(`\\b${excluded}\\s*:`));
     }
   });

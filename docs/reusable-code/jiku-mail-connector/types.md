@@ -787,3 +787,79 @@ type RouteResult =
 ```
 
 ---
+
+## FileUploadRequestPayload / FileUploadReply
+
+**Location:** `src/domain/publicacion/files.types.ts`
+
+**Description:** The `files.request-upload` payload and its validated success reply, both
+**inferred** from `files.schema.ts` with `z.infer` — same criterion as
+`NewRequirementPayload`/`NewRequirementReply`: the SDK exports no type for this command's payload, so
+the schema is the only definition of the contract in the repo, and a hand-written parallel type could
+diverge from it without anything failing.
+
+**Interface:**
+
+```ts
+type FileUploadRequestPayload = z.infer<typeof fileUploadRequestSchema>; // { fileName, mimeType, fileSize, checksum }
+type FileUploadReply = z.infer<typeof fileUploadReplySchema>;           // { fileId, uploadUrl }
+```
+
+---
+
+## FileUploadValidationError
+
+**Location:** `src/domain/publicacion/files.types.ts`
+
+**Description:** The `files.request-upload` payload failed the command contract — raised only by a
+local **assembly** failure of the connector itself (Task 1's `parseFileUploadRequest()`), never by a
+bus rejection. Same criterion as `RequirementValidationError`: a typed error with a stable `code` is
+what makes the log line groupable.
+
+**Interface:**
+
+```ts
+class FileUploadValidationError extends AppError {
+  readonly code: 'FILE_UPLOAD_VALIDATION_ERROR';
+  readonly httpStatus: 500;
+  readonly invalidFields: string[]; // paths only, never the rejected values
+}
+```
+
+---
+
+## UploadResultado
+
+**Location:** `src/domain/publicacion/files.types.ts`
+
+**Description:** `requestFileUpload()`'s return type — a discriminated union on `tipo`, replacing the
+"throws `PublishError`" pattern of `publish-requirement.ts` with a typed return value. Same criterion
+as `AdjuntoRechazado`: an expected domain outcome is a value to inspect, not an exception to catch.
+`nombre`/`mime` (never `fileName`/`mimeType`, which are the command PAYLOAD's keys, a different
+concept) intentionally match `AdjuntoRechazado`'s field names, so S-021 can treat both notice catalogs
+with the same shape.
+
+**Interface:**
+
+```ts
+type UploadResultado =
+  | { readonly tipo: 'concedido'; readonly fileId: number; readonly uploadUrl: string }
+  | {
+      readonly tipo: 'rechazado';
+      readonly codigo: 'file_type_not_allowed' | 'file_too_large';
+      readonly nombre: string;
+      readonly mime: string;
+    }
+  | {
+      readonly tipo: 'fallido';
+      readonly diagnosis: PublishDiagnosis; // imported from publish-errors.ts, never redeclared
+      readonly nombre: string;
+      readonly mime: string;
+    };
+```
+
+**Notes:** The `rechazado` variant deliberately does NOT expose the original SDK error or `cause` —
+only `codigo`: it is a domain result, not a wrapped technical error. No field is named `key` —
+`REDACT_PATHS` includes `'key'` and `'*.key'`, same care as `AdjuntoRechazado`.
+
+---
