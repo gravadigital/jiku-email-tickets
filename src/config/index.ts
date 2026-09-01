@@ -41,6 +41,18 @@ export interface RuteoConfig {
 }
 
 /**
+ * La configuracion de la politica local de archivos (adjuntos, FG-4). Mismo criterio que `imap` /
+ * `poll` / `ruteo`: interfaz anidada, no campos sueltos -- `particionar()` (S-017) la recibe
+ * completa (o el subconjunto que necesita via `Pick`).
+ */
+export interface AdjuntosConfig {
+  allowedExtensions: readonly string[];
+  allowedMimeTypes: readonly string[];
+  maxSizeBytes: number;
+  putTimeoutMs: number;
+}
+
+/**
  * La configuracion unica del proceso: el entorno validado compuesto con lo que resuelve el SDK.
  *
  * Se escribe a mano y eso no contradice CA-9: CA-9 exige que los tipos del *schema* se infieran
@@ -76,6 +88,10 @@ export interface AppConfig {
   // topologia comercial del despliegue, los projectId de todos los clientes habilitados, y no tiene
   // por que estar en stdout. El escaner de `test/config/source-properties.test.ts` lo cubre.
   ruteo: RuteoConfig;
+
+  // La politica local de archivos de FG-4 (S-017). No lleva ningun secreto, pero se mantiene
+  // anidada por el mismo criterio estructural que los bloques de arriba.
+  adjuntos: AdjuntosConfig;
 }
 
 /**
@@ -148,6 +164,15 @@ export async function loadAppConfig(): Promise<AppConfig> {
       subaddressPrefix: env.SUBADDRESS_PREFIX,
       placeholderTitle: env.PLACEHOLDER_TITLE,
       placeholderBody: env.PLACEHOLDER_BODY,
+    },
+
+    // Los cuatro valores salen ENTEROS del env validado, sin `??` ni fallbacks: el schema ya
+    // aplico los defaults y ya parseo las dos listas.
+    adjuntos: {
+      allowedExtensions: env.ATTACHMENT_ALLOWED_EXTENSIONS,
+      allowedMimeTypes: env.ATTACHMENT_ALLOWED_MIME_TYPES,
+      maxSizeBytes: env.ATTACHMENT_MAX_SIZE_BYTES,
+      putTimeoutMs: env.PUT_TIMEOUT_MS,
     },
   };
 }

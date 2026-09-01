@@ -66,6 +66,17 @@ export const EXPECTATIONS: Record<string, string> = {
   PLACEHOLDER_BODY:
     'se esperaba el cuerpo con el que se da de alta un mail sin contenido, no vacio ' +
     '(por default (mail sin contenido))',
+
+  // --- Politica local de archivos (adjuntos, S-017) ---
+  ATTACHMENT_ALLOWED_EXTENSIONS:
+    'se esperaba una lista de extensiones separadas por coma, no vacia (por ejemplo .png,.pdf)',
+  ATTACHMENT_ALLOWED_MIME_TYPES:
+    'se esperaba una lista de tipos MIME separados por coma, no vacia ' +
+    '(por ejemplo image/png,application/pdf)',
+  ATTACHMENT_MAX_SIZE_BYTES:
+    'se esperaba un entero positivo de bytes (el tamano maximo por adjunto)',
+  PUT_TIMEOUT_MS:
+    'se esperaba un entero positivo de milisegundos (el timeout del PUT del byte del adjunto)',
 };
 
 const UNKNOWN_EXPECTATION = 'no paso la validacion declarada en el schema';

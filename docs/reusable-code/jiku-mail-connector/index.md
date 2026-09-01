@@ -10,9 +10,11 @@ translating its errors), S-008 (pure mail normalization), S-009 (the `MailSource
 no-overlap scheduler guard, `cron.schedule()` wiring, and the ordered shutdown on `SIGTERM`/`SIGINT`),
 S-012 (the Ticket Map with its two exclusive sources, the subaddress prefix and the placeholders),
 S-013 (the pure `routeMail()` decision tree and the single-source `MotivoDescarte`/`RouteResult`
-types), S-015 (the mail-derived payload, `buildRequirementPayload()`) and S-016 (closing the catalog
+types), S-015 (the mail-derived payload, `buildRequirementPayload()`), S-016 (closing the catalog
 with the real names the implementation settled on — see the note under `buildRequirementPayload()` and
-`MotivoDescarte`/`RouteResult` below). The service is a `worker` in Node.js with no HTTP surface and no
+`MotivoDescarte`/`RouteResult` below) and S-017 (the pure attachment pipeline — `particionar()`,
+`deduplicar()`, `aplicarTope()`, `procesarAdjuntos()` — and the four-key local file policy extension
+to the typed configuration). The service is a `worker` in Node.js with no HTTP surface and no
 database, so several categories do not apply and stay empty until a story creates them.
 
 ## Components
@@ -50,7 +52,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 20**
+**Total: 24**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -120,6 +122,17 @@ N/A (no HTTP surface - ADR-001)
 - **routeMail()** (`src/domain/ruteo/route-mail.ts`) - Pure decision tree that resolves the project a
   mail routes to, or the discard reason: `es_respuesta` first (before touching the slug), then
   `sin_slug`, then `slug_no_mapeado`, then the happy path. Never throws, never logs.
+- **particionar()** (`src/domain/adjuntos/particionar.ts`) - First stage of the attachment pipeline:
+  resolves a generated filename/default MIME when missing, then evaluates the local policy in fixed
+  order (0-byte → extension → MIME → max size) over the real `content.length`, never the declared
+  `size`. Never throws.
+- **deduplicar()** (`src/domain/adjuntos/dedup.ts`) - Second stage: deduplicates by sha256 checksum
+  of `content`, keeping the first in mail order, with invocation-only scope (no state across mails).
+- **aplicarTope()** (`src/domain/adjuntos/tope.ts`) - Third stage: keeps the first
+  `MAX_ATTACHMENTS_PER_REQUIREMENT` (10, imported, never a literal) deduplicated attachments,
+  rejecting the rest with `tope_excedido`.
+- **procesarAdjuntos()** (`src/domain/adjuntos/procesar.ts`) - Composes the three stages in the one
+  correct order (particionar → deduplicar → aplicarTope) and accumulates their rejections.
 
 See full details in [services.md](./services.md)
 
@@ -164,16 +177,16 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 26**
+**Total: 30**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
 - **ConfigValidationError** (`src/config/errors.ts`) - Raised when the environment fails validation.
   Carries the complete list of offending variable names in `variables`.
 - **AppConfig** (`src/config/index.ts`) - The process-wide configuration contract consumed by S-003,
-  S-004, S-005, S-009 and S-011. Thirteen fields since S-012 added the `ruteo` block to the `imap`
-  and `poll` ones; the bus paths, the topology, the whole `imap` block and the whole `ruteo` block
-  must never reach a log line.
+  S-004, S-005, S-009 and S-011. Fourteen fields since S-017 added the `adjuntos` block alongside
+  `imap`, `poll` and `ruteo`; the bus paths, the topology, and each of those whole blocks must never
+  reach a log line.
 - **ImapConfig** (`src/config/index.ts`) - The IMAP adapter's whole configuration (`host`, `port`,
   `user`, `password`), nested so S-009 receives it complete instead of four loose parameters.
 - **PollConfig** (`src/config/index.ts`) - The tick's whole configuration (`cron`, `enabled`,
@@ -237,12 +250,20 @@ See full details in [test-helpers.md](./test-helpers.md)
 - **RouteResult** (`src/shared/motivo-descarte.ts`) - `routeMail()`'s return type: the resolved
   project, or a discard `motivo` with `slug` present **only** when it is `'slug_no_mapeado'` (an
   optional key, not a `string | undefined` value, so the key's absence is itself the guarantee).
+- **AdjuntosConfig** (`src/config/index.ts`) - The local attachment policy's whole configuration
+  (`allowedExtensions`, `allowedMimeTypes`, `maxSizeBytes`, `putTimeoutMs`), nested on the same
+  criterion as `ImapConfig`/`PollConfig`/`RuteoConfig`.
+- **AdjuntoParticionado / AdjuntoAceptado / AdjuntoRechazado / ReglaRechazo / ParticionResult**
+  (`src/domain/adjuntos/types.ts`) - The attachment pipeline's domain types: an attachment before
+  and after its checksum is computed, the closed catalog of rejection rules (string-literal union),
+  the exact three-field rejection entry, and the parameterized `{ aceptados, rechazados }` shape
+  shared by all four pipeline functions.
 
 See full details in [types.md](./types.md)
 
 ## Constants
 
-**Total: 25**
+**Total: 30**
 
 - **SERVICE_NAME** (`src/shared/service-info.ts`) - The service name, used wherever the process has to
   identify itself.
@@ -294,6 +315,14 @@ See full details in [types.md](./types.md)
   shape ones say they prove the write plane is open, and the role one says reconnecting fixes it.
 - **MUTE** (`test/bus/responder.ts`) - Responder mode that receives and does not answer, to provoke
   `JikuTimeout` without waiting 15 s.
+- **DEFAULT_ALLOWED_EXTENSIONS / DEFAULT_ALLOWED_MIME_TYPES** (`src/config/schema.ts`) - Default
+  comma-separated allow-lists of the local attachment policy: a broad office/image set.
+- **DEFAULT_MAX_ATTACHMENT_SIZE_BYTES** (`src/config/schema.ts`) - Default max attachment size, 10
+  MB in bytes. Evaluated against the real `Buffer` length, never the declared `size`.
+- **DEFAULT_PUT_TIMEOUT_MS** (`src/config/schema.ts`) - Default timeout for the attachment byte's
+  `PUT`, 30000 ms. Not consumed by S-017; declared here for S-019.
+- **MAX_ATTACHMENTS_PER_REQUIREMENT** (`src/config/schema.ts`) - The fixed cap of attachments per
+  requirement, 10. Not an env var — the bus contract's `maxItems` (ADR-003), fixed in code.
 
 See full details in [constants.md](./constants.md)
 
@@ -301,10 +330,11 @@ See full details in [constants.md](./constants.md)
 
 **Total: 3**
 
-- **envSchema** (`src/config/schema.ts`) - Zod shapes of the seventeen environment variables in scope,
-  with their defaults and the timeout floor. The source of truth for the `Env` type. S-007 added the
-  four `IMAP_` and three `POLL_` variables and made the three IMAP credentials **required**; only the
-  ticket-map ones remain undeclared.
+- **envSchema** (`src/config/schema.ts`) - Zod shapes of the twenty-six environment variables in
+  scope, with their defaults and the timeout floor. The source of truth for the `Env` type. S-017
+  added the four attachment-policy variables (`ATTACHMENT_ALLOWED_EXTENSIONS`,
+  `ATTACHMENT_ALLOWED_MIME_TYPES`, `ATTACHMENT_MAX_SIZE_BYTES`, `PUT_TIMEOUT_MS`), all with defaults
+  and none cross-field.
 - **newRequirementSchema** (`src/domain/publicacion/requirement.schema.ts`) - The `requirements.new`
   payload contract: six fields, **`.strict()`** so a stray `actor` **fails** instead of being silently
   dropped, and no `.default()` on the enums (the schema models `core`'s contract, not the connector's

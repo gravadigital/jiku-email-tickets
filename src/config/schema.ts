@@ -43,6 +43,77 @@ export const DEFAULT_SUBADDRESS_PREFIX = 'tickets';
 export const DEFAULT_PLACEHOLDER_TITLE = 'Ticket recibido por mail';
 export const DEFAULT_PLACEHOLDER_BODY = '(mail sin contenido)';
 
+// --- Politica local de archivos (adjuntos, FG-4 / S-017) ---
+//
+// Conjunto amplio de oficina/imagen: cubre los formatos mas comunes que llegan por mail sin
+// habilitar ejecutables ni scripts. Las extensiones se normalizan a minusculas al parsear
+// (Task 1, ver parseAllowedExtensions) porque particionar() (S-017, Task 3) compara la extension
+// del filename de forma case-insensitive -- un .PNG no deberia rechazarse por casing.
+export const DEFAULT_ALLOWED_EXTENSIONS =
+  '.png,.jpg,.jpeg,.gif,.pdf,.doc,.docx,.xls,.xlsx,.txt,.log,.zip';
+
+// Los MIME correspondientes a las extensiones de arriba. A diferencia de las extensiones, esta
+// lista NO se fuerza a minusculas al parsear: la comparacion case-sensitive o no de MIME es
+// decision de particionar() (S-017, Task 3), no de este schema.
+export const DEFAULT_ALLOWED_MIME_TYPES =
+  'image/png,image/jpeg,image/gif,application/pdf,application/msword,' +
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document,' +
+  'application/vnd.ms-excel,' +
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,' +
+  'text/plain,application/zip';
+
+// En BYTES, no en MB: evita la ambiguedad de unidades en el propio schema. 10 MB.
+export const DEFAULT_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+
+// No se usa en S-017 -- lo consume S-019 (el PUT del byte del adjunto a la URL prefirmada). Se
+// declara aca porque es la misma extension de configuracion de politica de archivos.
+export const DEFAULT_PUT_TIMEOUT_MS = 30_000;
+
+// El tope de 10 NO es una env var -- CA-12 de S-017 lo exige fijo en codigo: es el `maxItems` del
+// contrato del bus (ADR-003), no una politica configurable. Vive aca junto a los otros defaults
+// por consistencia de ubicacion, y lo importa aplicarTope() (src/domain/adjuntos/tope.ts).
+export const MAX_ATTACHMENTS_PER_REQUIREMENT = 10;
+
+/**
+ * Parsea una lista separada por comas a un array de strings no vacio, trim()eando cada elemento.
+ *
+ * Compartida por las dos listas blancas (extensiones y MIME) a proposito -- mismo criterio que
+ * `parseTicketMap`: dos copias divergen, y el operador tendria que aprender dos formatos para
+ * configurar dos listas que son estructuralmente lo mismo (un array plano de strings).
+ *
+ * NUNCA lanza: un throw dentro del transform escapa de `createEnv`. Todos los fallos salen por
+ * `ctx.addIssue()` y devuelven `z.NEVER` -- una lista vacia tras el parseo (todo el string era
+ * comas/espacios) no es un modo valido: es indistinguible de un conector mal configurado.
+ */
+function parseNonEmptyList(raw: string, ctx: z.RefinementCtx): string[] {
+  const items = raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item !== '');
+
+  if (items.length === 0) {
+    ctx.addIssue({ code: 'custom', message: 'la lista no puede quedar vacia' });
+    return z.NEVER;
+  }
+
+  return items;
+}
+
+/** Igual que `parseNonEmptyList`, pero normaliza cada elemento a minusculas (extensiones). */
+function parseNonEmptyLowercaseList(raw: string, ctx: z.RefinementCtx): string[] {
+  const items = raw
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => item !== '');
+
+  if (items.length === 0) {
+    ctx.addIssue({ code: 'custom', message: 'la lista no puede quedar vacia' });
+    return z.NEVER;
+  }
+
+  return items;
+}
+
 /** La forma valida del Mapa de Tickets ya parseado: pares slug -> projectId entero positivo. */
 const ticketMapShape = z.record(z.string(), z.number().int().positive());
 
@@ -239,6 +310,30 @@ export const envSchema = {
     .string()
     .refine((value) => value.trim() !== '')
     .default(DEFAULT_PLACEHOLDER_BODY),
+
+  // --- Politica local de archivos (adjuntos, FG-4 / S-017) ---
+  // Las cuatro claves son independientes entre si -- ninguna es cross-field, a diferencia de
+  // TICKET_MAP/TICKET_MAP_FILE -- asi que no tocan src/config/env.ts ni createFinalSchema.
+  ATTACHMENT_ALLOWED_EXTENSIONS: z
+    .string()
+    .min(1)
+    .default(DEFAULT_ALLOWED_EXTENSIONS)
+    .transform(parseNonEmptyLowercaseList),
+
+  ATTACHMENT_ALLOWED_MIME_TYPES: z
+    .string()
+    .min(1)
+    .default(DEFAULT_ALLOWED_MIME_TYPES)
+    .transform(parseNonEmptyList),
+
+  ATTACHMENT_MAX_SIZE_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_MAX_ATTACHMENT_SIZE_BYTES),
+
+  // No se usa en S-017 -- lo consume S-019.
+  PUT_TIMEOUT_MS: z.coerce.number().int().positive().default(DEFAULT_PUT_TIMEOUT_MS),
 };
 
 export type Env = z.infer<z.ZodObject<typeof envSchema>>;

@@ -99,6 +99,11 @@ describe('EXPECTATIONS', () => {
     'SUBADDRESS_PREFIX',
     'PLACEHOLDER_TITLE',
     'PLACEHOLDER_BODY',
+    // Las cuatro de la politica local de archivos (S-017).
+    'ATTACHMENT_ALLOWED_EXTENSIONS',
+    'ATTACHMENT_ALLOWED_MIME_TYPES',
+    'ATTACHMENT_MAX_SIZE_BYTES',
+    'PUT_TIMEOUT_MS',
   ] as const;
 
   // TS-26. La correspondencia se afirma en las DOS direcciones para que una variable futura sin
@@ -111,7 +116,7 @@ describe('EXPECTATIONS', () => {
     expect(described).toEqual(declared);
   });
 
-  it('describes each of the twelve new variables', () => {
+  it('describes each of the new variables', () => {
     for (const name of NEW_VARIABLES) {
       expect(EXPECTATIONS[name], name).toMatch(/^se esperaba /);
     }
