@@ -21,6 +21,7 @@ const SRC_ROOT = fileURLToPath(new URL('../../src/', import.meta.url));
 const PUBLICACION = `domain${sep}publicacion${sep}`;
 const PUBLISH_REQUIREMENT = `${PUBLICACION}publish-requirement.ts`;
 const UPLOAD_FILE = `${PUBLICACION}upload-file.ts`;
+const UPLOAD_BYTE = `${PUBLICACION}upload-byte.ts`;
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
@@ -331,6 +332,47 @@ describe('src/ publication source properties', () => {
     expect(uploader).toBeDefined();
     expect(uploader?.code, `${UPLOAD_FILE} must not log uploadUrl`).not.toMatch(
       /logger\.\w+\s*\(\s*\{[^}]*\buploadUrl\b/,
+    );
+  });
+
+  it('never logs the uploadUrl in upload-byte.ts (TS-19)', () => {
+    // TS-19 de S-019: complementa el test en runtime de upload-byte.test.ts (TS-11). Mismo patron
+    // dual que ya usa la suite para upload-file.ts: runtime + escaneo estatico.
+    const uploader = FILES.find((file) => file.relativePath === UPLOAD_BYTE);
+
+    expect(uploader).toBeDefined();
+    expect(uploader?.code, `${UPLOAD_BYTE} must not log uploadUrl`).not.toMatch(
+      /logger\.\w+\s*\(\s*\{[^}]*\buploadUrl\b/,
+    );
+  });
+
+  it('never hardcodes the PUT timeout literal in upload-byte.ts (TS-18)', () => {
+    // TS-18 de S-019: el timeout SIEMPRE llega por el parametro timeoutMs, nunca un literal
+    // 30000/30_000 escrito en el archivo (fuera de comentario, que ya se elimino con
+    // stripComments()). Mismo criterio verificado que prohibe el literal de MIN_TIMEOUT_MS fuera de
+    // src/config/.
+    const uploader = FILES.find((file) => file.relativePath === UPLOAD_BYTE);
+
+    expect(uploader).toBeDefined();
+    expect(uploader?.code, `${UPLOAD_BYTE} must not hardcode the timeout literal`).not.toMatch(
+      /\b30[,_]?000\b/,
+    );
+  });
+
+  it('upload-byte.ts never touches the bus (TS-13)', () => {
+    // TS-13 de S-019: es la unica pieza de publicacion/ sin dependencia del bus -- no importa
+    // Client del SDK, no llama client.command, no importa nada de #infra/bus/.
+    const uploader = FILES.find((file) => file.relativePath === UPLOAD_BYTE);
+
+    expect(uploader).toBeDefined();
+    expect(uploader?.code, `${UPLOAD_BYTE} must not import Client from the SDK`).not.toMatch(
+      /import\s*\{[^}]*\bClient\b[^}]*\}\s*from\s*['"]@gravadigital\/jiku['"]/,
+    );
+    expect(uploader?.code, `${UPLOAD_BYTE} must not call client.command`).not.toContain(
+      'client.command',
+    );
+    expect(uploader?.code, `${UPLOAD_BYTE} must not import from #infra/bus/`).not.toMatch(
+      /from\s*['"]#infra\/bus\//,
     );
   });
 
