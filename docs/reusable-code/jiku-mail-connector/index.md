@@ -17,9 +17,11 @@ with the real names the implementation settled on — see the note under `buildR
 to the typed configuration) S-018 (the `files.request-upload` contract and its publisher,
 `requestFileUpload()` — the second command ADR-003 allows, with the file-rejection branch that
 splits `core`'s business `failure` from any other publication failure before it reaches
-`diagnosePublishFailure()`) and S-019 (`uploadFileContent()`, the direct `PUT` HTTPS client that
+`diagnosePublishFailure()`), S-019 (`uploadFileContent()`, the direct `PUT` HTTPS client that
 resolves ADR-003's byte plane with native `fetch` — the only `publicacion/` file with no bus
-dependency at all). The service is a `worker` in Node.js with no HTTP surface and no
+dependency at all) and S-020 (`componerDescripcion()`, the pure four-block deterministic
+composition of `description` — body, rejection notices, upload-failure notices, placeholders,
+always in that order). The service is a `worker` in Node.js with no HTTP surface and no
 database, so several categories do not apply and stay empty until a story creates them.
 
 ## Components
@@ -28,7 +30,7 @@ N/A (Backend service)
 
 ## Utils/Helpers
 
-**Total: 7**
+**Total: 8**
 
 - **cleanSubject()** (`src/domain/ingesta/subject.ts`) - Strips `Re:`/`Fwd:`/`RV:` prefixes
   iteratively and case-insensitively. An all-prefix subject is left as `''`, a valid state.
@@ -48,6 +50,9 @@ N/A (Backend service)
 - **buildRequirementPayload()** (`src/domain/publicacion/mail-payload.ts`) - Builds the
   `requirements.new` payload from a routed mail: trim → truncate → placeholder, in that exact order,
   for `title` and `description`. Pure; validates nothing and publishes nothing.
+- **componerDescripcion()** (`src/domain/publicacion/description.ts`) - Deterministically composes
+  `description` from four already-resolved blocks (body, rejection notices, upload-failure notices,
+  placeholders), always in that order, never truncating. Pure; does not know the origin of any input.
 
 See full details in [utils.md](./utils.md)
 
