@@ -4,8 +4,8 @@ title: Ingesta y normalización del mail
 type: event
 status: Active
 created: 2026-08-27
-last_updated: 2026-08-31
-stories: [S-007, S-008, S-009, S-010, S-011, S-012, S-013, S-014, S-015, S-016]
+last_updated: 2026-09-01
+stories: [S-007, S-008, S-009, S-010, S-011, S-012, S-013, S-014, S-015, S-016, S-022]
 ---
 
 # Ingesta y Normalización del Mail
@@ -13,9 +13,9 @@ stories: [S-007, S-008, S-009, S-010, S-011, S-012, S-013, S-014, S-015, S-016]
 **Tipo:** Evento (scheduled)
 **Status:** Active
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-31 (S-016 implementada: el Paso 4 ya tiene consumidor real — el
-ruteo y la publicación de FG-3 — y el Paso 5 emite los cinco contadores reales)
-**Stories:** S-007, S-008, S-009, S-010, S-011, S-012, S-013, S-014, S-015, S-016
+**Última actualización:** 2026-09-01 (S-022 implementada: la nota sobre el log de metadatos de
+adjunto deja de ser alcance futuro de FG-4 — describe el log real del módulo de adjuntos)
+**Stories:** S-007, S-008, S-009, S-010, S-011, S-012, S-013, S-014, S-015, S-016, S-022
 
 ## Descripción
 
@@ -310,9 +310,14 @@ qué llega a la casilla, con qué volumen y con qué forma.
 ## Notas
 
 **Lo que nunca aparece en stdout** (RF-37, ADR-006): credenciales IMAP, tráfico IMAP crudo, `body`,
-`subject`, `senderEmail`, `recipient` completo, contenido de adjunto ni el payload de
-`requirements.new`. Del adjunto **sí** pueden ir `filename`, `mimeType` y `size` (no cableado en este
-alcance — FG-4).
+`subject`, `senderEmail`, `recipient` completo, contenido de adjunto, la `uploadUrl` prefirmada ni el
+payload de `requirements.new`. Del adjunto **sí** aparecen `nombre` y `mime` (nunca `content`, nunca
+`checksum`, nunca `uploadUrl`) — el log real que produce el módulo de adjuntos de este request
+(S-017 a S-022, FG-4), en tres puntos distintos: `avisarRechazoLocal()` con nivel `info` para un
+rechazo de la política local (particionar/deduplicar/aplicarTope), `requestFileUpload()` con nivel
+`warn` (más el `code`) para un rechazo de negocio de `core`, y `uploadFileContent()` con nivel `warn`
+para un fallo de `PUT`. Ver
+`docs/reusable-code/jiku-mail-connector/services.md` para el detalle de cada función.
 
 **`subject` y `recipient` no están en `REDACT_PATHS`, y agregarlos sería un error:** ADR-006 exige que
 `messageId`, `projectId` y `slug` **sí** se logueen. Su protección es **por omisión deliberada en cada

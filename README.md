@@ -94,12 +94,12 @@ El conector se despliega como una imagen de contenedor: un worker, una sola inst
 secreto adentro**. La key del machine user y el creds del sentinel se **montan read-only** en tiempo
 de ejecución, y todo lo demás entra por variables de entorno.
 
-### Las cinco precondiciones, a cargo de U-02
+### Las siete precondiciones, a cargo de U-02
 
-**El conector no puede resolver ninguna de las cinco.** Ninguna es código: viven en Zitadel, en el
-bus, en Jiku y en la red. Lo único que el conector hace —y lo que sí garantiza— es **fallar de forma
-legible**, nombrando **cuál de los tres sistemas rechazó**, porque el arreglo de cada uno está en un
-lugar distinto.
+**El conector no puede resolver ninguna de las siete.** Ninguna es código: viven en Zitadel, en el
+bus, en Jiku, en la red y en el storage. Lo único que el conector hace —y lo que sí garantiza— es
+**fallar de forma legible**, nombrando **cuál de los sistemas rechazó**, porque el arreglo de cada uno
+está en un lugar distinto.
 
 | # | Precondición | Si falta, el conector… |
 |---|---|---|
@@ -109,8 +109,9 @@ lugar distinto.
 | 4 | **Una instancia de Jiku desplegada y alcanzable**, con al menos un `projectId` real para la prueba (`JIKU_VERIFY_PROJECT_ID`) | …**arranca igual** —el worker no consulta a `core`— pero `verify` falla con `nada_respondio` o `core_rechazo_por_forma` |
 | 5 | **Red al bus:** el conector va **dentro** de la red del bus, que **no está expuesta al ingress** | …no arranca. `diagnosis: bus_inalcanzable` |
 | 6 | **La casilla acepta subaddress** (`+slug`, p. ej. `tickets+alfa@grava.io`) y tiene **IMAP habilitado**. En Gmail hace falta **App Password**, no la contraseña de la cuenta | …arranca igual —el conector no verifica la casilla al arrancar— pero la ingesta **no funciona**: sin IMAP habilitado el `connect()` del tick falla en cada disparo del cron, y sin subaddress el slug del proyecto destino no se puede extraer (FG-3) |
+| 7 | **El storage S3-compatible es alcanzable por red** desde donde corre el conector (FG-4) | …arranca igual —el conector no verifica el storage al arrancar— pero la subida de adjuntos falla: cada `PUT` a la `uploadUrl` prefirmada agota su timeout (`PUT_TIMEOUT_MS`) y el adjunto queda con aviso de fallo en la description, sin cancelar el requisito |
 
-Tres aclaraciones que no son obvias:
+Cuatro aclaraciones que no son obvias:
 
 - **La key no tiene procedimiento de rotación definido.** Zitadel la entrega una sola vez; si se
   pierde, lo único posible es generar una nueva y reemplazar el montaje. Decirlo es información;
@@ -120,6 +121,10 @@ Tres aclaraciones que no son obvias:
 - **La precondición 4 no afecta el arranque.** El worker arranca sin una instancia de Jiku
   alcanzable, porque no consulta a `core` para arrancar. Lo que falla es `verify`. Si `core` está
   caído, un contenedor sano **no** es evidencia de que Jiku esté sano.
+- **La precondición 7 no exige CORS ni credenciales de S3.** El `PUT` del byte del adjunto lo hace un
+  proceso de servidor (`fetch` nativo de Node), no un navegador — CORS no aplica. La única
+  autorización es la `uploadUrl` que `core` firmó: el conector nunca ve ni usa una credencial de S3
+  propia (ADR-003).
 
 Cuando el contenedor no arranque, el `diagnosis` de la línea de log dice quién rechazó y dónde está
 el arreglo: la tabla de **diagnósticos** está más arriba, en
@@ -128,7 +133,7 @@ dos copias de la misma tabla divergen, y la que se lee termina siendo la vieja.
 
 ### Configuración: variables y montajes
 
-Las veintidós variables que valida el arranque. Las dos credenciales del bus son **rutas a archivos
+Las veintiséis variables que valida el arranque. Las dos credenciales del bus son **rutas a archivos
 montados**, no su contenido. **`IMAP_PASSWORD` es la única que lleva un secreto en su valor** — y por
 eso llega por entorno y nunca se hornea en la imagen (NFR-S05).
 
@@ -156,6 +161,10 @@ eso llega por entorno y nunca se hornea en la imagen (NFR-S05).
 | `SUBADDRESS_PREFIX` | No | `tickets` | Prefijo del subaddress del que se extrae el slug (`tickets+alfa@…`) |
 | `PLACEHOLDER_TITLE` | No | `Ticket recibido por mail` | Título del requisito cuando el mail llega sin asunto |
 | `PLACEHOLDER_BODY` | No | `(mail sin contenido)` | Cuerpo del requisito cuando el mail llega sin contenido |
+| `ATTACHMENT_ALLOWED_EXTENSIONS` | No | `.png,.jpg,.jpeg,.gif,.pdf,.doc,.docx,.xls,.xlsx,.txt,.log,.zip` | Extensiones permitidas por la política **local** de adjuntos (conveniencia, no autoritativa — `core` decide) |
+| `ATTACHMENT_ALLOWED_MIME_TYPES` | No | `image/png,image/jpeg,image/gif,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,application/zip` | MIME permitidos por la política local de adjuntos |
+| `ATTACHMENT_MAX_SIZE_BYTES` | No | `10485760` (10 MB) | Tamaño máximo de un adjunto, evaluado sobre el `Buffer` real descargado |
+| `PUT_TIMEOUT_MS` | No | `30000` | Timeout del `PUT` directo del byte del adjunto al storage S3-compatible |
 
 #### El Mapa de Tickets y sus dos fuentes excluyentes
 
@@ -214,6 +223,15 @@ Tres cosas de la configuración de la casilla que conviene saber antes de desple
   configuración → Reenvío y POP/IMAP → Habilitar IMAP**). Sin esto el arranque **no falla**, pero
   la ingesta tampoco funciona: es una precondición operativa de U-02, no algo que el software pueda
   detectar de antemano.
+
+#### La política local de archivos y su redeploy
+
+Las cuatro variables `ATTACHMENT_ALLOWED_EXTENSIONS`, `ATTACHMENT_ALLOWED_MIME_TYPES`,
+`ATTACHMENT_MAX_SIZE_BYTES` y `PUT_TIMEOUT_MS` (tabla de arriba) se leen **una sola vez al
+arrancar**, igual que el Mapa de Tickets: **agregar o cambiar la política local de archivos (listas
+blancas, tamaño máximo) exige redeploy** — no hay recarga en caliente. El filtro local es
+conveniencia, no autoridad (ADR-003): `core` decide en última instancia, así que una lista
+desactualizada no rompe el sistema, sólo cambia qué se rechaza **antes** de tocar el bus.
 
 Los montajes, y son los únicos — dos siempre, y un tercero sólo si el Mapa de Tickets se declara
 como archivo en vez de inline:

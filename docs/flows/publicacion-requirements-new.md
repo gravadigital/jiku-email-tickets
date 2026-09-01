@@ -4,8 +4,8 @@ title: Publicación de requirements.new
 type: feature
 status: Implemented
 created: 2026-08-27
-last_updated: 2026-08-31
-stories: [S-005, S-012, S-013, S-014, S-015, S-016]
+last_updated: 2026-09-01
+stories: [S-005, S-012, S-013, S-014, S-015, S-016, S-022]
 ---
 
 # Publicación de `requirements.new`
@@ -13,9 +13,11 @@ stories: [S-005, S-012, S-013, S-014, S-015, S-016]
 **Tipo:** Feature
 **Status:** Implemented
 **Creado:** 2026-08-27
-**Última actualización:** 2026-08-31 (S-016 implementada: el flujo queda extendido con el segundo
-disparador — el tick, con el payload derivado del mail — sin reescribir el modo de verificación)
-**Stories:** S-005, S-012, S-013, S-014, S-015, S-016
+**Última actualización:** 2026-09-01 (S-022 implementada: el disparador del tick ahora puede llevar
+`fileIds` condicional, y se documenta el segundo comando que ADR-003 permite —
+`files.request-upload` —, reusando la traducción de errores ya documentada. El modo de verificación
+no cambia)
+**Stories:** S-005, S-012, S-013, S-014, S-015, S-016, S-022
 
 ## Descripción
 
@@ -157,6 +159,7 @@ payload es idéntica en los dos disparadores** — sólo cambia de dónde salen 
 | `priority` | `'sin_prioridad'` — fijo |
 | `visibilityLevel` | `'public'` — fijo |
 | `creator` | `client.userId` — el único campo que el payload fijo NO lleva (ver tabla de exclusiones) |
+| `fileIds` | El resultado de `procesarAdjuntosDelMail()` (S-022, FG-4) — **condicional**, sólo si tiene al menos un elemento |
 
 **Orden exacto en `title`/`description`, no intercambiable:** recortar (`.trim()`) → truncar
 (`.slice(0, TITLE_MAX_LENGTH)`, sólo para `title`) → placeholder (si el resultado quedó `''`).
@@ -170,8 +173,13 @@ Detalle completo en [ruteo-y-alta-del-requisito](ruteo-y-alta-del-requisito.md).
 |---|---|
 | `state` | El requisito nace en `analisis`, default de Jiku (invariante 6, ADR-003) |
 | `actor` | **La única clave de identidad que el plano de escritura rechaza de plano** (invariante 18) |
-| `fileIds` | Se envía **sólo si hay al menos uno** (ADR-003); no hay adjuntos en ninguno de los dos disparadores. Es de FG-4 |
 | `creator` | **Cambia según el disparador** — ver abajo |
+
+**`fileIds` ya no es una fila de exclusión fija: depende del disparador.** Se envía **sólo si hay al
+menos uno** (ADR-003). **El disparador del tick SÍ puede llevarlo**, condicional según lo que
+`procesarAdjuntosDelMail()` resolvió (S-022, FG-4) — nunca `fileIds: []`. **El modo de verificación
+(`npm run verify`) sigue sin cambios en este alcance:** su payload sigue siendo el fijo documentado
+arriba, sin adjuntos, sin `fileIds`.
 
 **La única fila que cambia respecto de la versión anterior de este documento es `creator`:**
 
@@ -180,12 +188,62 @@ Detalle completo en [ruteo-y-alta-del-requisito](ruteo-y-alta-del-requisito.md).
 | Modo de verificación (sin cambios) | No va | Actor resuelto sólo del `sub` del subject |
 | Tick (desde S-015) | **Va** — `client.userId` | `core` lo **ignora**: resuelve el actor del `sub` del subject igual (ADR-005). El campo es informativo, no una fuente de verdad |
 
-Las filas de `state`, `actor` y `fileIds` **no cambian**: siguen excluidas en los dos disparadores por
-las mismas razones. La lógica de payload derivado del mail —truncado a 255, placeholders por
+Las filas de `state` y `actor` **no cambian**: siguen excluidas en los dos disparadores por las mismas
+razones. `fileIds` es la excepción desde S-022: condicional en el disparador del tick, siempre ausente
+en el modo de verificación. La lógica de payload derivado del mail —truncado a 255, placeholders por
 asunto/cuerpo vacío— que la versión anterior de este documento marcaba como *"fuera de este
 alcance"* **ya está en alcance**, implementada desde S-015.
 
 **Ref:** S-005 CA-3, CA-4; S-015; ADR-003, ADR-005; convención `validation`
+
+---
+
+### Paso 2b: El segundo comando — `files.request-upload`
+
+**Origen:** `procesarAdjuntosDelMail()` (`src/domain/publicacion/procesar-adjuntos-mail.ts`, vía
+`requestFileUpload()`)
+**Destino:** Bus NATS + auth-callout → Jiku (`core`)
+**Tipo:** Evento (comando con reply)
+
+El **segundo comando** que ADR-003 permite, distinto de `requirements.new`: pide permiso de subida
+para UN adjunto y, si `core` lo concede, devuelve la `uploadUrl` prefirmada para el `PUT` directo (el
+byte nunca viaja por el bus). Publicado **sólo desde el disparador del tick**, dentro de
+`procesarAdjuntosDelMail()` — nunca desde el modo de verificación, que no procesa adjuntos.
+
+**Payload:**
+
+| Campo | Valor |
+|---|---|
+| `fileName` | `adjunto.filename` |
+| `mimeType` | `adjunto.mimeType` (declarado, no verificado por el conector) |
+| `fileSize` | `adjunto.content.length` |
+| `checksum` | sha256 del `content`, calculado con `node:crypto` |
+
+**Publicación:** `client.command('files.request-upload', payload)` — mismo `client`, mismo timeout
+(15000 ms, ADR-002), mismo mecanismo de subject/reply que `requirements.new` (Paso 3 de este mismo
+documento).
+
+**Traducción de la respuesta — reutiliza `diagnosePublishFailure()` y `logContext()`** (la misma
+función que traduce las nueve ramas de `requirements.new`, tabla de "Manejo de Errores" de este
+documento): las clases del SDK (`JikuPermissionDenied`, `JikuNoEndpoint`, `JikuTimeout`, etc.) se
+traducen igual. **La única rama nueva, ANTES de esa función,** es el `failure` de **negocio** propio
+de este comando — no una clase del SDK, sino el `status: 'failure'` que `core` responde cuando el
+archivo no pasa su propia política:
+
+| `errorCode` | Quién rechazó | Log |
+|---|---|---|
+| `file_type_not_allowed` | `core`, política de tipo de archivo | `warn` con `{ code, nombre, mime }`, `'permiso de subida rechazado'` |
+| `file_too_large` | `core`, política de tamaño | `warn` con `{ code, nombre, mime }`, `'permiso de subida rechazado'` |
+
+Ninguna de las dos ramas es un error del SDK ni del bus: es un rechazo de **negocio**, tratado como
+caso esperado (el filtro local del conector es conveniencia, no autoridad — ADR-003) y anotado como
+aviso en la `description` del requisito, nunca como `fallidos` del tick.
+
+**Éxito:** `success { fileId, uploadUrl }` — el `fileId` se acumula para el `fileIds` del payload de
+`requirements.new` (Paso 2), y la `uploadUrl` se usa **una sola vez**, para el `PUT` inmediato del
+byte, y **nunca se loguea**.
+
+**Ref:** S-018, S-019, S-022 CA-2; ADR-003, ADR-006
 
 ---
 
@@ -245,9 +303,10 @@ ejecuta, `core` escribe (ADR-001).
 **Acción (éxito, modo de verificación):** loguea el `id` del requisito **junto con el `projectId`**,
 en la misma línea: `{ projectId, requirementId }`.
 
-**Acción (éxito, tick):** loguea los **tres identificadores juntos**, en la misma línea:
-`{ messageId, projectId, requirementId }` — el `messageId` es lo que suma este disparador, cerrando
-la nota que la versión anterior de este documento ya anticipaba (*"el registro con `messageId` es de
+**Acción (éxito, tick):** loguea los tres identificadores más los dos conteos de archivos, en la misma
+línea: `{ messageId, projectId, requirementId, archivosVinculados, archivosConAviso }` (los dos
+conteos suman desde S-021/S-022) — el `messageId` es lo que sumó el disparador del tick, cerrando la
+nota que la versión anterior de este documento ya anticipaba (*"el registro con `messageId` es de
 FG-3"*).
 
 **Acción (error, en cualquiera de los dos disparadores):** traduce la clase del SDK al diagnóstico de

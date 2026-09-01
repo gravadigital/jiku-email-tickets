@@ -7,6 +7,7 @@ import { MIN_TIMEOUT_MS } from '#config/schema.js';
 import type { MailAttachment } from '#domain/ingesta/types.js';
 import { procesarAdjuntosDelMail } from '#domain/publicacion/procesar-adjuntos-mail.js';
 import { requestFileUpload as requestFileUploadReal } from '#domain/publicacion/upload-file.js';
+import { uploadFileContent as uploadFileContentReal } from '#domain/publicacion/upload-byte.js';
 import { createLogger } from '#shared/logger.js';
 
 import { setupTestBus, TEST_INSTANCE, TEST_USER_ID, type TestBusContext } from '../bus/helpers.js';
@@ -417,6 +418,54 @@ describe('procesarAdjuntosDelMail', () => {
     const raw = capture.raw().join('\n');
     expect(raw).not.toContain(uploadUrl);
     expect(raw).not.toContain('uploadUrl');
+  });
+
+  // S-022, Task 5 — TS-6 (CA-9): los CUATRO tipos de fallo de archivo combinados en el mismo mail
+  // (rechazo local, failure de negocio de core, PUT fallido, y un error inesperado de
+  // PROGRAMACION inyectado via `deps.uploadFileContent`) no cancelan el resultado: el orquestador
+  // sigue procesando y termina con fileIds vacio, 2 avisos de rechazo y 2 avisos de fallo.
+  it('S-022 TS-6: los cuatro tipos de fallo de archivo combinados no cancelan el procesamiento', async () => {
+    capture = createLogCapture();
+
+    // adjunto 2 (sospechoso.png): failure de negocio de core.
+    // adjunto 3 (roto.pdf): permiso concedido, PUT falla (503).
+    responder = await respondTo(bus.connection, COMMAND, [
+      { status: 'failure', errorCode: 'file_type_not_allowed' },
+      { status: 'success', data: { fileId: 850, uploadUrl: 'http://127.0.0.1:1/no-existe' } },
+      { status: 'success', data: { fileId: 851, uploadUrl } },
+    ]);
+
+    // adjunto 4 (raro.png): un doble de uploadFileContent que lanza una excepcion arbitraria de
+    // programacion, no contemplada por los tipos de retorno -- mismo patron que el test TS-10 de
+    // arriba usa para requestFileUpload, aca aplicado a uploadFileContent para no interferir con
+    // el permiso ya concedido del adjunto 3 (roto.pdf), que conserva su fallo real de PUT (503).
+    const resultado = await procesarAdjuntosDelMail(
+      [
+        attachment({ filename: 'virus.exe', mimeType: 'application/x-msdownload' }), // rechazo LOCAL
+        attachment({ filename: 'sospechoso.png', mimeType: 'image/png' }), // failure de core
+        attachment({ filename: 'roto.pdf', mimeType: 'application/pdf' }), // PUT fallido (503)
+        attachment({ filename: 'raro.png', mimeType: 'image/png' }), // excepcion de programacion
+      ],
+      CONFIG_ADJUNTOS,
+      {
+        client: bus.client,
+        logger: loggerFor(capture),
+        uploadFileContent: async (adjunto, deps) => {
+          if (adjunto.filename === 'raro.png') {
+            throw new Error('fallo inesperado de programacion');
+          }
+          return uploadFileContentReal(adjunto, deps);
+        },
+      },
+    );
+
+    expect(resultado.fileIds).toEqual([]);
+    expect(resultado.avisosDeRechazo).toHaveLength(2); // virus.exe (local) + sospechoso.png (core)
+    expect(resultado.avisosDeFallo).toHaveLength(2); // roto.pdf (PUT 503) + raro.png (excepcion)
+    expect(resultado.avisosDeRechazo.some((a) => a.includes('virus.exe'))).toBe(true);
+    expect(resultado.avisosDeRechazo.some((a) => a.includes('sospechoso.png'))).toBe(true);
+    expect(resultado.avisosDeFallo.some((a) => a.includes('roto.pdf'))).toBe(true);
+    expect(resultado.avisosDeFallo.some((a) => a.includes('raro.png'))).toBe(true);
   });
 
   // Placeholder de imagen vs no-imagen, segun adjunto.mimeType.
