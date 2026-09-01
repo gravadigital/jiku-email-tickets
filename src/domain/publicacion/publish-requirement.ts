@@ -143,17 +143,32 @@ export interface PublishRequirementFromMailDeps {
  * `diagnosePublishFailure()` y `logContext()` NO se tocan: sus 9 ramas ya cubren los tres sistemas
  * que pueden rechazar, y esta funcion solo AGREGA `messageId` al objeto de log, nunca adentro de
  * `logContext()` (que seguiria siendo el mismo para el modo de verificacion, sin mail que nombrar).
+ *
+ * S-021 extiende esta funcion con `fileIds` (ya acumulados por
+ * `procesarAdjuntosDelMail()`, Tarea 3) y `description` (ya compuesta por `componerDescripcion()`,
+ * S-020) -- ambos PARAMETROS, no calculados aca: esta funcion sigue sin conocer adjuntos, solo
+ * recibe las piezas ya resueltas y las usa para armar el payload final y sumar los dos conteos al
+ * log de exito (CA-9). El log de FALLO NO cambia (CA-8): si `requirements.new` falla, los archivos
+ * ya subidos quedan huerfanos sin registro adicional -- esta funcion no lleva ninguna lista de
+ * `fileIds` abandonados.
  */
 export async function publishRequirementFromMail(
   mail: Pick<IncomingMail, 'messageId' | 'subject' | 'body'>,
   projectId: number,
   ruteoConfig: Pick<RuteoConfig, 'placeholderTitle' | 'placeholderBody'>,
   { client, logger }: PublishRequirementFromMailDeps,
+  fileIds: readonly number[] = [],
+  description?: string,
+  archivosConAviso = 0,
 ): Promise<{ requirementId: number }> {
   // El payload se valida ANTES de publicar, igual que en el modo de verificacion — mismo criterio,
   // ahora sobre un payload que deriva de contenido variable del cliente en vez de un literal fijo.
+  // `description` es OPCIONAL (S-021): si el llamador no compuso una descripcion propia (con
+  // avisos/placeholders de adjuntos), se usa el mail SIN modificar -- mismo comportamiento previo
+  // a esta story, para no romper ningun llamador que aun no pasa adjuntos.
+  const mailParaPayload = description === undefined ? mail : { ...mail, body: description };
   const payload = parseNewRequirement(
-    buildRequirementPayload(mail, projectId, client.userId, ruteoConfig),
+    buildRequirementPayload(mailParaPayload, projectId, client.userId, ruteoConfig, fileIds),
   );
 
   let data: unknown;
@@ -192,9 +207,18 @@ export async function publishRequirementFromMail(
   }
 
   // La linea de exito. CA-1 y CA-14 piden los TRES identificadores juntos, en una sola linea:
-  // separarlos obliga a correlacionar por timestamp para encontrar el requisito en Jiku.
+  // separarlos obliga a correlacionar por timestamp para encontrar el requisito en Jiku. S-021
+  // (CA-9) suma `archivosVinculados`/`archivosConAviso` a la MISMA linea, sin agregar una segunda
+  // -- `archivosVinculados` sale de `fileIds.length` en vez de un parametro propio porque son
+  // exactamente el mismo numero por definicion (Task 4, AC-4).
   logger.info(
-    { messageId: mail.messageId, projectId, requirementId: reply.data.id },
+    {
+      messageId: mail.messageId,
+      projectId,
+      requirementId: reply.data.id,
+      archivosVinculados: fileIds.length,
+      archivosConAviso,
+    },
     'requisito creado en Jiku',
   );
 

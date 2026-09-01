@@ -193,12 +193,23 @@ describe('src/ publication source properties', () => {
     const withoutStrings = (code: string): string =>
       code.replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/"(?:[^"\\]|\\.)*"/g, '""');
 
+    // `procesar-adjuntos-mail.ts` (S-021) SI itera -- es el orquestador que procesa, EN SERIE, los
+    // adjuntos de un mail (CA-2: par por archivo, nunca Promise.all). Ese `for` no es un reintento
+    // de UNA publicacion: es una sola invocacion de requestFileUpload()/uploadFileContent() POR
+    // ADJUNTO, cada uno un archivo distinto -- muy distinto de reintentar la MISMA publicacion. Se
+    // excluye de esta aserción, que sigue valiendo para el resto de `publicacion/` (ningun otro
+    // archivo orquesta un bucle sobre publicaciones).
+    const PROCESAR_ADJUNTOS_MAIL = `${PUBLICACION}procesar-adjuntos-mail.ts`;
+
     for (const file of PUBLICACION_FILES) {
       const flow = withoutStrings(file.code);
 
       expect(flow, `${file.relativePath} must not loop over a publication`).not.toMatch(
         /\b(retry|backoff|reintent)/i,
       );
+
+      if (file.relativePath === PROCESAR_ADJUNTOS_MAIL) continue;
+
       expect(flow, `${file.relativePath} must not loop at all`).not.toMatch(
         /\b(for|while)\s*\(/,
       );
@@ -390,22 +401,24 @@ describe('src/ publication source properties', () => {
     }
   });
 
-  it('sends none of the three always-excluded payload keys from mail-payload.ts either (S-015)', () => {
-    // `mail-payload.ts` SI lleva `creator` (es el punto de la story) — por eso NO se incluye en
-    // esta lista, a diferencia del payload fijo de arriba. Las tres que siguen prohibidas de plano
-    // en CUALQUIER payload son `state`, `actor` y `fileIds`.
+  it('sends none of the two always-excluded payload keys from mail-payload.ts either (S-015/S-021)', () => {
+    // `mail-payload.ts` SI lleva `creator` (es el punto de S-015) y, desde S-021, `fileIds`
+    // condicional (es el punto DE ESTA story) — por eso ninguno de los dos esta en esta lista, a
+    // diferencia del payload fijo de arriba. Las que siguen prohibidas de plano en CUALQUIER
+    // payload son `state` y `actor`.
     const payload = FILES.find((file) => file.relativePath === `${PUBLICACION}mail-payload.ts`);
 
     expect(payload).toBeDefined();
-    for (const excluded of ['state', 'actor', 'fileIds']) {
+    for (const excluded of ['state', 'actor']) {
       expect(
         payload?.code,
         `the mail-derived payload must not carry ${excluded}`,
       ).not.toMatch(new RegExp(`\\b${excluded}\\s*:`));
     }
-    // Y la contracara positiva: `creator` SI esta, para que este test no pase vacuamente si
-    // alguien borrara la clave entera del archivo.
+    // Y la contracara positiva: `creator` y `fileIds` SI estan, para que este test no pase
+    // vacuamente si alguien borrara alguna de las dos claves del archivo.
     expect(payload?.code).toMatch(/\bcreator\s*:/);
+    expect(payload?.code).toMatch(/\bfileIds\s*:/);
   });
 
   it('declares no database client and writes no SQL, as ADR-001 forbids', () => {

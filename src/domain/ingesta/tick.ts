@@ -5,6 +5,9 @@ import type { AppConfig } from '#config/index.js';
 import { MissingMessageIdError } from '#domain/ingesta/errors.js';
 import { normalize as normalizeMail } from '#domain/ingesta/normalize.js';
 import type { MailSource } from '#domain/ingesta/ports.js';
+import { componerDescripcion } from '#domain/publicacion/description.js';
+import { resolveCuerpoBase } from '#domain/publicacion/mail-payload.js';
+import { procesarAdjuntosDelMail } from '#domain/publicacion/procesar-adjuntos-mail.js';
 import { PublishError } from '#domain/publicacion/publish-errors.js';
 import { publishRequirementFromMail } from '#domain/publicacion/publish-requirement.js';
 import { routeMail } from '#domain/ruteo/route-mail.js';
@@ -146,20 +149,51 @@ export async function runTick(
           // (CA-11, CA-16). No publica, no responde, no mueve de carpeta, no persiste (CA-6) — el
           // alcance de esta story termina en el reporte del descarte.
         } else {
+          // El procesamiento COMPLETO de adjuntos (S-021) corre ACA, dentro de la MISMA iteracion
+          // del mail, ANTES del armado del payload (CA-1). `procesarAdjuntosDelMail()` NUNCA lanza
+          // para un resultado de negocio (rechazo, fallo de archivo) -- siempre devuelve, asi que
+          // esta invocacion no necesita su propio try/catch: el unico try/catch de esta rama seguia
+          // siendo el de la publicacion de abajo. `mail.attachments` es el UNICO punto de esta
+          // iteracion que retiene los `Buffer` de los adjuntos, y deja de tener referencias vivas en
+          // cuanto termina esta iteracion del `for` (CA-11, S-016).
+          const adjuntos = await procesarAdjuntosDelMail(mail.attachments, config.adjuntos, {
+            client,
+            logger,
+          });
+
+          // El cuerpoBase es EXACTAMENTE el mismo calculo que `buildRequirementPayload()` ya hacia
+          // internamente (recortar -> placeholder si vacio) -- `resolveCuerpoBase()` es la funcion
+          // compartida que evita duplicar esa logica en dos lugares (Task 4). La description final
+          // compuesta (S-020) SIEMPRE tiene al menos el cuerpoBase, nunca queda vacia.
+          const cuerpoBase = resolveCuerpoBase(mail.body, config.ruteo);
+          const description = componerDescripcion({
+            cuerpoBase,
+            avisosDeRechazo: adjuntos.avisosDeRechazo,
+            avisosDeFallo: adjuntos.avisosDeFallo,
+            placeholders: adjuntos.placeholders,
+          });
+
           // El alta ocurre DENTRO de esta misma iteracion, antes de pasar al siguiente UID — nunca
           // se acumula un array de mails ruteados para publicar al final (CA-22 de S-015). Un
           // `try/catch` propio, anidado en el de normalizacion/ruteo, distingue un fallo de
           // PUBLICACION (`fallidos`) de un fallo de NORMALIZACION (`descartados`/`fallidos` de
           // arriba): son ejes distintos y no deben confundirse.
           try {
-            await publishRequirementFromMail(mail, route.projectId, config.ruteo, {
-              client,
-              logger,
-            });
+            await publishRequirementFromMail(
+              mail,
+              route.projectId,
+              config.ruteo,
+              { client, logger },
+              adjuntos.fileIds,
+              description,
+              adjuntos.avisosDeRechazo.length + adjuntos.avisosDeFallo.length,
+            );
             counters.creados += 1;
             // `publishRequirementFromMail()` ya logueo `'requisito creado en Jiku'` con los tres
-            // identificadores (CA-14) — no se emite una segunda linea `'mail procesado'` aca: seria
-            // una linea de resultado duplicada para el mismo mail.
+            // identificadores mas los dos conteos de archivos (CA-9, CA-14) — no se emite una
+            // segunda linea `'mail procesado'` aca: seria una linea de resultado duplicada para el
+            // mismo mail. Ningun fallo de archivo (rechazo o fallo de subida) cambia este camino:
+            // el requisito se crea igual, con sus avisos ya en la description (CA-6, CA-7).
           } catch (cause) {
             // `publishRequirementFromMail()` ya logueo el fallo con su propio `catch` interno
             // (Tarea 3, criterio 5) — este `catch` NO vuelve a loguear el error, solo cuenta y

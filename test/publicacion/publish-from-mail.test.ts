@@ -249,6 +249,47 @@ describe('publishRequirementFromMail', () => {
     expect(failure?.['diagnosis']).toBe('core_rechazo_por_rol');
   });
 
+  // S-021, TS-13: el log de exito suma archivosVinculados/archivosConAviso a la MISMA linea.
+  it('sums archivosVinculados and archivosConAviso to the same success line, not a second one', async () => {
+    capture = createLogCapture();
+    responder = await respondTo(bus.connection, COMMAND, { status: 'success', data: { id: 77 } });
+
+    await publishRequirementFromMail(
+      mail({ messageId: '<con-adjuntos@cliente.com>' }),
+      42,
+      RUTEO_CONFIG,
+      { client: bus.client, logger: loggerFor(capture) },
+      [101],
+      'No puedo entrar\nNo se pudo subir b.exe: error al subir el archivo.\n![attach:101]',
+      2,
+    );
+
+    const successLines = capture.lines().filter((line) => line['msg'] === 'requisito creado en Jiku');
+    expect(successLines).toHaveLength(1);
+    expect(successLines[0]).toMatchObject({
+      messageId: '<con-adjuntos@cliente.com>',
+      projectId: 42,
+      requirementId: 77,
+      archivosVinculados: 1,
+      archivosConAviso: 2,
+    });
+  });
+
+  // S-021: sin adjuntos (llamado con la firma previa a esta story), los dos conteos son 0 -- CA-4,
+  // retro-compatibilidad de la linea de exito.
+  it('with no attachments, archivosVinculados and archivosConAviso are both 0', async () => {
+    capture = createLogCapture();
+    responder = await respondTo(bus.connection, COMMAND, { status: 'success', data: { id: 88 } });
+
+    await publishRequirementFromMail(mail(), 42, RUTEO_CONFIG, {
+      client: bus.client,
+      logger: loggerFor(capture),
+    });
+
+    const success = capture.lines().find((line) => line['msg'] === 'requisito creado en Jiku');
+    expect(success).toMatchObject({ archivosVinculados: 0, archivosConAviso: 0 });
+  });
+
   // TS-24 (parcial)
   it('logs neither the payload nor the title nor the description on success', async () => {
     capture = createLogCapture();

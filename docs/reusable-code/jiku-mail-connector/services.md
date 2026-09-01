@@ -433,16 +433,24 @@ function publishRequirementFromMail(
   projectId: number,
   ruteoConfig: Pick<RuteoConfig, 'placeholderTitle' | 'placeholderBody'>,
   deps: PublishRequirementFromMailDeps,
+  fileIds?: readonly number[], // default [] — S-021
+  description?: string, // S-021 — already-composed description; falls back to mail.body if omitted
+  archivosConAviso?: number, // default 0 — S-021 — summed into the success log line
 ): Promise<{ requirementId: number }>;
 ```
 
 **Usage:**
 
 ```ts
-const { requirementId } = await publishRequirementFromMail(mail, route.projectId, config.ruteo, {
-  client,
-  logger,
-});
+const { requirementId } = await publishRequirementFromMail(
+  mail,
+  route.projectId,
+  config.ruteo,
+  { client, logger },
+  adjuntos.fileIds,
+  description, // already composed with componerDescripcion()
+  adjuntos.avisosDeRechazo.length + adjuntos.avisosDeFallo.length,
+);
 ```
 
 **Notes:**
@@ -456,6 +464,13 @@ const { requirementId } = await publishRequirementFromMail(mail, route.projectId
   verification path.
 - Rethrows on failure and never retries; the caller (the tick) decides what to count and whether to
   continue the batch.
+- **Since S-021:** `fileIds`, `description` and `archivosConAviso` are all optional, backward
+  compatible with any caller that doesn't pass attachments (defaults produce the exact pre-S-021
+  behavior). The success log line always includes `archivosVinculados` (= `fileIds.length`) and
+  `archivosConAviso`, even when both are `0` — same single line, never a second one. The failure log
+  is untouched: an orphaned upload (files already sent, `requirements.new` failing afterward) gets no
+  extra log beyond the existing `PublishError` line — there is no compensating command and no list of
+  abandoned `fileIds` anywhere in this service (ADR-003 consequence).
 
 ---
 
@@ -1093,5 +1108,96 @@ if (result.tipo === 'subido') {
   part in the `PUT` itself (no URL, no header, no body).
 - Never retries internally: `fetch` is invoked exactly once per call (NFR-R03 — requesting a new upload
   permission for a failed `PUT` would itself be a retry, and is forbidden).
+
+---
+
+## procesarAdjuntosDelMail()
+
+**Location:** `src/domain/publicacion/procesar-adjuntos-mail.ts`
+
+**Description:** S-021's central orchestrator: the piece that connects `procesarAdjuntos()` (S-017,
+partition → dedup → cap), `requestFileUpload()` (S-018) and `uploadFileContent()` (S-019) into a
+single processing cycle for ONE mail's attachments. None of the three composed functions knows about
+the others or about the full cycle — this function is what wires them.
+
+**Signature:**
+
+```ts
+interface ProcesamientoAdjuntosResultado {
+  readonly fileIds: number[]; // in upload order
+  readonly avisosDeRechazo: string[]; // local policy + core's business rejections, same block
+  readonly avisosDeFallo: string[]; // upload-permission or PUT failures, distinct block
+  readonly placeholders: string[]; // one per uploaded attachment, same order as fileIds
+}
+
+interface ProcesarAdjuntosDelMailDeps {
+  readonly client: Client;
+  readonly logger: Logger;
+  readonly requestFileUpload?: typeof requestFileUploadReal; // test-only override
+  readonly uploadFileContent?: typeof uploadFileContentReal; // test-only override
+}
+
+function procesarAdjuntosDelMail(
+  attachments: readonly MailAttachment[],
+  config: Pick<AdjuntosConfig, 'allowedExtensions' | 'allowedMimeTypes' | 'maxSizeBytes' | 'putTimeoutMs'>,
+  deps: ProcesarAdjuntosDelMailDeps,
+): Promise<ProcesamientoAdjuntosResultado>;
+```
+
+**Usage:**
+
+```ts
+const adjuntos = await procesarAdjuntosDelMail(mail.attachments, config.adjuntos, { client, logger });
+
+const description = componerDescripcion({
+  cuerpoBase: resolveCuerpoBase(mail.body, config.ruteo),
+  avisosDeRechazo: adjuntos.avisosDeRechazo,
+  avisosDeFallo: adjuntos.avisosDeFallo,
+  placeholders: adjuntos.placeholders,
+});
+
+await publishRequirementFromMail(
+  mail,
+  route.projectId,
+  config.ruteo,
+  { client, logger },
+  adjuntos.fileIds,
+  description,
+  adjuntos.avisosDeRechazo.length + adjuntos.avisosDeFallo.length,
+);
+```
+
+**Notes:**
+
+- **Serial, pair-by-file (CA-2):** for each accepted attachment, in `procesarAdjuntos()`'s output
+  order, `requestFileUpload()` is followed **immediately** by `uploadFileContent()` before moving to
+  the next attachment — never `Promise.all`/`allSettled`, never requesting all permissions first.
+- **Never replenishes an excedente (CA-5):** the cap (`aplicarTope()`, inside `procesarAdjuntos()`)
+  already decided which attachments are in scope; this function iterates only over `aceptados` and
+  never reaches back into the `tope_excedido` rejections to fill in for a failed upload.
+- **Per-attachment fault isolation (CA-6, RF-34):** the `try/catch` wraps the ENTIRE processing of
+  one attachment (`procesarUnoAceptado()` — both the permission request and the `PUT`), not just the
+  bus call, so an unexpected **programming** error (not a typed business outcome) is caught, logged
+  at `error` without exposing the attachment's content, turned into a failure notice, and the `for`
+  continues with the next attachment. Never escapes to the caller.
+- **Never throws for a business outcome** — always resolves. `requestFileUpload()`/
+  `uploadFileContent()` never throw either by design (S-018/S-019), so under real conditions this
+  function's own `try/catch` only fires for a genuine programming bug.
+- **Local rejections are logged here for the first time**, at `info` (`particionar()`/`deduplicar()`/
+  `aplicarTope()` are pure and log nothing) — distinct from a `core` business rejection, which
+  `requestFileUpload()` already logs at `warn` with a `code` (CA-12). Both land in the **same**
+  `avisosDeRechazo` block of the description; only the log level/shape distinguishes them.
+- **Placeholder choice** is `adjunto.mimeType.startsWith('image/')` → `![attach:{id}]`, else
+  `[attach:{id}]` — the declared MIME, the same field `particionar()`/`deduplicar()` already decided
+  on, never re-derived from the response.
+- **No array in this function retains a `Buffer`/`content` beyond the `PUT` of that one attachment**
+  (CA-11): the returned result only carries ids, strings and placeholders.
+- **`requestFileUpload`/`uploadFileContent` are injectable** via `deps`, defaulting to the real
+  implementations — same pattern as `Normalize` in `tick.ts` (S-016). Exists solely so a test can
+  inject a double that throws an arbitrary exception to exercise the programming-error `try/catch`
+  (TS-10), something the real implementations never do.
+- Does **not** import `componerDescripcion()` — returns the raw pieces (`avisosDeRechazo`,
+  `avisosDeFallo`, `placeholders`, `fileIds`); the caller composes the final description with the
+  `cuerpoBase` it already has, keeping this function focused on one attachment's life cycle only.
 
 ---

@@ -90,4 +90,60 @@ describe('src/domain/ingesta/tick.ts memory properties (S-016 CA-9)', () => {
     expect(code).toMatch(/for\s*\(\s*const\s+uid\s+of\s+batch\s*\)/);
     expect(code).not.toMatch(/batch\s*\.\s*map\s*\(/);
   });
+
+  // S-021, Task 5 — TS-15: los Buffer de los adjuntos de UN mail se procesan y liberan DENTRO de
+  // esa iteracion, extendiendo la propiedad de S-016 al procesamiento de adjuntos.
+  it('procesarAdjuntosDelMail() se invoca dentro del mismo for, entre routeMail() y publishRequirementFromMail()', () => {
+    const routeIndex = code.indexOf('routeMail(');
+    const procesarAdjuntosIndex = code.indexOf('procesarAdjuntosDelMail(');
+    const publishIndex = code.indexOf('publishRequirementFromMail(');
+
+    expect(procesarAdjuntosIndex).toBeGreaterThan(routeIndex);
+    expect(publishIndex).toBeGreaterThan(procesarAdjuntosIndex);
+
+    // Ningun array literal ni .push() se declara entre las tres llamadas: mail.attachments (el
+    // unico portador de los Buffer en esta funcion) se pasa DIRECTO a procesarAdjuntosDelMail(),
+    // nunca se copia a un array intermedio del tick.
+    const between = code.slice(routeIndex, publishIndex);
+    expect(between).not.toMatch(/=\s*\[\s*\]/);
+    expect(between).not.toMatch(/new\s+Array\s*\(/);
+    expect(between).not.toMatch(/\.push\s*\(/);
+  });
+
+  it('tick.ts no declara ningun array/Map para retener Buffer o content de adjuntos entre mails', () => {
+    // El unico lugar que puede retener Buffer de adjuntos de MAS DE UN mail seria una variable de
+    // modulo o un acumulador declarado FUERA del for -- ninguno de los dos existe en tick.ts. La
+    // acumulacion real (fileIds/avisos/placeholders, nunca Buffer) vive DENTRO de
+    // procesarAdjuntosDelMail(), con alcance de ESA invocacion, liberada al retornar.
+    expect(code).not.toMatch(/\b(let|const)\s+\w*(buffer|attachment|adjunto)\w*\s*:\s*\w+\[\]/i);
+  });
+});
+
+describe('src/domain/publicacion/procesar-adjuntos-mail.ts memory properties (S-021, TS-15)', () => {
+  const orchestratorPath = fileURLToPath(
+    new URL('../../src/domain/publicacion/procesar-adjuntos-mail.ts', import.meta.url),
+  );
+  const rawOrchestratorSource = readFileSync(orchestratorPath, 'utf8');
+  const orchestratorCode = stripComments(rawOrchestratorSource);
+
+  it('sanity: el archivo se pudo leer y tiene contenido real', () => {
+    expect(rawOrchestratorSource.length).toBeGreaterThan(500);
+    expect(orchestratorCode).toContain('export async function procesarAdjuntosDelMail');
+  });
+
+  it('el resultado final NUNCA lleva un campo con Buffer o content -- solo ids, textos y placeholders', () => {
+    // El tipo de retorno (`ProcesamientoAdjuntosResultado`) es la garantia estatica: ninguno de sus
+    // cuatro campos (`fileIds`, `avisosDeRechazo`, `avisosDeFallo`, `placeholders`) es un Buffer ni
+    // contiene uno -- son numeros y strings. Se afirma tambien sobre el codigo que la interfaz no
+    // declara ningun campo `content`/`Buffer`.
+    const interfaceMatch = /interface ProcesamientoAdjuntosResultado \{([\s\S]*?)\}/.exec(orchestratorCode);
+    expect(interfaceMatch).not.toBeNull();
+    expect(interfaceMatch?.[1]).not.toMatch(/\bBuffer\b/);
+    expect(interfaceMatch?.[1]).not.toMatch(/\bcontent\b/);
+  });
+
+  it('no usa Promise.all ni Promise.allSettled sobre los adjuntos (CA-2: en serie, par por archivo)', () => {
+    expect(orchestratorCode).not.toMatch(/Promise\.all\s*\(/);
+    expect(orchestratorCode).not.toMatch(/Promise\.allSettled\s*\(/);
+  });
 });

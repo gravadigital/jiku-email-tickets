@@ -135,6 +135,8 @@ describe('tick — un ciclo completo no filtra nada sensible por stdout (CA-17)'
     expect(fullOutput).not.toContain(WITH_ATTACHMENTS_BODY_FRAGMENT);
     expect(fullOutput).not.toContain(WITH_ATTACHMENTS_SENDER);
     expect(fullOutput).not.toContain(ATTACHMENT_BASE64_FRAGMENT);
+    // S-021, TS-18: la uploadUrl prefirmada tampoco aparece en ningun punto del ciclo completo.
+    expect(fullOutput).not.toContain('uploadUrl');
   });
 });
 
