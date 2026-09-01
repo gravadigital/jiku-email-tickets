@@ -150,14 +150,22 @@ describe('src/ bus source properties', () => {
     //
     // ACTUALIZADO EN S-005: hasta S-004 ningun archivo publicaba comandos y la asercion podia ser
     // "ningun `.command(` en ningun lado". S-005 introduce exactamente UNO —`requirements.new`, en
-    // `domain/publicacion/publish-requirement.ts`— asi que la propiedad que sigue valiendo es mas
-    // precisa: el conector no publica NINGUN comando relacionado con `users`, y publica solo desde
-    // el unico archivo autorizado. La cota de cuantos y cuales comandos existen la afirma
-    // `test/publicacion/source-properties.test.ts`; lo que se defiende aca es la fila en `users`.
-    const PUBLISHER = `domain${sep}publicacion${sep}publish-requirement.ts`;
+    // `domain/publicacion/publish-requirement.ts`.
+    //
+    // ACTUALIZADO EN S-018: se agrega un SEGUNDO publicador autorizado —`files.request-upload`, en
+    // `domain/publicacion/upload-file.ts`— asi que la lista de publicadores deja de ser un unico
+    // archivo y pasa a ser la lista CERRADA de los dos que ADR-003 permite. La propiedad que sigue
+    // valiendo es la misma de siempre, mas precisa: el conector no publica NINGUN comando
+    // relacionado con `users`, y publica solo desde los archivos autorizados. La cota de cuantos y
+    // cuales comandos existen la afirma `test/publicacion/source-properties.test.ts`; lo que se
+    // defiende aca es la fila en `users`.
+    const PUBLISHERS = [
+      `domain${sep}publicacion${sep}publish-requirement.ts`,
+      `domain${sep}publicacion${sep}upload-file.ts`,
+    ];
 
     for (const file of FILES) {
-      if (file.relativePath !== PUBLISHER) {
+      if (!PUBLISHERS.includes(file.relativePath)) {
         expect(file.code, `${file.relativePath} must not publish a command`).not.toMatch(
           /\.command\s*\(/,
         );
@@ -170,11 +178,13 @@ describe('src/ bus source properties', () => {
       );
     }
 
-    // Y el unico publicador publica el comando de requisitos, nunca uno de `users`: la fila la crea
-    // Jiku sola en la primera autenticacion, y el conector no la crea ni la pide (G-03, ADR-005).
-    const publisher = FILES.find((file) => file.relativePath === PUBLISHER);
-    expect(publisher, 'the single publisher must be findable').toBeDefined();
-    expect(publisher?.code).not.toMatch(/['"`]users\./);
+    // Y ninguno de los publicadores publica un comando de `users`: la fila la crea Jiku sola en la
+    // primera autenticacion, y el conector no la crea ni la pide (G-03, ADR-005).
+    for (const publisherPath of PUBLISHERS) {
+      const publisher = FILES.find((file) => file.relativePath === publisherPath);
+      expect(publisher, `${publisherPath} must be findable`).toBeDefined();
+      expect(publisher?.code).not.toMatch(/['"`]users\./);
+    }
   });
 
   it('declares no database client, as ADR-001 forbids', () => {

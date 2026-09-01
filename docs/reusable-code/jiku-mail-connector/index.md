@@ -12,9 +12,12 @@ S-012 (the Ticket Map with its two exclusive sources, the subaddress prefix and 
 S-013 (the pure `routeMail()` decision tree and the single-source `MotivoDescarte`/`RouteResult`
 types), S-015 (the mail-derived payload, `buildRequirementPayload()`), S-016 (closing the catalog
 with the real names the implementation settled on — see the note under `buildRequirementPayload()` and
-`MotivoDescarte`/`RouteResult` below) and S-017 (the pure attachment pipeline — `particionar()`,
+`MotivoDescarte`/`RouteResult` below), S-017 (the pure attachment pipeline — `particionar()`,
 `deduplicar()`, `aplicarTope()`, `procesarAdjuntos()` — and the four-key local file policy extension
-to the typed configuration). The service is a `worker` in Node.js with no HTTP surface and no
+to the typed configuration) and S-018 (the `files.request-upload` contract and its publisher,
+`requestFileUpload()` — the second command ADR-003 allows, with the file-rejection branch that
+splits `core`'s business `failure` from any other publication failure before it reaches
+`diagnosePublishFailure()`). The service is a `worker` in Node.js with no HTTP surface and no
 database, so several categories do not apply and stay empty until a story creates them.
 
 ## Components
@@ -52,7 +55,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 24**
+**Total: 25**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -133,6 +136,11 @@ N/A (no HTTP surface - ADR-001)
   rejecting the rest with `tope_excedido`.
 - **procesarAdjuntos()** (`src/domain/adjuntos/procesar.ts`) - Composes the three stages in the one
   correct order (particionar → deduplicar → aplicarTope) and accumulates their rejections.
+- **requestFileUpload()** (`src/domain/publicacion/upload-file.ts`) - Publishes
+  `files.request-upload` for one accepted attachment and returns a typed `UploadResultado` —
+  `concedido` (`fileId`/`uploadUrl`), `rechazado` (core's business `failure`, logged `warn`), or
+  `fallido` (any other publication failure via `diagnosePublishFailure()`, logged `error`). Never
+  throws for a rejection or a failure, never logs `uploadUrl`, never retries.
 
 See full details in [services.md](./services.md)
 
@@ -177,7 +185,7 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 30**
+**Total: 34**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -258,6 +266,18 @@ See full details in [test-helpers.md](./test-helpers.md)
   and after its checksum is computed, the closed catalog of rejection rules (string-literal union),
   the exact three-field rejection entry, and the parameterized `{ aceptados, rechazados }` shape
   shared by all four pipeline functions.
+- **FileUploadRequestPayload / FileUploadReply** (`src/domain/publicacion/files.types.ts`) - The
+  `files.request-upload` payload and validated success reply, both **inferred** from
+  `files.schema.ts` with `z.infer` — same criterion as `NewRequirementPayload`/`NewRequirementReply`.
+- **FileUploadValidationError** (`src/domain/publicacion/files.types.ts`) - The
+  `files.request-upload` payload failed the command contract. Carries the invalid field **paths**,
+  never their values — same criterion as `RequirementValidationError`.
+- **UploadResultado** (`src/domain/publicacion/files.types.ts`) - `requestFileUpload()`'s return
+  type: a discriminated union on `tipo` — `concedido` (`fileId`, `uploadUrl`), `rechazado` (core's
+  business `failure`, `codigo` only, no wrapped SDK error), `fallido` (any other publication
+  failure, reusing `PublishDiagnosis` imported, never redeclared). `nombre`/`mime` match
+  `AdjuntoRechazado`'s field names on purpose, so S-021 can treat both notice catalogs with the
+  same shape.
 
 See full details in [types.md](./types.md)
 
@@ -328,7 +348,7 @@ See full details in [constants.md](./constants.md)
 
 ## Validators
 
-**Total: 3**
+**Total: 5**
 
 - **envSchema** (`src/config/schema.ts`) - Zod shapes of the twenty-six environment variables in
   scope, with their defaults and the timeout floor. The source of truth for the `Env` type. S-017
@@ -342,5 +362,12 @@ See full details in [constants.md](./constants.md)
 - **newRequirementReplySchema** (`src/domain/publicacion/requirement.schema.ts`) - The success reply,
   `{ id }`. Deliberately **not** `z.coerce`, and `.loose()` so a field `core` starts sending tomorrow
   does not break the connector.
+- **fileUploadRequestSchema** (`src/domain/publicacion/files.schema.ts`) - The `files.request-upload`
+  payload contract: exactly four fields (`fileName`, `mimeType`, `fileSize`, `checksum`),
+  **`.strict()`** so a stray `uploader`/`actor` **fails** instead of being silently dropped.
+- **fileUploadReplySchema** (`src/domain/publicacion/files.schema.ts`) - The success reply,
+  `{ fileId, uploadUrl }`. `uploadUrl` is `z.string().min(1)`, deliberately **not**
+  `z.string().url()` (a signed S3 URL's query params can trip URL validators), and `.loose()` so a
+  field `core` starts sending tomorrow does not break the connector.
 
 See full details in [validators.md](./validators.md)
