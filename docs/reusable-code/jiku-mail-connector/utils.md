@@ -209,3 +209,46 @@ buildRequirementPayload(
 // { title: 'Falla en el login', description: 'No puedo entrar', projectId: 42,
 //   type: 'incidencia', priority: 'sin_prioridad', visibilityLevel: 'public', creator: 'machine-user-abc' }
 ```
+
+---
+
+## componerDescripcion
+
+**Location:** `src/domain/publicacion/description.ts`
+
+**Description:** Deterministically composes the requirement's final `description` from four
+already-resolved blocks, in this fixed order: body, rejection notices, upload-failure notices, file
+placeholders (always last). Pure, no injected dependencies — same spirit as `particionar()` /
+`deduplicar()` / `aplicarTope()` from S-017. Does **not** know the origin of any input: it does not
+know whether a rejection notice came from the local policy, from `core`, or from the cap being
+exceeded, and it does not know whether a placeholder is for an image — it only receives already-
+formatted strings from the caller (S-021 wires the real orchestration). Never truncates, never
+throws, never logs. Builds one flat array of only the non-empty parts and joins them with `'\n'`,
+so an empty block never leaves a dangling separator.
+
+**Signature:**
+
+```ts
+interface ComposicionDescripcionInput {
+  readonly cuerpoBase: string;
+  readonly avisosDeRechazo: readonly string[];
+  readonly avisosDeFallo: readonly string[];
+  readonly placeholders: readonly string[];
+}
+
+function componerDescripcion(input: ComposicionDescripcionInput): string
+```
+
+**Usage example:**
+
+```ts
+import { componerDescripcion } from '#domain/publicacion/description.js';
+
+componerDescripcion({
+  cuerpoBase: '(mail sin contenido)',
+  avisosDeRechazo: ['No se aceptó captura.png: tamaño excedido'],
+  avisosDeFallo: [],
+  placeholders: [],
+});
+// '(mail sin contenido)\nNo se aceptó captura.png: tamaño excedido'
+```
