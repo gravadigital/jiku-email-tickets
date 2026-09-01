@@ -168,6 +168,53 @@ describe('buildRequirementPayload', () => {
     expect('creator' in payload).toBe(false);
   });
 
+  // S-021, Task 2: fileIds condicional.
+  describe('fileIds condicional (S-021)', () => {
+    it('incluye fileIds con los ids acumulados, en el mismo orden', () => {
+      const payload = buildRequirementPayload(mail(), 42, 'test-machine-user', RUTEO_CONFIG, [101, 102]);
+
+      expect(payload.fileIds).toEqual([101, 102]);
+    });
+
+    it('con fileIds vacio, el payload NO incluye la clave en absoluto', () => {
+      const payload = buildRequirementPayload(mail(), 42, 'test-machine-user', RUTEO_CONFIG, []);
+
+      expect('fileIds' in payload).toBe(false);
+    });
+
+    it('sin el parametro fileIds (default), el payload tampoco incluye la clave', () => {
+      const payload = buildRequirementPayload(mail(), 42, 'test-machine-user', RUTEO_CONFIG);
+
+      expect('fileIds' in payload).toBe(false);
+    });
+
+    it('con fileIds no vacio, el resto del payload no cambia', () => {
+      const withFiles = buildRequirementPayload(mail(), 42, 'test-machine-user', RUTEO_CONFIG, [101]);
+      const withoutFiles = buildRequirementPayload(mail(), 42, 'test-machine-user', RUTEO_CONFIG, []);
+
+      expect(withFiles.title).toBe(withoutFiles.title);
+      expect(withFiles.description).toBe(withoutFiles.description);
+      expect(withFiles.type).toBe(withoutFiles.type);
+      expect(withFiles.priority).toBe(withoutFiles.priority);
+      expect(withFiles.visibilityLevel).toBe(withoutFiles.visibilityLevel);
+      expect(withFiles.creator).toBe(withoutFiles.creator);
+    });
+
+    it('no muta el array recibido, y el array del payload no es la misma referencia', () => {
+      const fileIds = [201, 202];
+      const payload = buildRequirementPayload(mail(), 42, 'test-machine-user', RUTEO_CONFIG, fileIds);
+
+      expect(fileIds).toEqual([201, 202]);
+      expect(payload.fileIds).not.toBe(fileIds);
+    });
+
+    it('produce un payload valido contra newRequirementSchema con fileIds incluido', () => {
+      const payload = buildRequirementPayload(mail(), 42, 'test-machine-user', RUTEO_CONFIG, [1, 2, 3]);
+
+      expect(newRequirementSchema.safeParse(payload).success).toBe(true);
+    });
+  });
+
   // TS-25 (Tarea 5): RequirementValidationError con un payload DERIVADO DE UN MAIL REAL (no un
   // literal fijo del modo de verificacion) sigue sin filtrar el valor rechazado — solo la ruta.
   it('un payload invalido derivado de un mail real no filtra su contenido, solo la ruta', () => {

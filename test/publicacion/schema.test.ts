@@ -79,9 +79,50 @@ describe('newRequirementSchema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects state and fileIds as unknown keys too', () => {
+  it('rejects state as an unknown key', () => {
     expect(newRequirementSchema.safeParse({ ...VALID, state: 'analisis' }).success).toBe(false);
-    expect(newRequirementSchema.safeParse({ ...VALID, fileIds: [1] }).success).toBe(false);
+  });
+
+  // S-021: fileIds pasa de clave desconocida (rechazada por .strict()) a campo declarado y
+  // opcional. Los casos de valided/invalidez del propio campo se cubren en el describe de abajo.
+  it('accepts fileIds as a declared field now, unlike state/actor', () => {
+    expect(newRequirementSchema.safeParse({ ...VALID, fileIds: [1] }).success).toBe(true);
+  });
+
+  // S-021, Task 1: fileIds con 1, 5, 10 elementos -> valido.
+  it.each([1, 5, 10])('accepts fileIds with %i elements', (count) => {
+    const fileIds = Array.from({ length: count }, (_, i) => i + 1);
+
+    expect(newRequirementSchema.safeParse({ ...VALID, fileIds }).success).toBe(true);
+  });
+
+  // S-021, Task 1, AC-4: fileIds: [] (array vacio) es RECHAZADO -- la ausencia de adjuntos
+  // vinculados se modela con la CLAVE ausente, nunca con un array vacio.
+  it('rejects fileIds as an empty array', () => {
+    const result = newRequirementSchema.safeParse({ ...VALID, fileIds: [] });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.path).toEqual(['fileIds']);
+  });
+
+  // S-021, Task 1, AC-5: fileIds con 11 elementos es RECHAZADO (.max(10), el maxItems del contrato).
+  it('rejects fileIds with 11 elements', () => {
+    const fileIds = Array.from({ length: 11 }, (_, i) => i + 1);
+
+    expect(newRequirementSchema.safeParse({ ...VALID, fileIds }).success).toBe(false);
+  });
+
+  // S-021, Task 1, AC-6: fileIds ausente sigue siendo valido -- retro-compatibilidad con el modo de
+  // verificacion y con mails sin adjuntos.
+  it('still accepts a payload with no fileIds at all', () => {
+    expect('fileIds' in VALID).toBe(false);
+    expect(newRequirementSchema.safeParse(VALID).success).toBe(true);
+  });
+
+  it('rejects fileIds with a non-positive or non-integer element', () => {
+    expect(newRequirementSchema.safeParse({ ...VALID, fileIds: [0] }).success).toBe(false);
+    expect(newRequirementSchema.safeParse({ ...VALID, fileIds: [-1] }).success).toBe(false);
+    expect(newRequirementSchema.safeParse({ ...VALID, fileIds: [1.5] }).success).toBe(false);
   });
 
   it('produces no valid payload out of an empty object', () => {

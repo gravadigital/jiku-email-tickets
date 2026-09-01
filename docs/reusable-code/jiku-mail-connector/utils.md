@@ -184,6 +184,14 @@ explicitly, not because the connector decides identity. Renamed in the S-016 cat
 original story (REQ-003) anticipated a `buildMailPayload()`/`truncateTitle()` pair that does not exist
 in the implemented code — the truncation lives inline inside this single function instead.
 
+**Since S-021:** accepts an optional `fileIds: readonly number[]` (default `[]`), the accumulated ids
+of successfully-uploaded attachments. The returned object includes the `fileIds` key **only** when the
+array has at least one element — never `fileIds: undefined`, never `fileIds: []` — via a conditional
+spread, copying the array rather than keeping the caller's mutable reference. The `description` param
+is still the simple `cuerpoBase`: composing the four-block description (with rejection/failure notices
+and placeholders) is the caller's job (`tick.ts`, via `componerDescripcion()`), not this function's —
+it stays a single-responsibility "assemble the payload from already-resolved pieces."
+
 **Signature:**
 
 ```ts
@@ -192,6 +200,7 @@ function buildRequirementPayload(
   projectId: number,
   userId: string,
   ruteoConfig: Pick<RuteoConfig, 'placeholderTitle' | 'placeholderBody'>,
+  fileIds?: readonly number[], // default []
 ): NewRequirementPayload
 ```
 
@@ -205,9 +214,43 @@ buildRequirementPayload(
   42,
   'machine-user-abc',
   { placeholderTitle: 'Ticket recibido por mail', placeholderBody: '(mail sin contenido)' },
+  [101, 102],
 );
 // { title: 'Falla en el login', description: 'No puedo entrar', projectId: 42,
-//   type: 'incidencia', priority: 'sin_prioridad', visibilityLevel: 'public', creator: 'machine-user-abc' }
+//   type: 'incidencia', priority: 'sin_prioridad', visibilityLevel: 'public', creator: 'machine-user-abc',
+//   fileIds: [101, 102] }
+```
+
+---
+
+## resolveCuerpoBase
+
+**Location:** `src/domain/publicacion/mail-payload.ts`
+
+**Description:** Extracted in S-021 from what used to be inline logic inside
+`buildRequirementPayload()`: trim the mail body, replace with `ruteoConfig.placeholderBody` if the
+trimmed result is `''`, no length cap. Exists as its own function so `tick.ts` can compute the exact
+same `cuerpoBase` it needs to pass into `componerDescripcion()` — one calculation, shared, instead of
+being duplicated (and risking divergence) between `mail-payload.ts` and `tick.ts`.
+
+**Signature:**
+
+```ts
+function resolveCuerpoBase(
+  body: string,
+  ruteoConfig: Pick<RuteoConfig, 'placeholderBody'>,
+): string
+```
+
+**Usage example:**
+
+```ts
+import { resolveCuerpoBase } from '#domain/publicacion/mail-payload.js';
+
+resolveCuerpoBase('   ', { placeholderBody: '(mail sin contenido)' });
+// '(mail sin contenido)'
+resolveCuerpoBase('No puedo entrar', { placeholderBody: '(mail sin contenido)' });
+// 'No puedo entrar'
 ```
 
 ---

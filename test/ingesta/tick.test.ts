@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
@@ -1269,6 +1271,309 @@ describe('runTick — el escenario de extremo a extremo: mail de un cliente exte
         descartados: 0,
         fallidos: 0,
       });
+    } finally {
+      await local.stop();
+      responder = await respondTo(
+        bus.connection,
+        'requirements.new',
+        Array.from({ length: 200 }, (_, i) => ({ status: 'success' as const, data: { id: i + 1 } })),
+      );
+    }
+  });
+});
+
+/**
+ * S-021, Task 5 — TS-14: un mail con un adjunto cuyo permiso de subida falla (nadie responde
+ * `files.request-upload` en esta suite, mismo criterio que `beforeAll` documenta: solo
+ * `requirements.new` tiene responder permanente) NO cancela el requisito (CA-6, CA-7) y la linea
+ * `'tick completado'` sigue teniendo EXACTAMENTE los cinco contadores, sin un sexto de archivos
+ * (CA-10).
+ */
+describe('runTick — un adjunto fallido no cancela el requisito ni agrega un sexto contador (S-021, TS-14)', () => {
+  function mailConAdjunto(uid: number): Buffer {
+    return Buffer.from(
+      `Message-Id: <con-adjunto-${String(uid)}@fixtures.local>\r\n` +
+        'From: "Cliente" <cliente@cliente.com>\r\n' +
+        'To: tickets+alfa@grava.io\r\n' +
+        'Subject: Con adjunto\r\n' +
+        'Content-Type: multipart/mixed; boundary="ATT-BOUNDARY"\r\n' +
+        'MIME-Version: 1.0\r\n\r\n' +
+        '--ATT-BOUNDARY\r\n' +
+        'Content-Type: text/plain; charset=utf-8\r\n\r\n' +
+        'Adjunto el documento solicitado.\r\n' +
+        '--ATT-BOUNDARY\r\n' +
+        'Content-Type: application/pdf\r\n' +
+        'Content-Disposition: attachment; filename="reporte.pdf"\r\n' +
+        'Content-Transfer-Encoding: base64\r\n\r\n' +
+        'JVBERi0xLjQgZmFrZSBwZGYgY29udGVudCBmb3IgZml4dHVyZSBwdXJwb3NlcyBvbmx5\r\n' +
+        '--ATT-BOUNDARY--\r\n',
+    );
+  }
+
+  it('el mail se cuenta creado (no fallido), y tick completado tiene exactamente 5 claves', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source: MailSource = {
+      async searchUnseen(): Promise<number[]> {
+        return [1];
+      },
+      async fetch(uid: number): Promise<RawMessage> {
+        return { uid, source: mailConAdjunto(uid) };
+      },
+      async markSeen(): Promise<void> {
+        // no-op
+      },
+    };
+
+    await runTick(source, BASE_CONFIG, logger, bus.client);
+
+    // CA-7: el mail se cuenta CREADO, no fallido -- el fallo de subida del adjunto no cancela el
+    // requisito.
+    const tick = tickLine(capture);
+    expect(tick).toMatchObject({ ingestados: 1, parseados: 1, creados: 1, descartados: 0, fallidos: 0 });
+
+    // CA-10: exactamente las cinco claves de siempre, sin un sexto contador de archivos -- se
+    // excluyen los campos estructurales que Pino agrega a TODA linea (level, time, msg, env,
+    // service), que no son contadores de negocio.
+    const PINO_STRUCTURAL_FIELDS = new Set(['level', 'time', 'msg', 'env', 'service']);
+    const counterKeys = Object.keys(tick ?? {}).filter((key) => !PINO_STRUCTURAL_FIELDS.has(key));
+    expect(counterKeys.sort()).toEqual(
+      ['ingestados', 'parseados', 'creados', 'descartados', 'fallidos'].sort(),
+    );
+
+    // CA-9: el log de exito suma los dos conteos de archivos -- 0 vinculados (el permiso fallo),
+    // 1 con aviso (el fallo de subida de ESE adjunto).
+    const successLine = capture.lines().find((line) => line['msg'] === 'requisito creado en Jiku');
+    expect(successLine).toMatchObject({ archivosVinculados: 0, archivosConAviso: 1 });
+  });
+});
+
+/**
+ * S-021, Task 5 — TS-18: ninguna linea de log de un tick completo con adjuntos incluye la
+ * `uploadUrl` -- en este archivo el permiso siempre falla (sin responder de
+ * `files.request-upload`), y se afirma igual sobre la ausencia de la clave/valor por si alguna
+ * suite futura agrega un responder de exito en este archivo.
+ */
+describe('runTick — ninguna linea de un tick con adjuntos incluye uploadUrl (S-021, TS-18)', () => {
+  it('la palabra uploadUrl no aparece en ninguna linea cruda', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+    const source: MailSource = {
+      async searchUnseen(): Promise<number[]> {
+        return [1];
+      },
+      async fetch(uid: number): Promise<RawMessage> {
+        return {
+          uid,
+          source: Buffer.from(
+            'Message-Id: <con-adjunto-url@fixtures.local>\r\n' +
+              'From: "Cliente" <cliente@cliente.com>\r\n' +
+              'To: tickets+alfa@grava.io\r\n' +
+              'Subject: Con adjunto\r\n' +
+              'Content-Type: multipart/mixed; boundary="ATT-BOUNDARY"\r\n' +
+              'MIME-Version: 1.0\r\n\r\n' +
+              '--ATT-BOUNDARY\r\n' +
+              'Content-Type: text/plain; charset=utf-8\r\n\r\n' +
+              'Adjunto el documento solicitado.\r\n' +
+              '--ATT-BOUNDARY\r\n' +
+              'Content-Type: application/pdf\r\n' +
+              'Content-Disposition: attachment; filename="reporte.pdf"\r\n' +
+              'Content-Transfer-Encoding: base64\r\n\r\n' +
+              'JVBERi0xLjQgZmFrZSBwZGYgY29udGVudCBmb3IgZml4dHVyZSBwdXJwb3NlcyBvbmx5\r\n' +
+              '--ATT-BOUNDARY--\r\n',
+          ),
+        };
+      },
+      async markSeen(): Promise<void> {
+        // no-op
+      },
+    };
+
+    await runTick(source, BASE_CONFIG, logger, bus.client);
+
+    const raw = capture.raw().join('\n');
+    expect(raw).not.toContain('uploadUrl');
+  });
+});
+
+/**
+ * S-021, Task 5 — TS-12: archivos huerfanos. Tres adjuntos suben con exito (fileId 201/202/203) y
+ * DESPUES `requirements.new` falla -- `publishRequirementFromMail()` relanza `PublishError`, el
+ * tick cuenta el mail como `fallidos`, y el conector NO publica ningun comando de compensacion ni
+ * loguea una lista de `fileIds` abandonados mas alla del `PublishError` ya logueado (CA-8).
+ */
+describe('runTick — archivos huerfanos: tres adjuntos suben bien y requirements.new falla despues (S-021, TS-12)', () => {
+  function mailConTresAdjuntos(uid: number): Buffer {
+    return Buffer.from(
+      `Message-Id: <huerfanos-${String(uid)}@fixtures.local>\r\n` +
+        'From: "Cliente" <cliente@cliente.com>\r\n' +
+        'To: tickets+alfa@grava.io\r\n' +
+        'Subject: Con tres adjuntos\r\n' +
+        'Content-Type: multipart/mixed; boundary="ATT-BOUNDARY"\r\n' +
+        'MIME-Version: 1.0\r\n\r\n' +
+        '--ATT-BOUNDARY\r\n' +
+        'Content-Type: text/plain; charset=utf-8\r\n\r\n' +
+        'Tres archivos adjuntos.\r\n' +
+        '--ATT-BOUNDARY\r\n' +
+        'Content-Type: image/png\r\n' +
+        'Content-Disposition: attachment; filename="uno.png"\r\n' +
+        'Content-Transfer-Encoding: base64\r\n\r\n' +
+        'aW1hZ2VuLXVuby1jb250ZW5pZG8=\r\n' +
+        '--ATT-BOUNDARY\r\n' +
+        'Content-Type: image/png\r\n' +
+        'Content-Disposition: attachment; filename="dos.png"\r\n' +
+        'Content-Transfer-Encoding: base64\r\n\r\n' +
+        'aW1hZ2VuLWRvcy1jb250ZW5pZG8=\r\n' +
+        '--ATT-BOUNDARY\r\n' +
+        'Content-Type: image/png\r\n' +
+        'Content-Disposition: attachment; filename="tres.png"\r\n' +
+        'Content-Transfer-Encoding: base64\r\n\r\n' +
+        'aW1hZ2VuLXRyZXMtY29udGVuaWRv\r\n' +
+        '--ATT-BOUNDARY--\r\n',
+    );
+  }
+
+  it('el mail se cuenta fallido, sin comando de compensacion ni lista de fileIds abandonados', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+
+    // Servidor HTTP local: el PUT de los tres adjuntos siempre sube con exito.
+    const localServer: Server = createServer((req, res) => {
+      req.on('data', () => undefined);
+      req.on('end', () => {
+        res.statusCode = 200;
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => localServer.listen(0, '127.0.0.1', resolve));
+    const address = localServer.address() as AddressInfo;
+    const localUploadUrl = `http://127.0.0.1:${String(address.port)}/upload`;
+
+    // Responder LOCAL para files.request-upload (el permanente del beforeAll no contesta este
+    // subject): concede permiso para los tres adjuntos, con fileId incremental.
+    const uploadResponder = await respondTo(bus.connection, 'files.request-upload', [
+      { status: 'success', data: { fileId: 201, uploadUrl: localUploadUrl } },
+      { status: 'success', data: { fileId: 202, uploadUrl: localUploadUrl } },
+      { status: 'success', data: { fileId: 203, uploadUrl: localUploadUrl } },
+    ]);
+
+    // requirements.new falla DESPUES de que los tres adjuntos ya subieron -- se da de baja el
+    // responder de exito permanente de este archivo y se sustituye por uno que falla, solo para
+    // este test.
+    await responder?.stop();
+    const failingResponder = await respondTo(bus.connection, 'requirements.new', {
+      status: 'failure',
+      errorCode: 'caller_not_authorized',
+    });
+
+    const source: MailSource = {
+      async searchUnseen(): Promise<number[]> {
+        return [1];
+      },
+      async fetch(uid: number): Promise<RawMessage> {
+        return { uid, source: mailConTresAdjuntos(uid) };
+      },
+      async markSeen(): Promise<void> {
+        // no-op
+      },
+    };
+
+    try {
+      await runTick(source, BASE_CONFIG, logger, bus.client);
+
+      // Los tres adjuntos SI llegaron a subir (3 request-upload observados).
+      expect(uploadResponder.count()).toBe(3);
+
+      // El mail se cuenta FALLIDO -- CA-8: requirements.new fallo, sin reintento.
+      expect(tickLine(capture)).toMatchObject({ creados: 0, fallidos: 1 });
+
+      // Ningun comando de compensacion: el UNICO subject de files.request-upload observado son
+      // los 3 permisos de subida ya contados arriba, y ningun otro comando se publico para
+      // "deshacer" o "liberar" los archivos huerfanos.
+      const failureLine = capture.lines().find((line) => line['level'] === 'error');
+      expect(failureLine).toMatchObject({ diagnosis: 'core_rechazo_por_rol' });
+
+      // Ninguna linea de log lleva una lista de fileIds abandonados (201/202/203) fuera del
+      // PublishError ya logueado -- se confirma que ningun campo de contexto se llama algo como
+      // fileIds/orphanedFileIds/archivosHuerfanos en ninguna linea.
+      for (const line of capture.lines()) {
+        expect(line).not.toHaveProperty('fileIds');
+        expect(line).not.toHaveProperty('orphanedFileIds');
+        expect(line).not.toHaveProperty('archivosHuerfanos');
+      }
+    } finally {
+      await uploadResponder.stop();
+      await failingResponder.stop();
+      await new Promise<void>((resolve) => localServer.close(() => resolve()));
+      responder = await respondTo(
+        bus.connection,
+        'requirements.new',
+        Array.from({ length: 200 }, (_, i) => ({ status: 'success' as const, data: { id: i + 1 } })),
+      );
+    }
+  });
+});
+
+/**
+ * S-021, Task 5 — TS-7: mail con UN adjunto rechazado por la politica LOCAL (`.exe`, nunca llega
+ * a pedir permiso de subida) y cuerpo "No puedo entrar". El requisito se crea igual (CA-6, CA-7):
+ * `counters.creados += 1`, la description incluye el aviso de rechazo.
+ */
+describe('runTick — rechazo local (.exe) no cancela el requisito: se cuenta creado (S-021, TS-7)', () => {
+  function mailConExeRechazado(uid: number): Buffer {
+    return Buffer.from(
+      `Message-Id: <rechazo-local-${String(uid)}@fixtures.local>\r\n` +
+        'From: "Cliente" <cliente@cliente.com>\r\n' +
+        'To: tickets+alfa@grava.io\r\n' +
+        'Subject: No puedo entrar\r\n' +
+        'Content-Type: multipart/mixed; boundary="ATT-BOUNDARY"\r\n' +
+        'MIME-Version: 1.0\r\n\r\n' +
+        '--ATT-BOUNDARY\r\n' +
+        'Content-Type: text/plain; charset=utf-8\r\n\r\n' +
+        'No puedo entrar\r\n' +
+        '--ATT-BOUNDARY\r\n' +
+        'Content-Type: application/x-msdownload\r\n' +
+        'Content-Disposition: attachment; filename="virus.exe"\r\n' +
+        'Content-Transfer-Encoding: base64\r\n\r\n' +
+        'TVo=\r\n' +
+        '--ATT-BOUNDARY--\r\n',
+    );
+  }
+
+  it('el requisito se crea, counters.creados += 1, con el aviso de rechazo en la description', async () => {
+    const { logger, capture } = testLoggerWithCapture();
+
+    // Sin responder de files.request-upload: el rechazo del .exe es LOCAL (particionar(), antes de
+    // tocar el bus) -- si la orquestacion llegara a publicar un permiso para el, este test lo
+    // detectaria porque local.payloads() de requirements.new seguiria viendo un unico mensaje pero
+    // ninguna aserción de esta suite depende del bus de files.request-upload, precisamente porque
+    // no deberia usarlo.
+    const local = await respondTo(bus.connection, 'requirements.new', {
+      status: 'success',
+      data: { id: 555 },
+    });
+
+    const source: MailSource = {
+      async searchUnseen(): Promise<number[]> {
+        return [1];
+      },
+      async fetch(uid: number): Promise<RawMessage> {
+        return { uid, source: mailConExeRechazado(uid) };
+      },
+      async markSeen(): Promise<void> {
+        // no-op
+      },
+    };
+
+    try {
+      await runTick(source, BASE_CONFIG, logger, bus.client);
+
+      expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0, descartados: 0 });
+
+      const payload = local.payloads()[0] as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('fileIds');
+      expect(typeof payload['description']).toBe('string');
+      expect(payload['description'] as string).toContain('virus.exe');
+
+      const successLine = capture.lines().find((line) => line['msg'] === 'requisito creado en Jiku');
+      expect(successLine).toMatchObject({ archivosVinculados: 0, archivosConAviso: 1 });
     } finally {
       await local.stop();
       responder = await respondTo(

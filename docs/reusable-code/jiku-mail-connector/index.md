@@ -30,7 +30,7 @@ N/A (Backend service)
 
 ## Utils/Helpers
 
-**Total: 8**
+**Total: 9**
 
 - **cleanSubject()** (`src/domain/ingesta/subject.ts`) - Strips `Re:`/`Fwd:`/`RV:` prefixes
   iteratively and case-insensitively. An all-prefix subject is left as `''`, a valid state.
@@ -49,7 +49,13 @@ N/A (Backend service)
   five markers. Ported unchanged from the service in production; never reinvented.
 - **buildRequirementPayload()** (`src/domain/publicacion/mail-payload.ts`) - Builds the
   `requirements.new` payload from a routed mail: trim → truncate → placeholder, in that exact order,
-  for `title` and `description`. Pure; validates nothing and publishes nothing.
+  for `title` and `description`. Pure; validates nothing and publishes nothing. Since S-021, accepts
+  an optional `fileIds: readonly number[]` and includes the key only when it has at least one
+  element (never `fileIds: []`).
+- **resolveCuerpoBase()** (`src/domain/publicacion/mail-payload.ts`) - Extracted in S-021: trim →
+  placeholder-if-empty for the mail body, shared by `buildRequirementPayload()` and by
+  `tick.ts` when composing the final `description` with `componerDescripcion()` — one calculation,
+  not duplicated in two places.
 - **componerDescripcion()** (`src/domain/publicacion/description.ts`) - Deterministically composes
   `description` from four already-resolved blocks (body, rejection notices, upload-failure notices,
   placeholders), always in that order, never truncating. Pure; does not know the origin of any input.
@@ -62,7 +68,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 26**
+**Total: 27**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -94,7 +100,9 @@ N/A (no HTTP surface - ADR-001)
 - **publishRequirementFromMail()** (`src/domain/publicacion/publish-requirement.ts`) - Sibling of
   `publishVerificationRequirement()`: publishes the mail-derived `requirements.new` payload, adds the
   mail's `messageId` to both the success and the error log context, and rethrows on failure without
-  retrying.
+  retrying. Since S-021, accepts optional `fileIds`, an already-composed `description`, and an
+  `archivosConAviso` count — the success log line sums `archivosVinculados`/`archivosConAviso` to the
+  same line, never a second one; the failure log is untouched (orphaned files get no extra log).
 - **diagnosePublishFailure()** (`src/domain/publicacion/publish-errors.ts`) - Classifies a publication
   failure by **SDK class and error code**, never by message text, into the diagnosis of *which system
   refused*. An unknown code is a normal outcome and is never mapped to a known case.
@@ -152,6 +160,15 @@ N/A (no HTTP surface - ADR-001)
   attachment's byte to a prefigured `uploadUrl`, native `fetch` + `AbortSignal.timeout()`, no bus
   involved at all. Returns a typed `PutResultado` (`subido`/`fallido`), never throws, never logs
   `uploadUrl`, never retries.
+- **procesarAdjuntosDelMail()** (`src/domain/publicacion/procesar-adjuntos-mail.ts`) - S-021's central
+  orchestrator: composes `procesarAdjuntos()` + per-accepted-attachment `requestFileUpload()` →
+  immediate `uploadFileContent()`, strictly serial (never `Promise.all`), never replenishing a
+  `tope_excedido` excedente when a `PUT` fails. Wraps each attachment's full processing in its own
+  `try/catch` to isolate an unexpected programming error without aborting the mail's remaining
+  attachments. Never throws for a business outcome — always returns `{ fileIds, avisosDeRechazo,
+  avisosDeFallo, placeholders }`. `requestFileUpload`/`uploadFileContent` are injectable via `deps`
+  (default: the real implementations), same pattern as `Normalize` in `tick.ts`, so a test double can
+  force the unexpected-exception path.
 
 See full details in [services.md](./services.md)
 

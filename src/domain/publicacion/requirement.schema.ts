@@ -69,6 +69,18 @@ export const newRequirementSchema = z
     // incluye y sigue siendo un payload valido. `actor` sigue siendo la UNICA clave de identidad
     // que el `.strict()` rechaza de plano.
     creator: z.string().min(1).optional(),
+
+    // OPCIONAL, agregado por S-021 (FG-4). `.min(1)`: la clave AUSENTE es la representacion de
+    // "cero adjuntos vinculados", nunca un array vacio -- `fileIds: []` se rechaza a proposito
+    // (CA-3: "nunca se manda fileIds: []"). Quien arma el payload (`buildRequirementPayload()`)
+    // es responsable de omitir la clave por completo cuando no hay ids, no de mandarla vacia.
+    // `.max(10)`: documenta en el propio schema el `maxItems` del contrato, mismo criterio que
+    // `TITLE_MAX_LENGTH` para `title` -- el tope en si ya lo aplica `aplicarTope()` (S-017), este
+    // `.max()` es la garantia de borde de ESTE schema, no una segunda aplicacion del tope.
+    // Sin `.default()`: mismo criterio que los enums de arriba, este campo modela el contrato de
+    // `core`, no la politica del conector -- la condicionalidad de incluir la clave es
+    // responsabilidad del llamador, no del schema.
+    fileIds: z.array(z.number().int().positive()).min(1).max(10).optional(),
   })
   .strict();
 
