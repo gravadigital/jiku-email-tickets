@@ -55,11 +55,29 @@ const REQUIRED_VARIABLES = [
  *
  * HOME va explicito y apunta a un directorio que no existe, para que el `loadConfig()` del SDK no
  * levante el `~/.config/jiku/config.yaml` del desarrollador y cambie el resultado del test.
+ *
+ * DOTENV_DISABLED=true va por la MISMA razon que HOME, aplicada al otro archivo del disco que el
+ * hijo podria levantar: el `.env` del desarrollador. Los entry points ya no hacen
+ * `import 'dotenv/config'` incondicional — llaman a `loadDotenvUnlessTest()` (src/config/dotenv.ts)
+ * — pero el hijo NO HEREDA el NODE_ENV=test que vitest le pone al proceso padre, justamente porque
+ * este helper declara el entorno desde cero. Sin esta linea el guard no lo cubre y un `.env` en el
+ * disco vuelve a decidir el resultado de los casos.
+ *
+ * Y ES DOTENV_DISABLED, NO NODE_ENV=test, POR UNA RAZON CONCRETA: varios casos de este archivo le
+ * declaran al hijo un NODE_ENV propio en `extra` —`production`, porque lo que prueban es el formato
+ * de la linea de arranque— y ese valor tiene que ganar. Con `NODE_ENV: 'test'` aca, el spread de
+ * `extra` lo pisaba y REACTIVABA la carga del `.env` en exactamente esos casos. Las dos preguntas
+ * —"que NODE_ENV declara el caso" y "se carga el archivo"— son independientes, asi que van en dos
+ * variables independientes: `extra` puede pisar la primera sin tocar la segunda.
+ *
+ * Va antes del spread igual, para que un caso pueda desactivarla explicitamente si algun dia hace
+ * falta probar la carga real del `.env`.
  */
 function BASE_ENV_WITH(extra: Record<string, string>): NodeJS.ProcessEnv {
   return {
     PATH: process.env['PATH'],
     HOME: '/nonexistent-home-for-tests',
+    DOTENV_DISABLED: 'true',
     ...extra,
   };
 }

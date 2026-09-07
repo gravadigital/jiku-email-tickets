@@ -137,6 +137,23 @@ Las veintiséis variables que valida el arranque. Las dos credenciales del bus s
 montados**, no su contenido. **`IMAP_PASSWORD` es la única que lleva un secreto en su valor** — y por
 eso llega por entorno y nunca se hornea en la imagen (NFR-S05).
 
+#### El `.env` y por qué no se carga en los tests
+
+Los dos entry points cargan un `.env` del directorio de trabajo si existe, y lo que ya esté en el
+entorno real siempre gana. **En producción no hay ninguno**: la imagen no lo lleva y la
+configuración entra por variables del orquestador.
+
+La carga **se saltea** con `NODE_ENV=test` o con `DOTENV_DISABLED=true`, y eso no es un detalle
+cosmético: `dotenv` no pisa lo que ya existe, pero **sí rellena lo que falta**, así que un `.env` en
+la máquina del desarrollador se colaba en la suite completando variables que cada caso deja
+deliberadamente ausentes. El síntoma era una suite que pasaba o fallaba según el contenido de un
+archivo **no versionado** — verde en CI, rojo en local, y el diff sin explicar nada.
+
+Son **dos** interruptores y no uno porque son dos preguntas independientes: `NODE_ENV` dice *qué es*
+el proceso y `DOTENV_DISABLED` dice *si carga el archivo*. Los tests que lanzan el `dist/` como
+proceso hijo necesitan declararle un `NODE_ENV` propio (`production`, para probar el formato de la
+línea de arranque) **sin** por eso reactivar la carga del `.env`.
+
 **`JIKU_VERIFY_PROJECT_ID` es la única cuya obligatoriedad depende del proceso**: la lee `verify` y
 nadie más, así que el worker arranca sin ella. No es una excepción a la validación estricta — es la
 misma regla aplicada donde corresponde: la variable se valida como entero positivo si está
@@ -153,7 +170,8 @@ declarada, y su ausencia sólo es un error para el proceso que la necesita.
 | `JIKU_ISSUER` | No | `https://id.grava.io` | Issuer de Zitadel |
 | `JIKU_TIMEOUT` | No | `15000` (ms) | Piso de 15000: valores menores se elevan. No bajarlo |
 | `LOG_LEVEL` | No | `info` | `trace\|debug\|info\|warn\|error\|fatal\|silent` |
-| `NODE_ENV` | No | `production` | Sólo `development` activa `pino-pretty`, que **no está en la imagen** |
+| `NODE_ENV` | No | `production` | Sólo `development` activa `pino-pretty`, que **no está en la imagen**. `test` además impide que se cargue el `.env` |
+| `DOTENV_DISABLED` | No | — | `true` impide que los entry points carguen un `.env` del disco. Para tests y desarrollo local; **en producción no hace falta** — la imagen no lleva `.env` |
 | `IMAP_HOST` | **Sí** | — | Host del servidor IMAP de la casilla de tickets |
 | `IMAP_PORT` | No | `993` | IMAPS. Entero entre 1 y 65535 |
 | `IMAP_USER` | **Sí** | — | Usuario de la casilla |

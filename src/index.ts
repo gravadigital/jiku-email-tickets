@@ -1,10 +1,15 @@
-import 'dotenv/config';
-
+import { loadDotenvUnlessTest } from '#config/dotenv.js';
 import { scheduleTick, waitForCurrentTick } from '#domain/ingesta/scheduler.js';
 import { closeBus } from '#infra/bus/connection.js';
 import { createShutdownHandler } from '#shared/shutdown.js';
 
 import { reportStartupFailure, runStartup } from './startup.js';
+
+// ANTES QUE CUALQUIER OTRA COSA, y en particular antes de `main()`: `loadEnvFromProcess()` lee el
+// entorno ya poblado. Es una LLAMADA y no el viejo `import 'dotenv/config'` porque bajo
+// NODE_ENV=test no debe cargar nada — ver src/config/dotenv.ts. Los imports de arriba no leen
+// configuracion al evaluarse, asi que este punto es suficientemente temprano.
+loadDotenvUnlessTest();
 
 /**
  * El entry point del WORKER (`npm run start`).
