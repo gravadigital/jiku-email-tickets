@@ -137,12 +137,17 @@ Las veintiséis variables que valida el arranque. Las dos credenciales del bus s
 montados**, no su contenido. **`IMAP_PASSWORD` es la única que lleva un secreto en su valor** — y por
 eso llega por entorno y nunca se hornea en la imagen (NFR-S05).
 
+**`JIKU_VERIFY_PROJECT_ID` es la única cuya obligatoriedad depende del proceso**: la lee `verify` y
+nadie más, así que el worker arranca sin ella. No es una excepción a la validación estricta — es la
+misma regla aplicada donde corresponde: la variable se valida como entero positivo si está
+declarada, y su ausencia sólo es un error para el proceso que la necesita.
+
 | Variable | Req. | Default | Qué es |
 |---|---|---|---|
 | `JIKU_CREDS` | **Sí** | — | **Ruta** al creds del sentinel de NATS (montado read-only) |
 | `JIKU_KEY_FILE` | **Sí** | — | **Ruta** a la key JSON del machine user (montada read-only) |
 | `JIKU_PROJECT_ID` | **Sí** | — | Project de **Zitadel** (UUID). Sin él el token no lleva roles |
-| `JIKU_VERIFY_PROJECT_ID` | **Sí** | — | Proyecto de **Jiku** (entero) donde `verify` crea el requisito de prueba. **No es `JIKU_PROJECT_ID`** |
+| `JIKU_VERIFY_PROJECT_ID` | Sólo `verify` | — | Proyecto de **Jiku** (entero) donde `verify` crea el requisito de prueba. **No es `JIKU_PROJECT_ID`**: aquél es el project de Zitadel. **El worker no la lee**, así que un despliegue que sólo corre el worker no la declara; `verify` sale distinto de cero si falta |
 | `JIKU_INSTANCE` | No | `dev` | Primer segmento del subject |
 | `JIKU_SERVERS` | No | `nats://localhost:4222` | Endpoint del bus |
 | `JIKU_ISSUER` | No | `https://id.grava.io` | Issuer de Zitadel |

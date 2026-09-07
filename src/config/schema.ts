@@ -193,7 +193,19 @@ export const envSchema = {
   JIKU_CREDS: z.string().min(1),
   JIKU_KEY_FILE: z.string().min(1),
   JIKU_PROJECT_ID: z.string().min(1),
-  JIKU_VERIFY_PROJECT_ID: z.coerce.number().int().positive(),
+  // OPCIONAL, a diferencia de las tres de arriba, y la diferencia es de ALCANCE: las tres del bus
+  // las necesita CUALQUIER proceso —el worker no arranca sin ellas—, mientras que esta la lee UN
+  // SOLO consumidor, `src/verify.ts`, que es un script aparte que el `start` nunca invoca.
+  //
+  // Exigirla siempre obligaba a todo despliegue a declarar un proyecto de prueba para correr el
+  // worker, que no lo usa jamas. El fail-fast NO se pierde, se MUEVE al unico punto donde el valor
+  // significa algo: `verify` sale distinto de cero con un mensaje que la nombra si falta (ver
+  // `requireVerifyProjectId()` en src/verify.ts).
+  //
+  // La validacion del VALOR no se relaja: declarada, sigue siendo entero positivo, y un `0` o un
+  // `no-es-int` siguen sin arrancar — para eso esta el `.optional()` DESPUES del `.positive()`, y
+  // no un `.or(z.undefined())` que aceptaria cualquier cosa.
+  JIKU_VERIFY_PROJECT_ID: z.coerce.number().int().positive().optional(),
 
   // --- Con default ---
   JIKU_INSTANCE: z.string().min(1).default('dev'),

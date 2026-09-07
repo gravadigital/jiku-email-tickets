@@ -48,7 +48,13 @@ const VALID_ENV = {
   TICKET_MAP: '{"alfa":42,"beta":7}',
 };
 
-/** Las ocho requeridas, en el orden alfabetico en que el formateador las lista. */
+/**
+ * Las SIETE requeridas, en el orden alfabetico en que el formateador las lista.
+ *
+ * Eran ocho hasta que `JIKU_VERIFY_PROJECT_ID` se volvio OPCIONAL: la lee un solo consumidor
+ * (`src/verify.ts`) y el worker no la toca, asi que su fail-fast se mudo a ese script
+ * (`requireVerifyProjectId()`) en vez de exigirsela a todo despliegue.
+ */
 const ALL_REQUIRED = [
   'IMAP_HOST',
   'IMAP_PASSWORD',
@@ -56,7 +62,6 @@ const ALL_REQUIRED = [
   'JIKU_CREDS',
   'JIKU_KEY_FILE',
   'JIKU_PROJECT_ID',
-  'JIKU_VERIFY_PROJECT_ID',
   'TICKET_MAP',
 ];
 
@@ -77,6 +82,20 @@ describe('loadEnv', () => {
     for (const name of ALL_REQUIRED) {
       expect(err.message).toContain(name);
     }
+  });
+
+  // El contracaso de TS-1 para la unica variable que SALIO de esa lista. Afirma la propiedad
+  // completa desde el borde publico —no solo que el schema resuelve, sino que `loadEnv()` NO LANZA—
+  // que es lo que hace que un despliegue que solo corre el worker no tenga que declarar un proyecto
+  // de prueba que nunca usa. El fail-fast vive ahora en `requireVerifyProjectId()` (src/verify.ts).
+  it('resolves without JIKU_VERIFY_PROJECT_ID: only verify needs it', () => {
+    const { JIKU_VERIFY_PROJECT_ID: _omitted, ...withoutVerify } = VALID_ENV;
+
+    const env = loadEnv(withoutVerify);
+
+    expect(env.JIKU_VERIFY_PROJECT_ID).toBeUndefined();
+    // Lo demas resuelve intacto: la variable salio de las requeridas sin arrastrar nada consigo.
+    expect(env.JIKU_PROJECT_ID).toBe(VALID_ENV.JIKU_PROJECT_ID);
   });
 
   it('aborts when a single required variable is missing', () => {

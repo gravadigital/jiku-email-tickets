@@ -109,6 +109,10 @@ describe('envSchema', () => {
     expect(schema.safeParse({ ...VALID_ENV, LOG_LEVEL: 'verbose' }).success).toBe(false);
   });
 
+  // La lista ENCOGIO, y es la primera vez que pasa: `JIKU_VERIFY_PROJECT_ID` salio de las
+  // requeridas al volverse opcional. La lee un solo consumidor (`src/verify.ts`), el worker no la
+  // toca, y su fail-fast se mudo a ese script. Lo que sigue afirmando este caso es lo de siempre:
+  // que las que QUEDAN requeridas se reportan TODAS JUNTAS y no de a una (CA-3).
   it('reports every missing required variable at once', () => {
     const result = schema.safeParse({ JIKU_INSTANCE: 'dev' });
 
@@ -120,8 +124,20 @@ describe('envSchema', () => {
       'JIKU_CREDS',
       'JIKU_KEY_FILE',
       'JIKU_PROJECT_ID',
-      'JIKU_VERIFY_PROJECT_ID',
     ]);
+  });
+
+  // El contracaso del de arriba, y la razon por la que la variable se volvio OPCIONAL y no se
+  // borro: ausente, el schema resuelve; declarada, se sigue validando como entero positivo. Lo que
+  // se relajo es la PRESENCIA, nunca el VALOR — un `0` o un `no-es-int` siguen sin arrancar (los
+  // afirma el caso 'rejects a non-integer / non-positive JIKU_VERIFY_PROJECT_ID' de mas arriba).
+  it('resolves without JIKU_VERIFY_PROJECT_ID, leaving it undefined', () => {
+    const { JIKU_VERIFY_PROJECT_ID: _omitted, ...withoutVerify } = VALID_ENV;
+
+    const result = schema.safeParse(withoutVerify);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.JIKU_VERIFY_PROJECT_ID).toBeUndefined();
   });
 
   // INVERTIDO EN S-012, no borrado. La primera mitad la INVIRTIO S-007 (hasta S-006 afirmaba que

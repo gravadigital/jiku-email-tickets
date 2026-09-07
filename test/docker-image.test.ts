@@ -77,15 +77,19 @@ const VALID_ENV = {
 };
 
 /**
- * Las ocho requeridas. Eran cuatro hasta S-006; S-007 sumo las tres de la casilla y S-012 el Mapa
+ * Las SIETE requeridas. Eran cuatro hasta S-006; S-007 sumo las tres de la casilla y S-012 el Mapa
  * de Tickets, cuya obligatoriedad es cross-field: lo requerido es UNA de sus dos fuentes, y el
  * reporte lo nombra por TICKET_MAP.
+ *
+ * BAJARON DE OCHO A SIETE al volverse OPCIONAL `JIKU_VERIFY_PROJECT_ID`: la lee un solo consumidor
+ * (`src/verify.ts`), y el worker no la toca, asi que exigirsela a todo despliegue obligaba a
+ * declarar un proyecto de prueba para correr un proceso que no lo usa. El fail-fast no se perdio,
+ * se mudo a `requireVerifyProjectId()` en ese script. Es la primera vez que esta lista ENCOGE.
  */
 const REQUIRED_VARIABLES = [
   'JIKU_CREDS',
   'JIKU_KEY_FILE',
   'JIKU_PROJECT_ID',
-  'JIKU_VERIFY_PROJECT_ID',
   'IMAP_HOST',
   'IMAP_USER',
   'IMAP_PASSWORD',

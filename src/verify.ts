@@ -1,8 +1,47 @@
 import 'dotenv/config';
 
+import { ConfigValidationError } from '#config/errors.js';
 import { publishVerificationRequirement } from '#domain/publicacion/publish-requirement.js';
 import { closeBus } from '#infra/bus/connection.js';
 import { reportStartupFailure, runStartup } from './startup.js';
+
+/**
+ * El fail-fast de `JIKU_VERIFY_PROJECT_ID`, en el UNICO punto donde la variable significa algo.
+ *
+ * La variable es opcional en el schema (src/config/schema.ts) porque el worker no la lee jamas:
+ * exigirsela a todo despliegue obligaba a declarar un proyecto de prueba para correr un proceso que
+ * no lo usa. Lo que NO se perdio es el fail-fast — se mudo aca, y esta funcion es esa mudanza.
+ *
+ * Recibe el valor YA VALIDADO por parametro y no lee `process.env`, que es la propiedad CA-1 del
+ * servicio: hay UNA sola lectura del entorno en todo `src/`, y vive en `src/config/env.ts`. Un test
+ * de propiedad la afirma escaneando el codigo (test/config/source-properties.test.ts), asi que el
+ * chequeo obvio —mirar `process.env` aca— rompe la suite, y con razon: duplicaria la coercion del
+ * schema y un `'0'` pasaria este chequeo para fallar despues en otro lado con otro mensaje.
+ *
+ * Por eso `undefined` aca significa exactamente una cosa —la variable no fue declarada—: cualquier
+ * valor invalido (un `0`, un `-3`, un `no-es-int`) ya no llego hasta aca, lo rechazo el schema en
+ * `loadAppConfig()` con su propio mensaje.
+ *
+ * Lanza `ConfigValidationError` y no un Error generico para reusar el canal de reporte que
+ * `reportStartupFailure()` ya tiene para los fallos de configuracion: stderr directo, sin logger.
+ * La razon es la misma que alla — el operador arregla esto editando el entorno, no leyendo un log
+ * estructurado— y ademas hace que el `main().catch()` de abajo no necesite ninguna rama nueva.
+ */
+function requireVerifyProjectId(verifyProjectId: number | undefined): number {
+  if (verifyProjectId === undefined) {
+    throw new ConfigValidationError(
+      'JIKU_VERIFY_PROJECT_ID es requerida por el modo de verificacion y no esta declarada: ' +
+        'se esperaba un entero positivo (el proyecto de Jiku, NO el project id de Zitadel de ' +
+        'JIKU_PROJECT_ID) contra el que crear el requisito de prueba. Usa un PROYECTO DE PRUEBA: ' +
+        'cada corrida deja un requisito permanente que no se puede borrar',
+      // La lista de variables afectadas, igual que la construye `toConfigValidationError()` para
+      // los fallos del schema: el canal de reporte es el mismo, asi que la forma del error tambien.
+      ['JIKU_VERIFY_PROJECT_ID'],
+    );
+  }
+
+  return verifyProjectId;
+}
 
 /**
  * El MODO DE VERIFICACION (`npm run verify`): publica un `requirements.new` real y traduce la
@@ -21,12 +60,29 @@ async function main(): Promise<void> {
   // UNA sola conexion. No la duplica.
   const { config, logger, client } = await runStartup();
 
+  // El chequeo va DESPUES de `runStartup()`, y no antes, porque el valor validado sale de la
+  // configuracion que esa funcion carga — ver el comentario de `requireVerifyProjectId()` sobre por
+  // que no se mira `process.env`. El costo es que un despliegue sin la variable paga el arranque
+  // (key, token y handshake) antes de que le digan que falta; a cambio, el chequeo no duplica la
+  // coercion del schema, que es la fuente de bugs mas cara de las dos.
+  //
+  // Va antes del `try` del `finally` que cierra el bus: si esto lanza, `runStartup()` ya dejo una
+  // conexion abierta, y el `catch` de `main()` la deja sin drenar. Es aceptable — el proceso sale
+  // con codigo distinto de cero y el SO cierra el socket— y es el mismo comportamiento que tiene
+  // hoy cualquier fallo entre el arranque y el `try`.
+  const verifyProjectId = requireVerifyProjectId(config.verifyProjectId);
+
   try {
     await publishVerificationRequirement({
       client,
       // El proyecto de prueba sale de la CONFIGURACION (JIKU_VERIFY_PROJECT_ID), validado como int
       // positivo por el schema de S-002. Nunca un literal.
-      projectId: config.verifyProjectId,
+      //
+      // Se pasa el resultado de `requireVerifyProjectId()` y NO `config.verifyProjectId` con un `!`:
+      // el tipo de retorno de esa funcion es `number` a secas, asi que el estrechamiento lo hace el
+      // compilador y no una asercion. Un `!` aca seguiria compilando el dia que alguien mueva o
+      // borre el chequeo; esto no.
+      projectId: verifyProjectId,
       logger,
     });
   } finally {

@@ -69,7 +69,15 @@ export interface AppConfig {
   zitadelProjectId: string;
   issuer: string;
   timeoutMs: number;
-  verifyProjectId: number;
+  /**
+   * El proyecto de prueba del modo de verificacion. OPCIONAL: lo lee UN SOLO consumidor
+   * (`src/verify.ts`), y el worker nunca lo toca — por eso un despliegue que solo corre el worker
+   * no tiene por que declarar un proyecto de prueba que no usa.
+   *
+   * `undefined` NO es un fallo de configuracion: es el estado normal de ese despliegue. El unico
+   * que lo convierte en error es `verify`, que sale distinto de cero si lo necesita y no esta.
+   */
+  verifyProjectId: number | undefined;
   logLevel: (typeof LOG_LEVELS)[number];
   nodeEnv: 'development' | 'test' | 'production';
 
@@ -129,7 +137,8 @@ export async function loadAppConfig(): Promise<AppConfig> {
     // El piso de 15000 es del conector, no del SDK: resolveOptions() solo reemplaza valores <= 0.
     timeoutMs: env.JIKU_TIMEOUT,
 
-    // El SDK no conoce ninguna de estas dos.
+    // El SDK no conoce ninguna de estas dos. `verifyProjectId` puede venir undefined y se propaga
+    // asi a proposito: el compositor no decide si eso es un error — lo decide su unico consumidor.
     verifyProjectId: env.JIKU_VERIFY_PROJECT_ID,
     logLevel: env.LOG_LEVEL,
 
