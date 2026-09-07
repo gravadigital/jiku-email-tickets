@@ -20,10 +20,43 @@ describe('src/ source properties', () => {
     expect(FILES.map((f) => f.relativePath)).toContain(`${CONFIG_DIR}env.ts`);
   });
 
-  it('reads process.env in exactly one file, src/config/env.ts', () => {
+  // CA-1, con UNA excepcion nombrada y acotada. La propiedad sigue siendo la misma: la
+  // CONFIGURACION DEL SERVICIO se lee en un solo lugar validado, `src/config/env.ts`.
+  //
+  // `src/config/dotenv.ts` aparece en la lista porque mira `process.env.NODE_ENV`, y lo que hace
+  // con eso NO ES LEER CONFIGURACION: decide si el archivo `.env` se carga, antes de que exista
+  // configuracion alguna. Ninguna variable del servicio sale de ahi — no devuelve valores, devuelve
+  // void.
+  //
+  // La lista es EXACTA a proposito, y por eso la excepcion se declara por nombre en vez de con un
+  // `startsWith(CONFIG_DIR)` que dejaria entrar cualquier archivo futuro de `src/config/`: un
+  // tercer lector tiene que romper este caso y obligar a justificarse, que es todo el valor del
+  // test. Si agregas uno, la pregunta no es como hacer pasar el caso: es por que ese archivo lee el
+  // entorno en vez de recibirlo por parametro.
+  it('reads process.env in exactly two files: config/env.ts and the dotenv guard', () => {
     const readers = FILES.filter((file) => file.code.includes('process.env')).map((f) => f.relativePath);
 
-    expect(readers).toEqual([`${CONFIG_DIR}env.ts`]);
+    expect(readers.sort()).toEqual([`${CONFIG_DIR}dotenv.ts`, `${CONFIG_DIR}env.ts`]);
+  });
+
+  // El complemento del caso de arriba, y lo que le da su sentido: el guard mira DOS variables, y
+  // las dos son interruptores de si el archivo `.env` se carga — ninguna es configuracion del
+  // servicio. Sin esta asercion, el caso anterior autorizaria a `dotenv.ts` a leer cualquier cosa
+  // del entorno con solo estar en la lista, que es exactamente la puerta que CA-1 cierra.
+  //
+  // La lista es exacta: agregar un tercer interruptor rompe este caso a proposito. Y la pregunta
+  // que hay que responder antes de actualizarlo es por que hacen falta tres condiciones para
+  // decidir si se lee un archivo.
+  it('lets the dotenv guard read only the two load switches', () => {
+    const guard = FILES.find((file) => file.relativePath === `${CONFIG_DIR}dotenv.ts`);
+
+    expect(guard).toBeDefined();
+
+    const reads = [...(guard?.code.matchAll(/process\.env(?:\.(\w+)|\['(\w+)'\]|\["(\w+)"\])/g) ?? [])]
+      .map((match) => match[1] ?? match[2] ?? match[3]);
+
+    expect(reads.length).toBeGreaterThan(0);
+    expect([...new Set(reads)].sort()).toEqual(['DOTENV_DISABLED', 'NODE_ENV']);
   });
 
   it('mentions the SDK loadConfig only under src/config/', () => {

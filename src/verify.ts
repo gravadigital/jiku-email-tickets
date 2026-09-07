@@ -1,9 +1,12 @@
-import 'dotenv/config';
-
+import { loadDotenvUnlessTest } from '#config/dotenv.js';
 import { ConfigValidationError } from '#config/errors.js';
 import { publishVerificationRequirement } from '#domain/publicacion/publish-requirement.js';
 import { closeBus } from '#infra/bus/connection.js';
 import { reportStartupFailure, runStartup } from './startup.js';
+
+// Misma llamada y mismo motivo que en src/index.ts: los dos entry points cargan el `.env` igual, y
+// ninguno de los dos lo hace bajo NODE_ENV=test.
+loadDotenvUnlessTest();
 
 /**
  * El fail-fast de `JIKU_VERIFY_PROJECT_ID`, en el UNICO punto donde la variable significa algo.
