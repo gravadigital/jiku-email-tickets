@@ -69,6 +69,29 @@ export const DEFAULT_MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 // declara aca porque es la misma extension de configuracion de politica de archivos.
 export const DEFAULT_PUT_TIMEOUT_MS = 30_000;
 
+// --- KV de NATS (los dos buckets, el TTL esperado y el reintento del watch -- REQ-005 / S-024) ---
+//
+// El bucket de SLUGS (el Mapa de Tickets): configuracion que administra un humano. `TICKETS` es
+// valido contra el `validBucketRe` de @nats-io/kv (lib/kv.js:88, /^[-\w]+$/).
+export const DEFAULT_KV_TICKETS_BUCKET = 'TICKETS';
+
+// El bucket de HILOS (el Mapa de Hilos): estado que el conector escribe en cada mail. Distinto
+// dueno, distinto TTL y distinto modo de falla en caliente que el de slugs (RF-8), y por eso son
+// dos buckets y no dos prefijos del mismo. El `_` esta en `\w`, asi que el nombre es valido.
+export const DEFAULT_KV_THREADS_BUCKET = 'MAIL_THREADS';
+
+// El TTL ESPERADO del bucket de hilos, en DIAS. El conector NO lo fija (CA-8 de S-024): `open()`
+// no modifica limites, y fijarlo exigiria el permiso de creacion/actualizacion de stream que la
+// decision de no crear buckets existe para evitar. Lo fija el operador al crear el bucket
+// (`nats kv add MAIL_THREADS --ttl=90d`), y este valor es el que se COMPARA contra `status()` para
+// avisar con un `warn` si difiere. Un TTL distinto no rompe el ruteo, solo cambia la ventana.
+export const DEFAULT_KV_THREADS_TTL_DAYS = 90;
+
+// El intervalo del reintento del `watch()` caido. Se DECLARA aca y se USA en S-025, igual que
+// PUT_TIMEOUT_MS se declaro en S-017 y lo consumio S-019: declararla ahora evita que S-025 tenga
+// que volver a tocar el schema. Separador numerico consistente con MIN_TIMEOUT_MS = 15_000.
+export const DEFAULT_KV_WATCH_RETRY_MS = 30_000;
+
 // El tope de 10 NO es una env var -- CA-12 de S-017 lo exige fijo en codigo: es el `maxItems` del
 // contrato del bus (ADR-003), no una politica configurable. Vive aca junto a los otros defaults
 // por consistencia de ubicacion, y lo importa aplicarTope() (src/domain/adjuntos/tope.ts).
@@ -346,6 +369,39 @@ export const envSchema = {
 
   // No se usa en S-017 -- lo consume S-019.
   PUT_TIMEOUT_MS: z.coerce.number().int().positive().default(DEFAULT_PUT_TIMEOUT_MS),
+
+  // --- KV (buckets, TTL y reintento del watch -- S-024) ---
+  //
+  // Las cuatro claves son INDEPENDIENTES entre si: ninguna es cross-field, a diferencia de
+  // TICKET_MAP/TICKET_MAP_FILE, asi que NINGUNA toca src/config/env.ts ni `createFinalSchema`
+  // (CA-9 de S-024, afirmado por un test de propiedad que escanea env.ts buscando estos nombres).
+  //
+  // Esto NO es un detalle de implementacion: cuando S-025 elimine las dos fuentes del Mapa de
+  // Tickets y su regla cross-field, va a ser tentador "unificar" estas cuatro con lo que quede
+  // ahi. No hay nada que unificar — son cuatro valores sueltos sin ninguna relacion entre si.
+  //
+  // Los dos de nombre de bucket rechazan un valor que sea solo espacios, con el mismo patron que
+  // SUBADDRESS_PREFIX: el string vacio no llega hasta aca porque `emptyStringAsUndefined` lo
+  // convierte en ausente y cae al default, que es lo correcto; un `KV_TICKETS_BUCKET='   '` si
+  // llega, y un bucket con ese nombre no existe en ningun despliegue.
+  KV_TICKETS_BUCKET: z
+    .string()
+    .refine((value) => value.trim() !== '')
+    .default(DEFAULT_KV_TICKETS_BUCKET),
+
+  KV_THREADS_BUCKET: z
+    .string()
+    .refine((value) => value.trim() !== '')
+    .default(DEFAULT_KV_THREADS_BUCKET),
+
+  // En DIAS y no en ms, a diferencia de los otros valores temporales del schema, porque es la
+  // unidad en la que el operador crea el bucket (`nats kv add MAIL_THREADS --ttl=90d`). La
+  // conversion a los milisegundos que reporta `status().ttl` vive en el modulo del KV, junto a la
+  // comparacion, con su constante MS_PER_DAY nombrada.
+  KV_THREADS_TTL_DAYS: z.coerce.number().int().positive().default(DEFAULT_KV_THREADS_TTL_DAYS),
+
+  // No se usa en S-024 -- lo consume S-025 (el reintento del watch caido).
+  KV_WATCH_RETRY_MS: z.coerce.number().int().positive().default(DEFAULT_KV_WATCH_RETRY_MS),
 };
 
 export type Env = z.infer<z.ZodObject<typeof envSchema>>;

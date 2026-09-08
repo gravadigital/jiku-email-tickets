@@ -4,8 +4,8 @@ title: Arranque y conexión al bus
 type: event
 status: Active
 created: 2026-08-27
-last_updated: 2026-08-31
-stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016]
+last_updated: 2026-09-08
+stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024]
 ---
 
 # Arranque y Conexión al Bus
@@ -17,8 +17,10 @@ stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, 
 ordenado — ya está completo. S-012 implementada: el Paso 1 valida también el Mapa de Tickets, el
 prefijo y los placeholders. S-016 implementada: el documento estaba completo desde S-012 — no se
 reescribe ningún paso de contenido — y S-016 cierra el estado formal: `Status` pasa de `Draft` a
-`Active` y se suman las stories del feature group que lo cerró)
-**Stories:** S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016
+`Active` y se suman las stories del feature group que lo cerró. S-024 implementada: el Paso 5.5
+—abrir y verificar los dos buckets del KV sobre la conexión ya establecida— entra entre conectar al
+bus y schedular el tick, con sus filas en la tabla de errores)
+**Stories:** S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024
 
 ## Descripción
 
@@ -69,6 +71,18 @@ sequenceDiagram
                 BUS->>CORE: evento del auth-callout (no durable)
                 CORE->>CORE: INSERT users (identity_type: service, email NULL)
                 MC-->>MC: log de arranque exitoso (sin credenciales)
+                MC->>BUS: Kvm(client.connection).open(TICKETS) + status()
+                alt el bucket de slugs no existe
+                    BUS-->>MC: StreamNotFoundError → exit ≠ 0 nombrando TICKETS
+                else existe
+                    MC->>BUS: open(MAIL_THREADS) + status()
+                    alt el bucket de hilos no existe
+                        BUS-->>MC: StreamNotFoundError → exit ≠ 0 nombrando MAIL_THREADS
+                    else existe
+                        MC-->>MC: compara el TTL del de hilos (warn si difiere, arranca igual)
+                        MC-->>MC: buckets del KV abiertos y verificados
+                    end
+                end
             end
         end
     end
@@ -411,6 +425,65 @@ credencial**.
 
 ---
 
+### Paso 5.5: Abrir y verificar los dos buckets del KV
+
+**Origen:** `jiku-mail-connector`
+**Destino:** Bus NATS (JetStream)
+**Tipo:** Operación del bus (no es un comando de `core`)
+
+**Operación:** `new Kvm(client.connection)` y, sobre él, `open()` + `status()` de los dos buckets:
+el del Mapa de Tickets (`KV_TICKETS_BUCKET`, por default `TICKETS`) y el del Mapa de Hilos
+(`KV_THREADS_BUCKET`, por default `MAIL_THREADS`).
+
+**Ref:** S-024; ADR-002; REQ-005
+
+> **Implementado en S-024** — `src/infra/kv/stores.ts` (`openKvStores()`). Va **después** del Paso 5
+> y **antes** del Paso 8 por dos razones que no son de estilo: el `Kvm` se construye sobre
+> `client.connection`, así que sin conexión no hay nada sobre lo que construirlo; y un bucket
+> faltante tiene que impedir el arranque en vez de descubrirse en el primer mail.
+>
+> **Cuatro hallazgos verificados contra el paquete instalado, que la próxima story del KV no debería
+> tener que redescubrir:**
+>
+> **1. `open()` NO verifica que el bucket exista, y su docstring engaña.** Dice *"If the KV doesn't
+> exist, this API will fail on accessing the KV"*, que se lee fácil como "`open()` lanza". No lanza:
+> `open()` fija `bindOnly: true` (`lib/kv.js:158-160`) y delega en `Bucket.bind()`
+> (`lib/kv.js:228-246`), que valida el nombre, construye el objeto y **nunca llama a `streams.info`**.
+> El fallo está diferido al primer acceso real. **La verificación es `status()`**, que sí consulta
+> (`lib/kv.js:812`). Sin ese `status()`, el conector arrancaría feliz contra un despliegue sin
+> buckets y descartaría todos los mails en silencio — el modo de falla exacto que este paso cierra.
+> Si alguien ve el `status()` como "redundante después del `open()`" y lo borra, reintroduce eso.
+>
+> **2. `status().ttl` viene en MILISEGUNDOS, y `0` significa "sin TTL".** Es
+> `millis(si.config.max_age)` (`lib/kv.js:835-837`): un bucket creado con `--ttl=90d` reporta
+> `7776000000`. La configuración está en **días**, porque es la unidad con la que el operador crea el
+> bucket, así que la comparación convierte explícitamente.
+>
+> **3. "Sin permisos de KV" es INDISTINGUIBLE de "JetStream deshabilitado", y no hay que intentar
+> distinguirlos.** Una violación de permisos sobre `$JS.API.>` no llega como respuesta a la request:
+> llega como un `-ERR` asincrónico por el stream de status de la conexión, y el cliente la envuelve
+> igual que la ausencia de JetStream, como `JetStreamNotEnabled`. Separarlas exigiría correlacionar
+> el error asincrónico con la request. El diagnóstico `kv_no_disponible` nombra **las dos** cosas a
+> revisar, que es lo único que el operador necesita.
+>
+> **4. Las clases de error del KV no son importables desde el subpath del SDK**, así que `instanceof`
+> es imposible y `diagnoseKvFailure()` clasifica por `name` y por `code` (`10059`) — nunca por el
+> texto del mensaje. El propio `Kvm.create()` de la librería compara
+> `err.message === "stream not found"`, que es el bug que este módulo no replica.
+>
+> **El conector NO crea buckets y NO fija el TTL**, y las dos cosas están afirmadas por tests que
+> escanean `src/`. Crear un bucket ante un typo en el nombre dejaría un bucket vacío en silencio, con
+> el mismo síntoma indiagnosticable de arriba. Fijar el TTL exigiría el permiso de escritura de
+> streams que la decisión de no crear buckets existe para evitar. **Los crea el operador** — es una
+> precondición de despliegue, no un paso del arranque.
+>
+> **Los dos buckets se verifican en orden y se corta en el primero que falta**, empezando por el de
+> slugs: sin el Mapa de Tickets no se puede rutear nada, mientras que sin el de hilos sólo degradan
+> las respuestas. No son equivalentes, y el error nombra **un** bucket para que el operador sepa cuál
+> crear.
+
+---
+
 ### Paso 6: Jiku crea la fila del conector en `users` (efecto lateral)
 
 **Origen:** Bus NATS (auth-callout)
@@ -504,6 +577,12 @@ cancelarlo nunca**) → `await closeBus()` → `process.exit(0)`.
 | 5 | Bus inalcanzable (host irresoluble o puerto cerrado) | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: bus_inalcanzable` | **No arranca**: el proceso no queda vivo en un estado inútil |
 | 5 | Creds del sentinel ilegible | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: creds_ilegible` — el arreglo está en el **montaje del archivo** | **No arranca**, exit ≠ 0 |
 | 5 | Cualquier otro fallo de conexión | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: desconocido`, la clase del SDK y la cadena de causas, **sin mapearse a otra causa** | **No arranca**, exit ≠ 0 |
+| 5.5 | El bucket del Mapa de **Tickets** no existe | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: bucket_inexistente` y **`bucket: TICKETS`** — el nombre del bucket es el dato que hace accionable el fallo | **No arranca**, exit ≠ 0. Lo crea el operador (`nats kv add`), no el conector |
+| 5.5 | El bucket del Mapa de **Hilos** no existe | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: bucket_inexistente` y **`bucket: MAIL_THREADS`** | **No arranca**, exit ≠ 0. Sin él las respuestas no rutearían, y arrancar a medias lo escondería |
+| 5.5 | JetStream deshabilitado **o** sin permisos de KV en el auth-callout | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: kv_no_disponible`. El mensaje nombra **las dos** cosas a revisar: son indistinguibles desde el cliente | **No arranca**, exit ≠ 0. **No** dice que el bus esté inalcanzable: la conexión funcionó |
+| 5.5 | Nombre de bucket inválido en la configuración | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: nombre_de_bucket_invalido`. Se detecta **antes** de cualquier I/O, así que el diagnóstico es positivo y no por descarte | **No arranca**, exit ≠ 0 |
+| 5.5 | Cualquier otro fallo del KV | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: desconocido`, la clase del error y la cadena de causas, **sin mapearse a otra causa** | **No arranca**, exit ≠ 0 |
+| 5.5 | El TTL del bucket de hilos **difiere** del configurado | — | Log `warn` con `bucket`, `expectedTtlDays` y `actualTtlMs` | **Arranca igual.** Un TTL distinto no rompe el ruteo: sólo cambia la ventana, y una entrada expirada degrada a `hilo_desconocido`, que es una falla segura. El conector **no** lo fija |
 | 6 | Se pierde el evento del auth-callout | — | — | El conector queda sin fila en `users` hasta su próxima autenticación. Reconectar lo resuelve. **Dependencia declarada del producto, no un bug del conector** |
 | 7 | Falla el refresh del token | — | Log `error` con `diagnosis: refresh_del_token_fallo`, la clase del SDK y la cadena de causas | **El proceso NO muere** (NFR-R04). El token vigente sigue sirviendo |
 
@@ -527,6 +606,18 @@ background** no lo es. Son dos momentos distintos y las dos reglas conviven.
 > segunda es deliberada y no un cajón de sastre: un diagnóstico equivocado es **peor** que uno
 > ausente, porque manda a revisar el sistema equivocado, que es el fallo exacto que ADR-006 existe
 > para evitar.
+
+> **Agregado en S-024: las seis filas del Paso 5.5, y una rama de reporte propia.** El KV **no**
+> comparte la rama de `BusConnectError` en `reportStartupFailure()`, y la separación es el punto:
+> cuando falta un bucket, la conexión al bus funcionó perfectamente. Reportarlo como *"el conector no
+> pudo conectarse al bus"* mandaría al operador a revisar Zitadel, la red y los montajes de
+> credenciales cuando el arreglo es un `nats kv add` — exactamente el diagnóstico equivocado que
+> ADR-006 existe para evitar. De ahí que el mensaje de esta rama sea *"un bucket del KV no está
+> usable"* y que el contexto lleve `bucket` y `operation`.
+>
+> **La única fila `warn` de todo el arranque es la del TTL**, y es deliberado: es el único hallazgo
+> del Paso 5.5 que no impide operar. Todo lo demás del KV es fatal, por la misma regla que gobierna
+> la tabla — un fallo al arrancar es fatal.
 
 ## Resultado
 

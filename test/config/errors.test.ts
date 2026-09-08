@@ -104,6 +104,11 @@ describe('EXPECTATIONS', () => {
     'ATTACHMENT_ALLOWED_MIME_TYPES',
     'ATTACHMENT_MAX_SIZE_BYTES',
     'PUT_TIMEOUT_MS',
+    // Las cuatro del KV (S-024).
+    'KV_TICKETS_BUCKET',
+    'KV_THREADS_BUCKET',
+    'KV_THREADS_TTL_DAYS',
+    'KV_WATCH_RETRY_MS',
   ] as const;
 
   // TS-26. La correspondencia se afirma en las DOS direcciones para que una variable futura sin

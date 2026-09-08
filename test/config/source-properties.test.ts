@@ -39,6 +39,32 @@ describe('src/ source properties', () => {
     expect(readers.sort()).toEqual([`${CONFIG_DIR}dotenv.ts`, `${CONFIG_DIR}env.ts`]);
   });
 
+  // TS-10 (S-024). Las cuatro claves del KV son INDEPENDIENTES entre si: ninguna es cross-field, a
+  // diferencia de TICKET_MAP/TICKET_MAP_FILE, asi que ninguna toca `src/config/env.ts` ni la regla
+  // de `createFinalSchema`.
+  //
+  // Esto NO es un detalle de implementacion, y por eso hay un test: cuando S-025 elimine las dos
+  // fuentes del Mapa de Tickets y su regla cross-field, va a ser tentador "unificar" estas cuatro
+  // con lo que quede ahi. No hay nada que unificar — son cuatro valores sueltos sin ninguna
+  // relacion entre si, y meterlos en la regla cross-field crearia un acoplamiento inventado.
+  it('keeps the four KV keys out of the cross-field rule in config/env.ts', () => {
+    const env = FILES.find((file) => file.relativePath === `${CONFIG_DIR}env.ts`);
+    expect(env).toBeDefined();
+
+    for (const key of [
+      'KV_TICKETS_BUCKET',
+      'KV_THREADS_BUCKET',
+      'KV_THREADS_TTL_DAYS',
+      'KV_WATCH_RETRY_MS',
+    ]) {
+      expect(env?.code, `${key} no debe aparecer en env.ts`).not.toContain(key);
+    }
+
+    // Y la sanidad del caso: la UNICA regla cross-field sigue siendo la del Mapa de Tickets. Sin
+    // esta linea, el test pasaria igual si alguien vaciara `createFinalSchema` por completo.
+    expect(env?.code).toContain('ticketMapSourceIssues');
+  });
+
   // El complemento del caso de arriba, y lo que le da su sentido: el guard mira DOS variables, y
   // las dos son interruptores de si el archivo `.env` se carga — ninguna es configuracion del
   // servicio. Sin esta asercion, el caso anterior autorizaria a `dotenv.ts` a leer cualquier cosa

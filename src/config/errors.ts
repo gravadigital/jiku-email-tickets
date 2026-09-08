@@ -77,6 +77,23 @@ export const EXPECTATIONS: Record<string, string> = {
     'se esperaba un entero positivo de bytes (el tamano maximo por adjunto)',
   PUT_TIMEOUT_MS:
     'se esperaba un entero positivo de milisegundos (el timeout del PUT del byte del adjunto)',
+
+  // --- KV (S-024) ---
+  // Los cuatro textos describen QUE se esperaba y NUNCA que se recibio, igual que el resto de la
+  // tabla, y no interpolan ningun valor. Los dos de TTL/retry nombran su unidad, que es lo unico
+  // que un operador puede equivocar aca: KV_THREADS_TTL_DAYS esta en DIAS (es la unidad de
+  // `nats kv add --ttl=90d`) y KV_WATCH_RETRY_MS en milisegundos.
+  KV_TICKETS_BUCKET:
+    'se esperaba el nombre del bucket KV del Mapa de Tickets, no vacio ' +
+    '(por default TICKETS, y el conector no lo crea: lo crea el operador)',
+  KV_THREADS_BUCKET:
+    'se esperaba el nombre del bucket KV del Mapa de Hilos, no vacio ' +
+    '(por default MAIL_THREADS, y el conector no lo crea: lo crea el operador)',
+  KV_THREADS_TTL_DAYS:
+    'se esperaba un entero positivo de DIAS (el TTL esperado del bucket de hilos, que el ' +
+    'conector compara contra el del bucket y no fija)',
+  KV_WATCH_RETRY_MS:
+    'se esperaba un entero positivo de milisegundos (el intervalo del reintento del watch del KV)',
 };
 
 const UNKNOWN_EXPECTATION = 'no paso la validacion declarada en el schema';

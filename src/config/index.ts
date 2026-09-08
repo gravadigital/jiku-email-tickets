@@ -53,6 +53,25 @@ export interface AdjuntosConfig {
 }
 
 /**
+ * La configuracion del KV de NATS: los dos buckets, el TTL esperado del de hilos y el reintento
+ * del watch (REQ-005 / S-024).
+ *
+ * Mismo criterio estructural que `imap` / `poll` / `ruteo` / `adjuntos`: interfaz anidada y no
+ * cuatro campos sueltos, porque `openKvStores()` (src/infra/kv/stores.ts) la recibe completa o via
+ * `Pick`, y con campos sueltos cada firma nueva enumeraria los cuatro.
+ *
+ * `threadsTtlDays` es el valor ESPERADO, no el que se fija: el conector compara y avisa, nunca
+ * escribe limites del stream (CA-8 de S-024). `watchRetryMs` se declara y NO se consume todavia —
+ * lo usa S-025.
+ */
+export interface KvConfig {
+  ticketsBucket: string;
+  threadsBucket: string;
+  threadsTtlDays: number;
+  watchRetryMs: number;
+}
+
+/**
  * La configuracion unica del proceso: el entorno validado compuesto con lo que resuelve el SDK.
  *
  * Se escribe a mano y eso no contradice CA-9: CA-9 exige que los tipos del *schema* se infieran
@@ -100,6 +119,13 @@ export interface AppConfig {
   // La politica local de archivos de FG-4 (S-017). No lleva ningun secreto, pero se mantiene
   // anidada por el mismo criterio estructural que los bloques de arriba.
   adjuntos: AdjuntosConfig;
+
+  // El KV de NATS (S-024). Tampoco lleva ningun secreto —dos nombres de bucket y dos numeros— y
+  // entra igual bajo la MISMA regla estructural que los bloques de arriba: NINGUN punto de log
+  // emite el AppConfig completo, y hay un test de propiedad que lo afirma
+  // (test/config/source-properties.test.ts). Los logs del modulo de KV enumeran a mano los campos
+  // que necesitan (`ticketsBucket`, `threadsBucket`) en un contexto PLANO, no el bloque entero.
+  kv: KvConfig;
 }
 
 /**
@@ -182,6 +208,16 @@ export async function loadAppConfig(): Promise<AppConfig> {
       allowedMimeTypes: env.ATTACHMENT_ALLOWED_MIME_TYPES,
       maxSizeBytes: env.ATTACHMENT_MAX_SIZE_BYTES,
       putTimeoutMs: env.PUT_TIMEOUT_MS,
+    },
+
+    // Los cuatro valores salen ENTEROS del env validado, sin `??` ni fallbacks: el schema ya
+    // aplico los cuatro defaults. Ninguno es cross-field, asi que ninguno paso por
+    // `createFinalSchema` y no hay nada que recomponer aca.
+    kv: {
+      ticketsBucket: env.KV_TICKETS_BUCKET,
+      threadsBucket: env.KV_THREADS_BUCKET,
+      threadsTtlDays: env.KV_THREADS_TTL_DAYS,
+      watchRetryMs: env.KV_WATCH_RETRY_MS,
     },
   };
 }

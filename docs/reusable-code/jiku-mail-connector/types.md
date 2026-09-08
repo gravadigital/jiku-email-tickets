@@ -889,3 +889,74 @@ type offers no branch that would invite differentiating them later. The cause IS
 need to inspect it.
 
 ---
+
+---
+
+## KvBucketMissingError / KvDiagnosis / diagnoseKvFailure()
+
+**Location:** `src/infra/kv/errors.ts`
+
+**Description:** The KV startup error and its **structural** classification. Modelled on
+`BusConnectError`/`diagnoseConnectFailure()`, for the same reason: the log has to say **what to fix**,
+because the fixes live in different places. "The KV failed" alone forces checking the bucket name,
+whether the bucket exists, whether JetStream is on, and whether the account has KV permissions — four
+systems.
+
+**Why the classification is structural and not `instanceof`:** the KV error classes are **not
+importable**. `@gravadigital/jiku/nats` re-exports `@nats-io/kv`, which exposes `Kvm`, `Bucket` and
+`KvWatchInclude` — but not its errors. `StreamNotFoundError`, `JetStreamNotEnabled` and
+`JetStreamApiError` live in `@nats-io/jetstream`, which this project does **not** declare and must not
+(ADR-002 / S-023: the KV enters through the SDK subpath so there is one copy of `nats-core` in the
+tree). Importing them from `@nats-io/jetstream` would be a **phantom dependency** — present only by
+npm hoisting, broken silently by any de-hoisting — and could pull a second `nats-core`, at which point
+the `instanceof` being sought would return `false` against the copy that threw.
+
+So it classifies by `name` and by `code` (`10059`), which are **structured** fields. It **never**
+compares the message text: the library's own `Kvm.create()` does (`err.message === "stream not
+found"`), and that is a latent bug — the day the server changes that string, or it arrives localized,
+the comparison fails in silence.
+
+**Signature:**
+
+```ts
+type KvDiagnosis =
+  | 'bucket_inexistente'
+  | 'kv_no_disponible'
+  | 'nombre_de_bucket_invalido'
+  | 'desconocido';
+
+function diagnoseKvFailure(error: unknown): KvDiagnosis;
+function isValidBucketName(name: string): boolean;
+
+class KvBucketMissingError extends AppError {
+  readonly code = 'KV_BUCKET_MISSING_ERROR';
+  readonly httpStatus = 500;
+  readonly diagnosis: KvDiagnosis;
+  readonly bucket: string;      // WHICH bucket — what makes the failure actionable
+  readonly operation: string;   // 'validate' | 'open' | 'status'
+  readonly errorClass: string;
+  readonly causes: string[];
+}
+```
+
+**Notes:**
+
+- **`bucket` is the field that matters.** With two buckets, "a bucket is missing" does not say where
+  the fix is. It travels as a **field** for querying structured logs and inside the `message` for
+  whoever reads a terminal at 3am.
+- **`'kv_no_disponible'` deliberately covers two scenarios**, because they are indistinguishable from
+  the client: a permission violation on `$JS.API.>` arrives as an **asynchronous** `-ERR` on the
+  connection's status stream and the in-flight request dies by timeout, so the client wraps it exactly
+  as it wraps a server without JetStream. Separating them would mean correlating the async error with
+  the request. Its remedy names **both** things to check — which is all the operator needs.
+- **`'desconocido'` is a legitimate result and is never mapped to another by elimination** (ADR-006):
+  a wrong diagnosis is **worse** than an absent one, because it sends you to the wrong system.
+- **`'nombre_de_bucket_invalido'` is decided before any I/O**, by `isValidBucketName()`. Reaching the
+  classifier with an invalid name is impossible by construction, which is why no branch guesses it.
+- **`causes` reuses `causeChain()`** from `src/infra/bus/errors.ts` rather than reimplementing the
+  walk — it already has the depth cap and the cycle guard. It is an array of **strings** (first line
+  of each message) and not `Error`s, because the log context must be **flat**: Pino's redaction has no
+  deep wildcard, so a nested object could leave a value unredacted.
+- **It has its own branch in `reportStartupFailure()`.** Reporting it through the bus branch would say
+  *"the connector could not connect to the bus"* when the connection worked perfectly, sending the
+  operator to Zitadel, the network and the credential mounts when the fix is a `nats kv add`.

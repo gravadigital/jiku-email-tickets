@@ -1201,3 +1201,67 @@ await publishRequirementFromMail(
   `cuerpoBase` it already has, keeping this function focused on one attachment's life cycle only.
 
 ---
+
+---
+
+## openKvStores()
+
+**Location:** `src/infra/kv/stores.ts`
+
+**Description:** Opens the connector's two NATS KV buckets over the process's **single** connection
+and **verifies they exist**. It is the startup step that turns "a bucket is missing" from a silent,
+undiagnosable runtime symptom into a fail-fast that names the bucket.
+
+**The load-bearing detail, verified against the installed package:** `open()` does **not** check that
+the bucket exists. Its docstring — *"If the KV doesn't exist, this API will fail on accessing the
+KV"* — reads like "`open()` throws", but it sets `bindOnly: true` (`lib/kv.js:158-160`) and delegates
+to `Bucket.bind()` (`lib/kv.js:228-246`), which validates the name, builds the object, and **never
+calls `streams.info`**. The failure is deferred to first real access. **The verification is
+`status()`**, which does query (`lib/kv.js:812`). Without it, the connector would start happily
+against a deployment with no buckets and discard every mail in silence — the exact failure mode this
+step closes. **Do not remove the `status()` as "redundant after `open()`".**
+
+**Signature:**
+
+```ts
+function openKvStores(opts: {
+  client: Client;
+  config: AppConfig;
+  logger: Logger;
+}): Promise<KvStores>;
+```
+
+**Notes:**
+
+- **The `Kvm` is built on `client.connection`**, the raw `NatsConnection` the SDK exposes — never a
+  new connection. ADR-002 (one connection per process) stays intact: the KV pays neither the Zitadel
+  round-trip nor the auth-callout handshake, because it travels over the socket that is already open
+  and already authorized as this identity.
+- **Sequential, never `Promise.all`.** The tickets bucket is verified **first** and the function stops
+  there: without the Ticket Map nothing can be routed, whereas without the threads bucket only
+  replies degrade. They are not equivalent, and the error has to name **one** bucket so the operator
+  knows which to create. With `Promise.all` both would fail at once and the diagnosis would be
+  ambiguous.
+- **Never calls `kvm.create()`.** A typo in the bucket name would create an **empty** bucket in
+  silence, and the symptom would be a connector that discards everything without saying why — far
+  worse than a startup that fails naming the missing bucket. A property test scans `src/` to assert
+  no `create()` exists.
+- **Never sets the TTL** (`ttl:` is absent from every options object, also asserted by a scan).
+  Setting it would need the stream write permission that the no-create decision exists to avoid. It
+  **compares** the threads bucket's TTL against `KV_THREADS_TTL_DAYS` and emits exactly one `warn` if
+  they differ, then starts anyway: a different TTL only changes the window, and an expired entry
+  degrades to `hilo_desconocido`, which is a **safe** failure.
+- **`status().ttl` is in milliseconds** (`millis(si.config.max_age)`, `lib/kv.js:835-837`) and `0`
+  means "no TTL"; the config is in **days**, because that is the unit the operator creates the bucket
+  with (`nats kv add --ttl=90d`). Hence the explicit `MS_PER_DAY` conversion.
+- **The TTL is only compared on the threads bucket.** The slugs bucket is human-administered
+  configuration with no reason to expire; whatever TTL it has is irrelevant and is compared against
+  nothing.
+- **`status()` is called once per bucket.** The verification returns the status alongside the handle
+  so the TTL comparison reuses the response it already fetched, instead of paying a second
+  round-trip.
+- **The bucket name is validated before any I/O**, against the same `/^[-\w]+$/` the library uses, so
+  the `nombre_de_bucket_invalido` diagnosis is positive rather than depending on recognizing the
+  plain `Error` that `validateBucket()` throws (which would mean reading message text).
+- **`logger` comes by parameter**, not via `getLogger()` — same as `connection.ts` — so tests inject a
+  capture logger without touching the process singleton.

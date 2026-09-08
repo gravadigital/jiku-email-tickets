@@ -50,6 +50,12 @@ function configWith(overrides: Partial<AppConfig> = {}): AppConfig {
       maxSizeBytes: 10_485_760,
       putTimeoutMs: DEFAULT_PUT_TIMEOUT_MS,
     },
+    kv: {
+      ticketsBucket: 'TICKETS',
+      threadsBucket: 'MAIL_THREADS',
+      threadsTtlDays: 90,
+      watchRetryMs: 30_000,
+    },
     ...overrides,
   };
 }

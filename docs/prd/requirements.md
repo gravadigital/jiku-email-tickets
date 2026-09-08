@@ -17,11 +17,12 @@ status: Draft - In Definition
 | Dónde vive | Entidades | Quién las escribe |
 |---|---|---|
 | **En el mail** (efímero) | Mail Entrante, Adjunto del Mail | Nadie: llegan, se procesan y se descartan |
-| **En la configuración del conector** | Entrada del Mapa de Tickets | Un operador (U-02), a mano |
-| **En Jiku** (persistido) | Requisito, Archivo, Adjunto | **`core`**, por comando. El conector sólo lo pide |
+| **En un bucket KV del bus de Jiku** (persistido, REQ-005) | Entrada del Mapa de Tickets, Entrada del Mapa de Hilos | La del Mapa de Tickets, un operador (U-02) con el CLI de NATS. La del Mapa de Hilos, **el conector**: es la única entidad que escribe y que sobrevive al tick |
+| **En Jiku** (persistido) | Requisito, Comentario, Archivo, Adjunto | **`core`**, por comando. El conector sólo lo pide |
 
 Por eso esta sección modela **el ciclo de vida de un mail**, no un esquema de base de datos. El
-conector no tiene base de datos.
+conector no tiene base de datos **propia**: desde REQ-005 usa dos buckets KV de NATS (JetStream) del
+bus de Jiku, que ya es su dependencia, como su único mecanismo de estado.
 
 ### Lenguaje Ubicuo
 
@@ -30,7 +31,9 @@ conector no tiene base de datos.
 | **Mail Entrante** | Un mensaje de la casilla de tickets, ya normalizado y listo para procesar | Efímero: existe en memoria durante un tick y nunca se persiste. **No confundir con "Ticket"** |
 | **Ticket** | El pedido de un cliente expresado como mail | Es el concepto de negocio; su materialización en Jiku es un **Requisito**. La palabra no nombra ninguna entidad del conector |
 | **Slug** | El token del subaddress que identifica al proyecto destino: la parte entre `+` y `@` | Siempre en minúsculas. En `tickets+alfa@grava.io` el slug es `alfa` |
-| **Mapa de Tickets** | La tabla de configuración `slug → id de proyecto` | KV cargado a mano. **Es configuración del conector, no dato del producto** |
+| **Mapa de Tickets** | La tabla de configuración `slug → id de proyecto` | Un **bucket KV de NATS** que un operador carga con `nats kv put`, leído con `watch()` y con copia en memoria (REQ-005). **Es configuración del conector, no dato del producto** |
+| **Mapa de Hilos** | La tabla de estado `sha256(Message-Id) → id de requisito` | Un **segundo bucket KV de NATS**, separado del de slugs: éste lo escribe el conector en cada mail y lleva TTL de 90 días (REQ-005) |
+| **Comentario** | La entidad de Jiku que representa la respuesta de un cliente en el hilo de su ticket | La escribe `core` por el comando `requirements.{id}.comment`. El conector la crea siempre con `visibilityLevel: 'public'` |
 | **Adjunto del Mail** | Una parte MIME con contenido de archivo del Mail Entrante | Efímero. **No es el Adjunto de Jiku**, que es un vínculo |
 | **Requisito** | La entidad de Jiku que representa el pedido | La escribe `core`. El conector la crea publicando un comando y **nunca la modifica después** |
 | **Archivo** | La entidad de Jiku que representa un archivo con su ubicación física | Identidad propia, independiente de a qué se vincule. **Un archivo sin vínculo es un estado válido** |
@@ -53,7 +56,9 @@ conector no tiene base de datos.
 - **Relaciones:** has_many Adjunto del Mail (0..N)
 - **Notas:** **Efímero: no se persiste en ningún lado.** Vive en memoria durante el procesamiento de
   un tick. Un mail sin `messageId` se descarta sin procesar. `referenceIds` vacío significa **mail
-  nuevo**; no vacío significa **respuesta a un hilo**, y en v1 eso es un descarte. `subject` y
+  nuevo**; no vacío significa **candidato a comentario** (REQ-005): el resultado depende del lookup
+  en el Mapa de Hilos — con match se comenta, sin match se descarta como `hilo_desconocido`. El
+  campo no cambia de forma ni de origen. `subject` y
   `body` vacíos son estados válidos: se reemplazan por placeholders al crear el Requisito.
   `senderEmail` **se parsea y en v1 no se usa para nada** (su único consumidor era la notificación
   de Mattermost, que está fuera de alcance).
@@ -75,11 +80,47 @@ conector no tiene base de datos.
 - **Atributos clave:** `slug` (string, req, **único**, siempre en minúsculas), `projectId` (int,
   req — un id de `projects` de Jiku)
 - **Relaciones:** ninguna. Es una tabla plana de configuración
-- **Notas:** **Es configuración, no dato de negocio**: la carga U-02 a mano por variable de entorno
-  o archivo montado, y se lee al arrancar. El `projectId` **no se valida contra Jiku**: si apunta a
-  un proyecto inexistente, el síntoma es un `project_not_found` por mail. Un mapa **vacío es
-  válido** — el conector arranca y descarta todo; un mapa **mal formado no lo es** y el conector no
-  arranca.
+- **Notas:** **Es configuración, no dato de negocio**, pero desde REQ-005 **deja de ser
+  configuración leída al arrancar y pasa a ser un registro de un bucket KV de NATS**: la carga U-02
+  con el CLI de NATS (`nats kv put`), y el conector la lee con `watch()` manteniendo una copia en
+  memoria que el servidor actualiza solo — **agregar un proyecto ya no requiere redesplegar**. La
+  **unicidad del `slug` la garantiza el almacén**, no una validación propia, así que **un mapa mal
+  formado deja de ser un modo de falla posible**. Se conserva que un mapa **vacío es válido** (el
+  conector arranca y descarta todo) y que el `projectId` **no se valida contra Jiku**: si apunta a un
+  proyecto inexistente, el síntoma es un `project_not_found` por mail. Si el bucket **no existe** al
+  arrancar, el conector **no arranca** y no lo crea.
+
+### Entrada del Mapa de Hilos
+
+- **Atributos clave:** `messageIdHash` (string sha256 **en hex**, req, **único** — la clave del
+  bucket; el `Message-Id` crudo **no es clave válida** de NATS KV, cuyo `validKeyRe` es
+  `/^[-/=.\w]+$/` y rechaza `<`, `>` y `@`), `requirementId` (int, req — un id de `requirements`
+  de Jiku)
+- **Relaciones:** ninguna en el conector. Apunta a un Requisito de Jiku **sin FK real**
+- **Notas:** **Es la primera entidad que el conector escribe y que sobrevive al tick** — hasta
+  REQ-005 todas sus entidades eran efímeras o de configuración. Se escribe al crear un Requisito
+  desde un mail nuevo **y también** al comentar con éxito desde una respuesta: **una entrada por
+  cada mail del hilo**, para que una respuesta a la respuesta rutee aunque el cliente recorte la
+  cadena de `References`. **TTL de 90 días**; una entrada expirada degrada a `hilo_desconocido`, que
+  es la falla segura. **No participa de la idempotencia**: el `\Seen` de IMAP sigue siendo la única
+  marca. El hash se elige sobre normalizar y escapar a mano porque dos `Message-Id` distintos
+  podrían colapsar a la misma clave y rutear un comentario al requisito equivocado (viola G-04); el
+  costo aceptado es que la clave **no es legible** con `nats kv ls`.
+
+### Comentario *(entidad de Jiku)*
+
+- **Atributos que el conector escribe:** `comment` (string, req — el cuerpo de la respuesta más los
+  avisos y placeholders de sus adjuntos), `visibilityLevel` (enum: `public`/`internal` — el conector
+  manda **`'public'` explícito**), `fileIds` (int[], opt, max 10 — los archivos de la respuesta)
+- **Atributos que el conector NO toca:** `author` (opcional en el schema; `core` resuelve el actor
+  del subject)
+- **Relaciones:** belongs_to Requisito (req, por el `{id}` del subject), has_many Adjunto (por los
+  `fileIds`)
+- **Notas:** **El default del contrato es `internal`, el opuesto del que hace falta** — un
+  comentario `internal` no lo vería el cliente en Opus—, así que el `'public'` explícito es una
+  regla y no un adorno. El Requisito del hilo **no se modifica** al comentar: el comentario es una
+  entidad aparte y la regla 9 sigue valiendo. Sus `x-error-codes` incluyen `requirement_not_found`
+  (el requisito se borró en Jiku) y `file_not_owned`.
 
 ### Requisito *(entidad de Jiku)*
 
@@ -136,8 +177,8 @@ consecuencia distinta** y es lo que define el comportamiento del conector.
 |---|---|---|---|
 | `sin_leer` | Está en la casilla, `\Unseen` | → `en_proceso` | — |
 | `en_proceso` | El tick lo tomó y lo marcó `\Seen` | → `descartado`, `publicado`, `fallido` | → `sin_leer` (**el `\Seen` no se revierte**) |
-| `descartado` | Sin slug, slug no mapeado, es una respuesta, o no se pudo parsear | (terminal) | → cualquiera |
-| `publicado` | El comando de alta respondió `success` | (terminal) | → cualquiera |
+| `descartado` | Sin slug, slug no mapeado, hilo desconocido, no se pudo parsear, o el lookup del hilo no se pudo hacer | (terminal) | → cualquiera |
+| `publicado` | El comando de alta **o el de comentario** respondió `success` (REQ-005) | (terminal) | → cualquiera |
 | `fallido` | El comando falló o expiró | (terminal) | → cualquiera. **No hay reintento** |
 
 **Las dos transiciones que definen el conector, y las dos son pérdidas asumidas:**
@@ -146,6 +187,12 @@ consecuencia distinta** y es lo que define el comportamiento del conector.
   se perdió y el único rastro es el log.
 - **`en_proceso` no se revierte a `sin_leer`.** Si el proceso muere entre el comando exitoso y el
   `\Seen`, el próximo tick lo reprocesa y **crea un Requisito duplicado**.
+
+**Lo que REQ-005 cambia en este ciclo, y no es sólo un motivo más:** `publicado` deja de significar
+únicamente *"se creó un Requisito"* y pasa a cubrir también *"se publicó un comentario"*. La
+transición `en_proceso → descartado` gana el motivo `hilo_desconocido`, y si el proceso muere después
+del `\Seen` pero antes de escribir la entrada del hilo, **ese hilo queda sin ruteo** — el `\Seen`
+sigue siendo la única marca y el KV no se aprovecha para idempotencia.
 
 #### Adjunto del Mail
 
@@ -170,15 +217,19 @@ entró, así que avisar sería ruido y contar el placeholder dos veces sería me
 
 1. **Mail Entrante** — Un mail sin `messageId` no se procesa. Es el único campo obligatorio de la
    normalización.
-2. **Mail Entrante** — Un mail con `referenceIds` no vacío **se descarta en v1**. Sin esta regla, la
-   respuesta de un cliente crearía un Requisito duplicado en vez de un comentario: el "fuera de
-   alcance" tiene que ser **activo**, no pasivo.
+2. **Mail Entrante** *(reformulada en REQ-005)* — Un mail con `referenceIds` no vacío **se comenta
+   en el Requisito de su hilo si alguna referencia matchea el Mapa de Hilos, y se descarta como
+   `hilo_desconocido` si ninguna matchea**. El propósito original se conserva intacto: **sin match no
+   se crea nada**, así que la respuesta de un cliente nunca produce un Requisito duplicado. La regla
+   pasa de un descarte incondicional a un descarte por falla segura.
 3. **Mail Entrante** — Un mail que no resuelve a un proyecto **no crea nada**. Crear un Requisito en
    el proyecto equivocado lo haría visible a un cliente que no debía verlo, y eso rompe el
    aislamiento del portal de Jiku. El descarte es la falla segura.
 4. **Slug** — Se compara **siempre en minúsculas**, en las dos puntas del mapa.
-5. **Mapa de Tickets** — Un `slug` es único. Dos entradas con el mismo slug es un mapa mal formado y
-   el conector no arranca.
+5. **Mapa de Tickets** *(reformulada en REQ-005)* — Un `slug` es único, y **la unicidad la garantiza
+   el almacén**: un bucket KV no admite dos entradas con la misma clave, así que "mapa mal formado
+   por slug duplicado" deja de ser un modo de falla posible. Lo que sí falla al arrancar es que el
+   **bucket no exista**.
 6. **Requisito** — Nace siempre en `analisis`: el conector no manda `state`.
 7. **Requisito** — `title` se trunca a 255 caracteres **antes de publicar**. El contrato del comando
    no declara un `maxLength`, así que un asunto largo llegaría a `core` y fallaría en la base con un
@@ -187,7 +238,8 @@ entró, así que avisar sería ruido y contar el placeholder dos veces sería me
 8. **Requisito** — `title` y `description` nunca quedan vacíos: si el mail los trae vacíos, se usan
    los placeholders configurados. Los dos son `req` en Jiku.
 9. **Requisito** — Un Requisito creado **no se modifica nunca**. No hay comando de compensación en
-   el conector.
+   el conector. **Comentar no lo modifica** (REQ-005): el Comentario es una entidad aparte y esta
+   regla sigue valiendo entera.
 10. **Adjunto del Mail** — La política autoritativa es la de **`core`**, que lee la doble lista
     blanca —extensión **y** MIME— en caliente. La del conector es una **conveniencia** y puede
     quedar desalineada: si lo está, `core` rechaza y el conector anota el aviso.
@@ -212,9 +264,25 @@ entró, así que avisar sería ruido y contar el placeholder dos veces sería me
 20. **Tick** — Un mail que falla **no aborta el lote**: se cuenta, se loguea y el tick sigue.
 21. **Descripción del Requisito** — Se compone en un orden **determinístico**: cuerpo base, avisos
     de rechazo, avisos de fallo de subida, y **los placeholders siempre al final**.
-22. **Observabilidad** — No se loguean nunca: credenciales, tráfico IMAP crudo, el cuerpo del mail
-    ni el contenido de un adjunto. En un servicio sin nadie mirando, el log es el único rastro de un
-    ticket perdido — pero sigue siendo un log, no un depósito de datos del cliente.
+22. **Observabilidad** — No se loguean nunca: credenciales, tráfico IMAP crudo, el cuerpo del mail,
+    el contenido de un adjunto **ni el texto de un comentario** (REQ-005). En un servicio sin nadie
+    mirando, el log es el único rastro de un ticket perdido — pero sigue siendo un log, no un
+    depósito de datos del cliente.
+23. **Mapa de Hilos** *(REQ-005)* — La clave es el **sha256 en hex del `Message-Id` crudo**, nunca el
+    `Message-Id` normalizado o escapado: dos `Message-Id` distintos que colapsaran a la misma clave
+    rutearían un comentario al requisito equivocado.
+24. **Mapa de Hilos** *(REQ-005)* — Se escribe una entrada por **cada mail del hilo**: al crear el
+    Requisito desde el mail nuevo, y al comentar con éxito desde cada respuesta. Si el comentario
+    falla, **no se escribe** la entrada de esa respuesta.
+25. **Comentario** *(REQ-005)* — Se publica **siempre** con `visibilityLevel: 'public'` explícito. El
+    default del contrato de `core` es `internal`, y un comentario `internal` no lo vería el cliente
+    en Opus.
+26. **Mail Entrante** *(REQ-005)* — Una respuesta con match en el hilo **se comenta sin evaluar el
+    slug**: el `requirementId` del KV ya resuelve el destino, y exigir un subaddress válido rompería
+    el caso real del cliente que responde sin conservarlo.
+27. **Tick** *(REQ-005)* — Un fallo del write al Mapa de Hilos **nunca cancela el alta**: se loguea y
+    la consecuencia asumida es que ese hilo no va a rutear después. Convertir una falla de KV en un
+    ticket perdido sería lo contrario de la regla 13 ("el ticket es el activo").
 
 ---
 
