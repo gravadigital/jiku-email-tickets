@@ -6,6 +6,8 @@ import { type AppConfig, loadAppConfig } from '#config/index.js';
 import { connectToBus } from '#infra/bus/connection.js';
 import { BusConnectError, KeyLoadError } from '#infra/bus/errors.js';
 import { buildServiceUser } from '#infra/bus/identity.js';
+import { KvBucketMissingError } from '#infra/kv/errors.js';
+import { type KvStores, openKvStores } from '#infra/kv/stores.js';
 import { getLogger, initLogger } from '#shared/logger.js';
 import { SERVICE_NAME } from '#shared/service-info.js';
 
@@ -25,13 +27,18 @@ export interface Startup {
   readonly config: AppConfig;
   readonly logger: Logger;
   readonly client: Client;
+  /** Los dos buckets del KV, ya abiertos y verificados. Los consumen S-025 y S-026. */
+  readonly kv: KvStores;
 }
 
 /**
- * Carga la configuracion, construye el logger, la identidad, y conecta al bus.
+ * Carga la configuracion, construye el logger, la identidad, conecta al bus y abre los dos buckets
+ * del KV.
  *
- * Devuelve los tres para que el llamador decida que hacer despues: el worker queda vivo, el modo de
- * verificacion publica y cierra.
+ * Devuelve los cuatro para que el llamador decida que hacer despues: el worker queda vivo, el modo
+ * de verificacion publica y cierra. Los dos entry points heredan la verificacion de los buckets por
+ * usar esta funcion, y eso es correcto: arrancar contra un despliegue sin buckets tiene que fallar
+ * en los dos.
  */
 export async function runStartup(): Promise<Startup> {
   const config = await loadAppConfig();
@@ -87,7 +94,23 @@ export async function runStartup(): Promise<Startup> {
     'conectado al bus',
   );
 
-  return { config, logger, client };
+  // Paso 5.5 del flujo: los dos buckets del KV, sobre la conexion que ACABA de abrirse. Es 5.5 y
+  // no 6 porque el Paso 6 del flujo ya existe y es de otro sistema —Jiku creando la fila del
+  // conector en `users` por el evento del auth-callout, que no es un paso de este codigo.
+  //
+  // Va DESPUES de conectar y no antes por una razon dura y no de estilo: el `Kvm` se construye
+  // sobre `client.connection`, asi que sin cliente no hay conexion sobre la que construirlo.
+  //
+  // Y va ANTES de que el llamador schedule el tick: un bucket faltante tiene que impedir el
+  // arranque, no descubrirse en el primer mail. Sin el Mapa de Tickets no se puede rutear nada, y
+  // un conector arrancado que descarta todo en silencio es el modo de falla que esta verificacion
+  // existe para cerrar.
+  //
+  // El error se PROPAGA sin envolverse de nuevo: ya trae su diagnostico y el nombre del bucket, y
+  // `reportStartupFailure()` tiene su propia rama para el.
+  const kv = await openKvStores({ client, config, logger });
+
+  return { config, logger, client, kv };
 }
 
 /**
@@ -130,6 +153,31 @@ export function reportStartupFailure(error: unknown): void {
             { diagnosis: 'key_ilegible' }),
       },
       'el arranque fallo: el conector no pudo conectarse al bus',
+    );
+    return;
+  }
+
+  // El KV tiene su PROPIA rama y no comparte la del bus, y la diferencia no es cosmetica: cuando
+  // falta un bucket, la conexion al bus funciono perfectamente. Reportarlo como "el conector no
+  // pudo conectarse al bus" mandaria al operador a revisar Zitadel, la red y los montajes de
+  // credenciales cuando el arreglo es un `nats kv add` — el diagnostico equivocado que ADR-006
+  // existe para evitar, y el motivo de que esta rama exista.
+  //
+  // Sale por el logger porque en este punto YA existe: `initLogger()` corre en el paso 2 y el KV
+  // se abre en el 5.5.
+  if (error instanceof KvBucketMissingError) {
+    // Contexto PLANO, y sin `err`: los mensajes de la cadena viajan ya extraidos en `causes`,
+    // igual que en la rama del bus.
+    getLogger().fatal(
+      {
+        code: error.code,
+        diagnosis: error.diagnosis,
+        bucket: error.bucket,
+        operation: error.operation,
+        errorClass: error.errorClass,
+        causes: error.causes,
+      },
+      'el arranque fallo: un bucket del KV no esta usable',
     );
     return;
   }

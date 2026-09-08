@@ -68,7 +68,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 27**
+**Total: 28**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -170,11 +170,20 @@ N/A (no HTTP surface - ADR-001)
   (default: the real implementations), same pattern as `Normalize` in `tick.ts`, so a test double can
   force the unexpected-exception path.
 
+- **openKvStores()** (`src/infra/kv/stores.ts`) - Opens the two NATS KV buckets over the process's
+  **single** connection (`new Kvm(client.connection)`, never a new one) and **verifies they exist**
+  with `status()` — because `open()` does **not**: it binds lazily (`bindOnly: true` →
+  `Bucket.bind()`, which never calls `streams.info`) and resolves happily for a bucket that is not
+  there. Fails fast with an error that **names the missing bucket**, checking the tickets bucket
+  first and stopping there. Compares the threads bucket's TTL against the configured one and emits a
+  single `warn` if they differ — it never **sets** it, and it never **creates** a bucket. Takes
+  `logger` by parameter, not via `getLogger()`, so tests can inject a capture.
+
 See full details in [services.md](./services.md)
 
 ## Test Helpers
 
-**Total: 9**
+**Total: 10**
 
 - **setupTestBus** (`test/bus/helpers.ts`) - Opens a NATS connection against the suite's shared
   container and builds a bus `Client` with `Client.fromConnection()`, returning a context with
@@ -185,6 +194,13 @@ See full details in [services.md](./services.md)
 - **startAuthenticatedNats** (`test/bus/auth-helpers.ts`) - Starts a NATS container with `--auth`, so a
   wrong token yields a **real** `Authorization Violation`. Read its notes: it does **not** exercise the
   auth-callout, the `internal-app` role, or the real inbox prefix.
+- **startJetStreamNats** (`test/infra/kv/helpers.ts`) - Starts a NATS container **with `-js`** (on a
+  **different image tag** than the shared one, so `shared-container.test.ts`'s `ancestor=` count
+  never sees it — read its comment: that is not a version decision), plus a
+  `seedBucket(name, ttlDays?)` that stands in for the operator's `nats kv add`. The suite's shared
+  container runs **without** JetStream, so the KV happy path is inexpressible against it; `-js` is
+  deliberately **not** added there, because buckets seeded by one file would be visible to the others.
+  This helper is the only place in the repo that calls `kvm.create()` — production code never does.
 - **fakeTokenSource / rotatingTokenSource / failingTokenSource** (`test/bus/auth-helpers.ts`) -
   `TokenSource` doubles at the edge for the connection tests, since the real `ServiceUser` would call
   Zitadel.
@@ -213,7 +229,7 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 35**
+**Total: 39**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -242,6 +258,25 @@ See full details in [test-helpers.md](./test-helpers.md)
   union. `'desconocido'` is legitimate and is never mapped to another value.
 - **diagnoseConnectFailure() / causeChain()** (`src/infra/bus/errors.ts`) - Classify a connection
   failure by **structure**, never by the SDK's message text — the SDK's own regex misses a closed port.
+- **KvBucketMissingError** (`src/infra/kv/errors.ts`) - A KV bucket is not usable at startup. Exposes
+  `diagnosis`, **`bucket`**, `operation`, `errorClass` and `causes` as fields; `bucket` is what makes
+  the failure actionable, since with two buckets "a bucket is missing" does not say where the fix is.
+  Reuses `causeChain()` rather than reimplementing the walk. Has its **own** branch in
+  `reportStartupFailure()` — reporting it as a bus connection failure would send the operator to
+  Zitadel when the fix is a `nats kv add`.
+- **KvDiagnosis** (`src/infra/kv/errors.ts`) - What to fix, as a literal union:
+  `'bucket_inexistente'`, `'kv_no_disponible'`, `'nombre_de_bucket_invalido'`, `'desconocido'`.
+  `'kv_no_disponible'` covers **both** "JetStream disabled" and "no KV permissions", which are
+  indistinguishable from the client, so its remedy names both.
+- **diagnoseKvFailure()** (`src/infra/kv/errors.ts`) - Classifies a KV failure by `name` and by `code`
+  (`10059`) — **never** by the message text. The KV error classes are not importable from the SDK
+  subpath, so `instanceof` is impossible; and the library's own `Kvm.create()` compares
+  `err.message === "stream not found"`, which is the bug this does not replicate.
+- **isValidBucketName()** (`src/infra/kv/errors.ts`) - Whether a configured name can be a KV bucket,
+  against the same `/^[-\w]+$/` the library uses. Runs **before** any I/O so the diagnosis is
+  positive instead of depending on recognizing the library's plain `Error`.
+- **KvStores** (`src/infra/kv/stores.ts`) - The two open handles (`tickets`, `threads`) that S-025 and
+  S-026 consume.
 - **NewRequirementPayload** (`src/domain/publicacion/requirement.types.ts`) - The `requirements.new`
   payload, **inferred** from the schema with `z.infer`. The SDK exports no type for this command, so
   the schema is the only definition of the contract in the repo.

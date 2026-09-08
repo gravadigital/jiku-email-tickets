@@ -75,6 +75,12 @@ function configWith(overrides: Partial<AppConfig> = {}): AppConfig {
       placeholderBody: '(mail sin contenido)',
     },
     adjuntos: CONFIG_ADJUNTOS,
+    kv: {
+      ticketsBucket: 'TICKETS',
+      threadsBucket: 'MAIL_THREADS',
+      threadsTtlDays: 90,
+      watchRetryMs: 30_000,
+    },
     ...overrides,
   };
 }

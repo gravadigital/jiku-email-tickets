@@ -7,6 +7,12 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { AppConfig } from '#config/index.js';
 import { EXPECTATIONS, ConfigValidationError } from '#config/errors.js';
 import { loadEnv } from '#config/env.js';
+import {
+  DEFAULT_KV_THREADS_BUCKET,
+  DEFAULT_KV_THREADS_TTL_DAYS,
+  DEFAULT_KV_TICKETS_BUCKET,
+  DEFAULT_KV_WATCH_RETRY_MS,
+} from '#config/schema.js';
 
 /**
  * Las rutas que `readFileSync` recibio, para el caso de la lectura unica (TS-32).
@@ -561,5 +567,132 @@ describe('loadEnv and the Ticket Map', () => {
     loadEnvMocked({ ...VALID_ENV, TICKET_MAP: undefined, TICKET_MAP_FILE: path });
 
     expect(readFileSyncCalls.filter((target) => target === path)).toHaveLength(1);
+  });
+});
+
+/**
+ * El bloque KV de S-024: las cuatro claves nuevas de configuracion.
+ *
+ * Los casos van sobre `loadEnv()` y no sobre el schema desnudo porque es el borde publico que el
+ * arranque usa: lo que interesa afirmar es que un valor invalido produce un `ConfigValidationError`
+ * con la variable en `error.variables` — la lista UNICA que el operador lee— y no solo que Zod
+ * rechaza.
+ */
+describe('loadEnv KV block', () => {
+  // TS-1. Los cuatro defaults se aplican si ninguna KV_* esta declarada, y los dos numericos
+  // llegan como `number` (no como el string del entorno): la coercion es parte del contrato.
+  it('applies the four KV defaults when no KV variable is declared', () => {
+    const env = loadEnv(VALID_ENV);
+
+    expect(env.KV_TICKETS_BUCKET).toBe(DEFAULT_KV_TICKETS_BUCKET);
+    expect(env.KV_THREADS_BUCKET).toBe(DEFAULT_KV_THREADS_BUCKET);
+    expect(env.KV_THREADS_TTL_DAYS).toBe(DEFAULT_KV_THREADS_TTL_DAYS);
+    expect(env.KV_WATCH_RETRY_MS).toBe(DEFAULT_KV_WATCH_RETRY_MS);
+
+    expect(typeof env.KV_THREADS_TTL_DAYS).toBe('number');
+    expect(typeof env.KV_WATCH_RETRY_MS).toBe('number');
+  });
+
+  // TS-2. Los cuatro valores declarados se respetan, y los numericos se coercionan del string.
+  it('honours the four declared values and coerces the numeric ones', () => {
+    const env = loadEnv({
+      ...VALID_ENV,
+      KV_TICKETS_BUCKET: 'MIS_TICKETS',
+      KV_THREADS_BUCKET: 'MIS_HILOS',
+      KV_THREADS_TTL_DAYS: '30',
+      KV_WATCH_RETRY_MS: '5000',
+    });
+
+    expect(env.KV_TICKETS_BUCKET).toBe('MIS_TICKETS');
+    expect(env.KV_THREADS_BUCKET).toBe('MIS_HILOS');
+    expect(env.KV_THREADS_TTL_DAYS).toBe(30);
+    expect(env.KV_WATCH_RETRY_MS).toBe(5000);
+  });
+
+  // TS-3. Un nombre de bucket que es solo espacios no arranca, y el mensaje NO contiene el valor:
+  // es la propiedad que toda la tabla de EXPECTATIONS sostiene.
+  it('rejects a whitespace-only bucket name without echoing the value', () => {
+    expect(() => loadEnv({ ...VALID_ENV, KV_TICKETS_BUCKET: '   ' })).toThrow(
+      ConfigValidationError,
+    );
+
+    try {
+      loadEnv({ ...VALID_ENV, KV_TICKETS_BUCKET: '   ' });
+      expect.unreachable('deberia haber lanzado');
+    } catch (error) {
+      const err = error as ConfigValidationError;
+      expect(err.variables).toContain('KV_TICKETS_BUCKET');
+      expect(err.message).toContain(`  - KV_TICKETS_BUCKET: ${EXPECTATIONS.KV_TICKETS_BUCKET ?? ''}`);
+      expect(err.message).not.toContain("'   '");
+    }
+  });
+
+  it('rejects a whitespace-only threads bucket name too', () => {
+    try {
+      loadEnv({ ...VALID_ENV, KV_THREADS_BUCKET: '  ' });
+      expect.unreachable('deberia haber lanzado');
+    } catch (error) {
+      expect((error as ConfigValidationError).variables).toContain('KV_THREADS_BUCKET');
+    }
+  });
+
+  // TS-4 y TS-5. El TTL de dias es un entero POSITIVO: ni 0, ni negativo, ni fraccionario.
+  it.each(['0', '-1', '90.5', 'no-es-num'])(
+    'rejects the TTL in days when it is %s',
+    (raw) => {
+      try {
+        loadEnv({ ...VALID_ENV, KV_THREADS_TTL_DAYS: raw });
+        expect.unreachable('deberia haber lanzado');
+      } catch (error) {
+        expect((error as ConfigValidationError).variables, raw).toContain('KV_THREADS_TTL_DAYS');
+      }
+    },
+  );
+
+  // TS-6. Idem para el retry en ms, que S-024 declara y S-025 consume.
+  it.each(['0', '-1', '30.5', 'no-es-num'])(
+    'rejects the watch retry in ms when it is %s',
+    (raw) => {
+      try {
+        loadEnv({ ...VALID_ENV, KV_WATCH_RETRY_MS: raw });
+        expect.unreachable('deberia haber lanzado');
+      } catch (error) {
+        expect((error as ConfigValidationError).variables, raw).toContain('KV_WATCH_RETRY_MS');
+      }
+    },
+  );
+
+  // TS-7. Las cuatro claves entran en la MISMA lista agregada que un fallo preexistente. Es el
+  // caso que demuestra que el bloque nuevo no se salio del canal de reporte unico: el operador
+  // sigue leyendo un solo mensaje con todo lo que hay que arreglar, no uno por variable.
+  it('reports the KV failures in the same aggregated list as a pre-existing one', () => {
+    try {
+      loadEnv({
+        ...VALID_ENV,
+        IMAP_HOST: undefined,
+        KV_THREADS_TTL_DAYS: 'no-es-num',
+        KV_WATCH_RETRY_MS: '0',
+      });
+      expect.unreachable('deberia haber lanzado');
+    } catch (error) {
+      const err = error as ConfigValidationError;
+
+      expect([...err.variables].sort()).toEqual([
+        'IMAP_HOST',
+        'KV_THREADS_TTL_DAYS',
+        'KV_WATCH_RETRY_MS',
+      ]);
+      expect(err.message).toContain('IMAP_HOST');
+      expect(err.message).toContain('KV_THREADS_TTL_DAYS');
+      expect(err.message).toContain('KV_WATCH_RETRY_MS');
+    }
+  });
+
+  // El string vacio cuenta como AUSENTE (`emptyStringAsUndefined` esta activo) y cae al default.
+  // Es la diferencia con el caso de los espacios de arriba, y es deliberada.
+  it('treats an empty bucket name as absent and falls back to the default', () => {
+    expect(loadEnv({ ...VALID_ENV, KV_TICKETS_BUCKET: '' }).KV_TICKETS_BUCKET).toBe(
+      DEFAULT_KV_TICKETS_BUCKET,
+    );
   });
 });

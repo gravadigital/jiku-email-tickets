@@ -30,6 +30,17 @@ worker en node
   redactado, ningun log filtra contenido de cliente, entry points limpios, pico de memoria de un mail
   a la vez — S-016). Documentado de punta a punta en
   [ruteo-y-alta-del-requisito](../../flows/ruteo-y-alta-del-requisito.md).
+- **infra/kv** — Los dos buckets KV de NATS sobre la **conexion unica** del proceso (ADR-002): el
+  `Kvm` se construye sobre `client.connection`, nunca sobre una conexion nueva. **Estado (S-024):**
+  la **apertura y verificacion** de los dos buckets al arrancar esta **implementada** —
+  `openKvStores()` los abre con `open()` y verifica que existen con `status()`, falla rapido con un
+  error que **nombra el bucket faltante**, y compara el TTL del bucket de hilos avisando con un
+  `warn` sin fijarlo. El conector **no crea buckets** y **no fija el TTL**, las dos cosas afirmadas
+  por tests que escanean `src/`. **Pendiente:** el `watch()` del Mapa de Tickets con su copia en
+  memoria (S-025), y las operaciones del Mapa de Hilos —el write y el lookup— (S-026). Documentado
+  en el Paso 5.5 de [arranque-y-conexion-al-bus](../../flows/arranque-y-conexion-al-bus.md), que
+  registra los cuatro hallazgos verificados del KV (entre ellos que `open()` **no** verifica
+  existencia, y que el TTL viene en milisegundos).
 - **publicacion** — Los dos comandos de escritura al bus via el SDK: `files.request-upload` y
   `requirements.new`. El `PUT` del byte del adjunto a la URL prefirmada que devuelve `core`.
   **Estado (S-005 a S-022):** `requirements.new` esta **implementado** de punta a punta —schema Zod
@@ -56,9 +67,13 @@ casilla duplicarian tickets (NFR-SC03).
 **Restriccion dura de red.** El conector va dentro de la red del bus de Jiku, que no esta expuesta al
 ingress. No puede desplegarse afuera y alcanzar NATS.
 
-**El SDK `@gravadigital/jiku` v1.0.0 es la dependencia central.** Reemplaza el cliente NATS propio,
+**El SDK `@gravadigital/jiku` (>= v1.1.0) es la dependencia central.** Reemplaza el cliente NATS propio,
 la obtencion del token de Zitadel (RFC 7523) y su refresh en background, y el prefijo de inbox. Las
-siete clases de error del SDK son lo que distingue *que sistema rechazo* en el log.
+siete clases de error del SDK son lo que distingue *que sistema rechazo* en el log. Desde S-023 el
+SDK tambien **re-exporta el KV** por su subpath `./nats`, y es por ahi que entra: el conector **no**
+declara `@nats-io/kv` ni `@nats-io/jetstream` (ADR-002), porque tomarlos del subpath garantiza una
+sola copia de `nats-core` en el arbol — sin la cual un `instanceof` contra una clase de error del
+SDK falla contra la copia que lo lanzo.
 
 **El conector no expone nada.** Ni HTTP, ni puerto, ni suscripcion a subjects de otros. Por eso no
 hay especificacion OpenAPI en `docs/apis/` para este producto — un `/health` de relleno seria un
@@ -67,6 +82,15 @@ contrato falso.
 **Sin base de datos propia.** No hay documento en `docs/db-schemas/`, ni migraciones, ni cliente de
 PostgreSQL. Las entidades que el conector crea (Requisito, Archivo, Adjunto) son de Jiku y las
 escribe `core`.
+
+**Pero desde S-024 sí tiene estado, y vive en el bus.** El matiz correcto no es "el conector no
+persiste nada" sino **"el conector no tiene persistencia propia"**: usa dos buckets KV de NATS
+(JetStream), que es un almacén del bus —una dependencia que ya tenía— y no una base que él
+administre. Sigue sin haber `docs/db-schemas/`, sin migraciones y sin cliente de base: un bucket KV
+no es ninguna de esas cosas. Los dos buckets son `KV_TICKETS_BUCKET` (el Mapa de Tickets:
+`slug → projectId`, configuración que administra un humano) y `KV_THREADS_BUCKET` (el Mapa de Hilos:
+`sha256(Message-Id) → requirementId`, estado que el conector escribe en cada mail). **Los crea el
+operador**, no el conector.
 
 **El logging es la preocupacion transversal mas importante.** No hay nadie mirando: el cliente mando
 un mail y se fue. Un ticket perdido no tiene sintoma. Cada mail deja al menos una linea con su

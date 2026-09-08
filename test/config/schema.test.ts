@@ -9,6 +9,10 @@ import {
   DEFAULT_ALLOWED_MIME_TYPES,
   DEFAULT_IMAP_PORT,
   DEFAULT_ISSUER,
+  DEFAULT_KV_THREADS_BUCKET,
+  DEFAULT_KV_THREADS_TTL_DAYS,
+  DEFAULT_KV_TICKETS_BUCKET,
+  DEFAULT_KV_WATCH_RETRY_MS,
   DEFAULT_MAX_ATTACHMENT_SIZE_BYTES,
   DEFAULT_PLACEHOLDER_BODY,
   DEFAULT_PLACEHOLDER_TITLE,
@@ -149,8 +153,8 @@ describe('envSchema', () => {
   it('declares the four IMAP and three POLL variables, the five routing ones, and the four attachment policy ones', () => {
     const declared = Object.keys(envSchema);
 
-    // Veintiseis desde S-017: las veintidos de S-012 mas las cuatro de la politica de archivos.
-    expect(declared).toHaveLength(26);
+    // Treinta desde S-024: las veintiseis de S-017 mas las cuatro del KV.
+    expect(declared).toHaveLength(30);
     for (const name of ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASSWORD']) {
       expect(declared, name).toContain(name);
     }
@@ -171,6 +175,14 @@ describe('envSchema', () => {
       'ATTACHMENT_ALLOWED_MIME_TYPES',
       'ATTACHMENT_MAX_SIZE_BYTES',
       'PUT_TIMEOUT_MS',
+    ]) {
+      expect(declared, name).toContain(name);
+    }
+    for (const name of [
+      'KV_TICKETS_BUCKET',
+      'KV_THREADS_BUCKET',
+      'KV_THREADS_TTL_DAYS',
+      'KV_WATCH_RETRY_MS',
     ]) {
       expect(declared, name).toContain(name);
     }
@@ -627,5 +639,47 @@ describe('envSchema attachment policy defaults', () => {
 
     expect(parsed.ATTACHMENT_ALLOWED_EXTENSIONS).toEqual(['.png']);
     expect(parsed.ATTACHMENT_ALLOWED_MIME_TYPES).toEqual(DEFAULT_ALLOWED_MIME_TYPES.split(','));
+  });
+});
+
+describe('envSchema KV defaults', () => {
+  // Los cuatro defaults van como constantes NOMBRADAS y exportadas, siguiendo el precedente de
+  // DEFAULT_IMAP_PORT / DEFAULT_POLL_CRON: un default que otra story tenga que referir no se
+  // copia, se importa. S-025 va a referir DEFAULT_KV_WATCH_RETRY_MS sin volver a escribir 30000.
+  it('exposes the four KV defaults as named constants', () => {
+    expect(DEFAULT_KV_TICKETS_BUCKET).toBe('TICKETS');
+    expect(DEFAULT_KV_THREADS_BUCKET).toBe('MAIL_THREADS');
+    expect(DEFAULT_KV_THREADS_TTL_DAYS).toBe(90);
+    expect(DEFAULT_KV_WATCH_RETRY_MS).toBe(30_000);
+  });
+
+  // Los dos nombres de bucket por default tienen que ser validos contra el `validBucketRe` de
+  // @nats-io/kv (lib/kv.js:88), o el conector fallaria al arrancar con la configuracion por
+  // default — que es el peor modo de falla posible para un default.
+  it('keeps both default bucket names valid against the KV bucket-name rule', () => {
+    const validBucketRe = /^[-\w]+$/;
+
+    expect(validBucketRe.test(DEFAULT_KV_TICKETS_BUCKET)).toBe(true);
+    expect(validBucketRe.test(DEFAULT_KV_THREADS_BUCKET)).toBe(true);
+  });
+
+  it('applies the four defaults when only the required variables are present', () => {
+    const parsed = schema.parse(VALID_ENV);
+
+    expect(parsed.KV_TICKETS_BUCKET).toBe(DEFAULT_KV_TICKETS_BUCKET);
+    expect(parsed.KV_THREADS_BUCKET).toBe(DEFAULT_KV_THREADS_BUCKET);
+    expect(parsed.KV_THREADS_TTL_DAYS).toBe(DEFAULT_KV_THREADS_TTL_DAYS);
+    expect(parsed.KV_WATCH_RETRY_MS).toBe(DEFAULT_KV_WATCH_RETRY_MS);
+  });
+
+  // Cada clave es independiente: declarar solo una arranca igual, con las otras tres en default.
+  // Es la forma observable de "ninguna es cross-field".
+  it('starts with only one of the four KV keys declared', () => {
+    const parsed = schema.parse({ ...VALID_ENV, KV_THREADS_TTL_DAYS: '7' });
+
+    expect(parsed.KV_THREADS_TTL_DAYS).toBe(7);
+    expect(parsed.KV_TICKETS_BUCKET).toBe(DEFAULT_KV_TICKETS_BUCKET);
+    expect(parsed.KV_THREADS_BUCKET).toBe(DEFAULT_KV_THREADS_BUCKET);
+    expect(parsed.KV_WATCH_RETRY_MS).toBe(DEFAULT_KV_WATCH_RETRY_MS);
   });
 });

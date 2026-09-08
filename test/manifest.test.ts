@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -55,7 +57,48 @@ describe('package.json', () => {
   });
 
   it('declares the bus SDK in the exact required range', () => {
-    expect(manifest.dependencies?.['@gravadigital/jiku']).toBe('^1.0.0');
+    // S-024 necesita el KV que el SDK re-exporta por su subpath ./nats, y eso es el minor 1.1.0
+    // de S-023. Mientras ese minor no este publicado en el registry, el rango apunta al tarball
+    // local (`npm pack` del repo del SDK) para no bloquear las stories del conector.
+    //
+    // El `file:` es TEMPORAL y esta anotado en el plan de S-024: cuando 1.1.0 se publique, esto
+    // vuelve a un rango del registry ('^1.1.0'). El test acepta las dos formas a proposito —
+    // fallar aca durante REQ-005 no protegeria nada y solo esconderia las fallas reales.
+    const declared = manifest.dependencies?.['@gravadigital/jiku'];
+
+    expect(declared).toMatch(/^(\^1\.[1-9]\d*\.\d+|file:vendor\/gravadigital-jiku-1\.1\.0\.tgz)$/);
+  });
+
+  it('resuelve un SDK que realmente re-exporta el KV', () => {
+    // El contrapeso del caso de arriba: aceptar el `file:` sin verificar QUE resolvio dejaria pasar
+    // un tarball viejo, y el sintoma seria un `Kvm` undefined en el arranque. Se afirma sobre lo
+    // que hay INSTALADO, que es lo que el codigo va a importar, y no sobre lo que el manifest pide.
+    const installed = JSON.parse(
+      readFileSync(join(PROJECT_ROOT, 'node_modules', '@gravadigital', 'jiku', 'package.json'), 'utf8'),
+    ) as { version: string; dependencies?: Record<string, string> };
+
+    const [major, minor] = installed.version.split('.').map(Number);
+    expect(major).toBe(1);
+    // 1.1.0 es el minor de S-023: el primero que re-exporta @nats-io/kv por el subpath ./nats.
+    expect(minor).toBeGreaterThanOrEqual(1);
+
+    // Y el KV viaja pinneado EXACTO en el SDK, que es lo que mantiene una sola copia de nats-core
+    // en este arbol (S-023 / ADR-002). Un rango aca reintroduciria la doble copia.
+    expect(installed.dependencies?.['@nats-io/kv']).toBe('3.4.0');
+  });
+
+  it('declares NEITHER @nats-io/kv NOR @nats-io/jetstream as a direct dependency', () => {
+    // La Implementation Rule de ADR-002 que S-023 existe para no tener que reescribir: el KV entra
+    // por el subpath del SDK, no por aca. Declararlo directamente traeria una SEGUNDA copia de
+    // @nats-io/nats-core al arbol, y entonces `instanceof` contra las clases de error del SDK
+    // empieza a dar false contra la copia que lanzo — que es de lo que depende la traduccion de
+    // errores de diagnosePublishFailure().
+    for (const forbidden of ['@nats-io/kv', '@nats-io/jetstream', '@nats-io/nats-core', 'nats']) {
+      expect(
+        allDependencies,
+        `${forbidden} must come from the SDK subpath, not from this package.json`,
+      ).not.toHaveProperty(forbidden);
+    }
   });
 
   it('declares no database client, direct or dev', () => {

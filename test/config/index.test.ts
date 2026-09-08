@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LoadedConfig } from '@gravadigital/jiku/node';
 
 import { ConfigValidationError } from '#config/errors.js';
+import { DEFAULT_ISSUER } from '#config/schema.js';
 
 const { loadConfigMock } = vi.hoisted(() => ({ loadConfigMock: vi.fn() }));
 
@@ -30,9 +31,14 @@ function sdkResult(overrides: Partial<LoadedConfig> = {}): LoadedConfig {
   return {
     instance: 'dev',
     credsFile: VALID_ENV.JIKU_CREDS,
+    // `issuer` NO es opcional en `LoadedConfig` desde el minor del SDK que trae el KV (S-023):
+    // `loadConfig()` le aplica su propio default, asi que el tipo dejo de hedgear sobre el. El
+    // doble tiene que declararlo igual que el SDK real, y el valor es el del SDK —no el del
+    // schema— para que los casos que afirman "el issuer del SDK manda" sigan siendo verdaderos.
     zitadel: {
       keyFile: VALID_ENV.JIKU_KEY_FILE,
       projectId: VALID_ENV.JIKU_PROJECT_ID,
+      issuer: DEFAULT_ISSUER,
     },
     path: undefined,
     ...overrides,
@@ -116,7 +122,11 @@ describe('loadAppConfig', () => {
     loadConfigMock.mockResolvedValue(
       sdkResult({
         credsFile: '/home/svc/expanded/sentinel.creds',
-        zitadel: { keyFile: '/home/svc/expanded/key.json', projectId: 'sdk-project' },
+        zitadel: {
+          keyFile: '/home/svc/expanded/key.json',
+          projectId: 'sdk-project',
+          issuer: DEFAULT_ISSUER,
+        },
       }),
     );
     const { loadAppConfig } = await import('#config/index.js');
@@ -199,7 +209,7 @@ describe('loadAppConfig', () => {
     });
   });
 
-  it('exposes exactly the fourteen documented fields', async () => {
+  it('exposes exactly the fifteen documented fields', async () => {
     loadConfigMock.mockResolvedValue(sdkResult());
     const { loadAppConfig } = await import('#config/index.js');
 
@@ -217,6 +227,10 @@ describe('loadAppConfig', () => {
         'instance',
         'issuer',
         'keyFile',
+        // El bloque del KV lo agrega S-024: los dos buckets (el Mapa de Tickets y el Mapa de
+        // Hilos) se abren con la configuracion ENTERA, con el mismo criterio que `imap` y `poll`.
+        // `watchRetryMs` se declara aca y lo consume el watch de S-025.
+        'kv',
         'logLevel',
         // nodeEnv lo agrega S-003: lo consume el logger para elegir formato (JSON vs pino-pretty).
         'nodeEnv',

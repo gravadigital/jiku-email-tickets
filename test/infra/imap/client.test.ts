@@ -53,6 +53,12 @@ function configWith(overrides: Partial<AppConfig['imap']> = {}): AppConfig {
       maxSizeBytes: 10_485_760,
       putTimeoutMs: 30_000,
     },
+    kv: {
+      ticketsBucket: 'TICKETS',
+      threadsBucket: 'MAIL_THREADS',
+      threadsTtlDays: 90,
+      watchRetryMs: 30_000,
+    },
   };
 }
 
