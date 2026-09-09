@@ -60,9 +60,12 @@ describe('src/ source properties', () => {
       expect(env?.code, `${key} no debe aparecer en env.ts`).not.toContain(key);
     }
 
-    // Y la sanidad del caso: la UNICA regla cross-field sigue siendo la del Mapa de Tickets. Sin
-    // esta linea, el test pasaria igual si alguien vaciara `createFinalSchema` por completo.
-    expect(env?.code).toContain('ticketMapSourceIssues');
+    // La sanidad del caso. Hasta S-025 era "la unica regla cross-field sigue siendo la del Mapa de
+    // Tickets"; S-025 elimino esa regla —y con ella el `createFinalSchema` que existia solo para
+    // hospedarla— asi que el ancla pasa a ser que el modulo sigue siendo el validador del entorno.
+    // Sin alguna linea asi, el caso pasaria igual sobre un `env.ts` vaciado.
+    expect(env?.code).toContain('createEnv');
+    expect(env?.code).toContain('envSchema');
   });
 
   // El complemento del caso de arriba, y lo que le da su sentido: el guard mira DOS variables, y
@@ -259,23 +262,26 @@ describe('routing block log safety', () => {
     }
   });
 
-  // TS-38. Ni siquiera con las cinco variables nuevas: si la implementacion necesitara leer el
-  // entorno en otro lado, la implementacion esta mal, no el test (CA-12 lo dice explicitamente).
-  it('keeps the schema module free of process.env, with the five new variables in it', () => {
+  // TS-38. Si la implementacion necesitara leer el entorno en otro lado, la implementacion esta
+  // mal, no el test (CA-12 lo dice explicitamente).
+  //
+  // S-025 saco `TICKET_MAP` y `TICKET_MAP_FILE` de la lista de anclaje porque el schema ya no las
+  // declara — el Mapa de Tickets viene del KV. La PROPIEDAD que este caso defiende no cambio: el
+  // schema no lee `process.env`. Lo que cambio es la lista que evita que el caso pase en verde
+  // sobre un schema vacio.
+  it('keeps the schema module free of process.env, with the routing variables in it', () => {
     const schema = FILES.find((file) => file.relativePath === `${CONFIG_DIR}schema.ts`);
 
     expect(schema).toBeDefined();
     expect(schema?.code).not.toMatch(/process\.env/);
-    // Y las cinco estan efectivamente ahi: sin esto el caso pasaria en verde sobre un schema que no
-    // declara nada.
-    for (const name of [
-      'TICKET_MAP',
-      'TICKET_MAP_FILE',
-      'SUBADDRESS_PREFIX',
-      'PLACEHOLDER_TITLE',
-      'PLACEHOLDER_BODY',
-    ]) {
+    for (const name of ['SUBADDRESS_PREFIX', 'PLACEHOLDER_TITLE', 'PLACEHOLDER_BODY']) {
       expect(schema?.code, name).toContain(name);
+    }
+
+    // Y las dos que S-025 elimino NO volvieron: el Mapa de Tickets tiene una sola fuente ahora, y
+    // reintroducir cualquiera de estas seria volver a tener dos.
+    for (const gone of ['TICKET_MAP', 'TICKET_MAP_FILE']) {
+      expect(schema?.code, gone).not.toContain(gone);
     }
   });
 

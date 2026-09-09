@@ -198,8 +198,6 @@ declarada, y su ausencia sólo es un error para el proceso que la necesita.
 | `POLL_CRON` | No | `*/5 * * * *` | Se valida con `cron.validate()` de `node-cron` **en el arranque**: una expresión mal formada **no arranca** |
 | `POLL_ENABLED` | No | `true` | Sólo `true` o `false` literales. Cualquier otro valor **no arranca** |
 | `POLL_MAX_PER_TICK` | No | `50` | Máximo de mails por tick. Mínimo `1` |
-| `TICKET_MAP` | **Condicional** | — | El Mapa de Tickets **inline**, como JSON. **Una** de las dos fuentes |
-| `TICKET_MAP_FILE` | **Condicional** | — | **Ruta** a un archivo montado con ese mismo JSON. **La otra** fuente |
 | `SUBADDRESS_PREFIX` | No | `tickets` | Prefijo del subaddress del que se extrae el slug (`tickets+alfa@…`) |
 | `PLACEHOLDER_TITLE` | No | `Ticket recibido por mail` | Título del requisito cuando el mail llega sin asunto |
 | `PLACEHOLDER_BODY` | No | `(mail sin contenido)` | Cuerpo del requisito cuando el mail llega sin contenido |
@@ -210,47 +208,45 @@ declarada, y su ausencia sólo es un error para el proceso que la necesita.
 | `KV_TICKETS_BUCKET` | No | `TICKETS` | Nombre del bucket KV del Mapa de Tickets. **El conector no lo crea:** lo crea el operador con `nats kv add` |
 | `KV_THREADS_BUCKET` | No | `MAIL_THREADS` | Nombre del bucket KV del Mapa de Hilos. **El conector no lo crea** |
 | `KV_THREADS_TTL_DAYS` | No | `90` | TTL **esperado** del bucket de hilos, en **días**. El conector lo **compara** contra el real y avisa con un `warn` si difiere; **no lo fija** |
-| `KV_WATCH_RETRY_MS` | No | `30000` | Intervalo del reintento del `watch()` del KV si se cae. Se declara acá y lo consume S-025 |
+| `KV_WATCH_RETRY_MS` | No | `30000` | Cada cuánto reintenta el `watch()` del Mapa de Tickets si se cae. Mientras tanto el mapa **se conserva** y el ruteo sigue funcionando con la última copia buena |
 
-#### El Mapa de Tickets y sus dos fuentes excluyentes
+#### El Mapa de Tickets vive en un bucket KV del bus
 
 El Mapa de Tickets es lo que traduce el slug del subaddress al `projectId` de Jiku donde se crea el
-requisito. **Es requerido**, y se declara en **exactamente una** de dos fuentes:
+requisito. **Desde REQ-005 no es una variable de entorno**: es un bucket KV de NATS, con el slug
+como clave y el `projectId` como valor.
 
-- **`TICKET_MAP`** — el JSON inline, en la variable de entorno.
-- **`TICKET_MAP_FILE`** — la ruta a un archivo montado con ese mismo JSON.
-
-**Declarar las dos no arranca**, y es deliberado: elegir una en silencio dejaría a U-02 editando la
-que no tiene efecto y sin entender por qué el ruteo no cambia. **No declarar ninguna tampoco
-arranca.** Las dos fuentes aceptan **exactamente el mismo contenido** — un objeto de pares
-`"<slug>": <projectId>`, con el `projectId` como el **entero** de Jiku, nunca el nombre del proyecto
-ni su slug:
-
-```json
-{ "alfa": 42, "beta": 7 }
+```bash
+nats kv add TICKETS                 # una vez, al preparar el despliegue
+nats kv put TICKETS alfa 42         # y un put por proyecto
+nats kv put TICKETS beta 7
 ```
 
-Cinco cosas que conviene saber antes de configurarlo:
+**El cambio que esto compra: agregar un proyecto ya no necesita redeploy.** El conector sigue el
+bucket con `watch()` sobre una copia en memoria, así que un `nats kv put` aparece en el ruteo en
+segundos, con el worker corriendo. Antes había que editar la variable y redesplegar el contenedor.
 
-- **Los slugs se normalizan a minúsculas al cargar.** `{"Alfa": 42, "alfa": 7}` es un **duplicado** y
-  **no arranca**. La comparación es en minúsculas en las dos puntas: la del mapa y la del mail.
-- **Un mapa vacío (`{}`) es válido y arranca.** La *ausencia* no arranca; el vacío sí. Es la
-  diferencia entre una decisión del operador y un olvido de configuración: con el mapa vacío el
-  worker arranca y descarta todo con log.
-- **Los `projectId` no se verifican contra Jiku.** Un `projectId` que apunta a un proyecto
-  inexistente **arranca igual** — el conector no consulta el plano de lectura del bus (ADR-004). El
-  síntoma aparece más tarde, por mail, como `project_not_found`.
-- **No hay recarga en caliente.** El mapa se lee **una sola vez al arrancar**: agregarle un slug con
-  el worker corriendo no cambia nada hasta el **redeploy**.
-- **Un mapa mal formado no arranca**, y entra en la **misma lista** de fail-fast que lo que falte del
-  bus y de IMAP. Son seis formas: JSON no parseable, JSON que no es un objeto de pares, `projectId`
-  que no es entero positivo, slug vacío, slugs duplicados, y ruta de archivo inexistente o ilegible.
+Seis cosas que conviene saber antes de operarlo:
 
-El archivo de `TICKET_MAP_FILE` se monta **read-only**, igual que la key y el creds:
+- **Los slugs se normalizan a minúsculas.** La comparación es en minúsculas en las dos puntas —la
+  del mapa y la del mail—, así que `nats kv put TICKETS Alfa 42` se guarda tal cual pero **no
+  matchea** `tickets+alfa@…`. Usá siempre minúsculas en la clave.
+- **El valor es el entero de Jiku**, nunca el nombre del proyecto ni su slug. Un valor que no sea un
+  entero positivo se **ignora con un `warn`** que nombra la clave: no tumba el watch ni el proceso,
+  porque un dato malo cargado a mano no debe dejar sin ruteo a los demás proyectos.
+- **Un bucket vacío es válido y arranca.** Es el estado de todo despliegue nuevo. El worker arranca
+  y descarta todo con log hasta que se cargue el primer slug.
+- **El bucket tiene que existir.** Si no existe, el conector **no arranca** y el log nombra cuál
+  falta (S-024). El conector no lo crea a propósito: un typo en el nombre crearía un bucket vacío en
+  silencio, y el síntoma sería que descarta todos los mails sin decir por qué.
+- **Borrar una clave la saca del ruteo**, también en caliente: el `watch()` recibe el `DEL` y la
+  quita de la copia en memoria.
+- **Los `projectId` no se verifican contra Jiku.** Uno que apunte a un proyecto inexistente arranca
+  igual; el síntoma aparece más tarde, por mail, como `project_not_found`.
 
-```
-/run/secrets/ticket-map.json     (ro)   <- TICKET_MAP_FILE apunta acá
-```
+**Si el `watch()` se cae, el ruteo sigue funcionando con la última copia buena** y el conector
+reintenta cada `KV_WATCH_RETRY_MS`. Lo que se pierde mientras tanto son las actualizaciones, no el
+mapa: vaciarlo ante una caída del bus dejaría de rutear mails que se podían rutear perfectamente.
 
 Tres cosas de la configuración de la casilla que conviene saber antes de desplegar:
 
@@ -279,13 +275,12 @@ blancas, tamaño máximo) exige redeploy** — no hay recarga en caliente. El fi
 conveniencia, no autoridad (ADR-003): `core` decide en última instancia, así que una lista
 desactualizada no rompe el sistema, sólo cambia qué se rechaza **antes** de tocar el bus.
 
-Los montajes, y son los únicos — dos siempre, y un tercero sólo si el Mapa de Tickets se declara
-como archivo en vez de inline:
+Los montajes, y son los únicos — **dos, siempre**. Desde REQ-005 no hay un tercero: el Mapa de
+Tickets dejó de poder declararse como archivo montado y vive en un bucket KV del bus.
 
 ```
 /run/secrets/machine-user.json   (ro)   <- JIKU_KEY_FILE apunta acá
 /run/secrets/sentinel.creds      (ro)   <- JIKU_CREDS apunta acá
-/run/secrets/ticket-map.json     (ro)   <- TICKET_MAP_FILE apunta acá (sólo con esa fuente)
 ```
 
 **No hay ningún montaje de escritura**, y no es un olvido: el conector no persiste estado en disco —
@@ -308,15 +303,18 @@ docker run --rm \
   -e IMAP_HOST=imap.gmail.com \
   -e IMAP_USER=tickets@grava.io \
   -e IMAP_PASSWORD=... \
-  -e TICKET_MAP='{"alfa": 42, "beta": 7}' \
   -v /ruta/host/machine-user.json:/run/secrets/machine-user.json:ro \
   -v /ruta/host/sentinel.creds:/run/secrets/sentinel.creds:ro \
   --network <la-red-del-bus> \
   jiku-mail-connector:latest
 ```
 
-Con la configuración completa, el arranque emite **dos líneas JSON por stdout** (`configuracion
-valida` y `conectado al bus`) y el proceso **queda vivo** con la conexión abierta. Con configuración
+(El Mapa de Tickets no aparece acá porque ya no es una variable: se carga con `nats kv put` sobre
+el bucket, y el conector lo sigue en caliente.)
+
+Con la configuración completa, el arranque emite **tres líneas JSON por stdout** (`configuracion
+valida`, `conectado al bus` y la del Mapa de Tickets cargado desde el KV) y el proceso **queda vivo**
+con la conexión abierta. Con configuración
 incompleta **no arranca**: sale con código distinto de cero e informa por stderr **la lista completa**
 de lo que falta, no la primera variable que encontró.
 

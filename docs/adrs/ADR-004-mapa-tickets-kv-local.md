@@ -1,9 +1,14 @@
-# ADR-004: Resolver el proyecto con un KV local y no usar el plano de lectura
+# ADR-004: Resolver el proyecto con un KV del bus y no usar el plano de lectura
 
-**Status:** Accepted
+**Status:** Accepted (reformulada el 2026-09-08 por REQ-005 / S-025)
 **Date:** 2026-08-26
+**Amended:** 2026-09-08 — el Mapa de Tickets deja de ser configuración inline y pasa a ser un
+bucket KV de NATS seguido con `watch()`. **La decisión de fondo no cambió** —el proyecto se resuelve
+contra un mapa `slug → projectId` que el conector tiene a mano, sin consultar el plano de lectura—;
+lo que cambió es **dónde vive ese mapa** y, con eso, la consecuencia negativa principal: el redeploy
+por proyecto nuevo desaparece.
 **Deciders:** Technical Leader, Product Owner
-**Tags:** ruteo, configuracion, plano-de-lectura
+**Tags:** ruteo, configuracion, plano-de-lectura, kv
 
 ## Context
 
@@ -33,17 +38,27 @@ preferencia:**
 
 ## Decision
 
-**El proyecto se resuelve contra un KV local —el Mapa de Tickets— cargado a mano, con el `projectId`
-como valor. El conector no consulta el bus: sólo escribe.**
+**El proyecto se resuelve contra el Mapa de Tickets —un bucket KV del bus— con el `projectId` como
+valor. El conector no consulta el plano de lectura para rutear.**
 
 | Aspecto | Definición |
 |---|---|
 | Estructura | `slug` (string, único, minúsculas) → `projectId` (int) |
-| Fuente | Variable de entorno o archivo montado |
-| Momento de carga | **Al arrancar.** Sin recarga en caliente en v1 |
-| Mapa vacío | **Estado válido**: el worker arranca y descarta todo con log |
-| Mapa mal formado | **Fail-fast**: el worker no arranca |
+| Fuente | **Un bucket KV de NATS** (JetStream), que el operador carga con `nats kv put` |
+| Momento de carga | **Al arrancar**, y después **en caliente**: el conector sigue el bucket con `watch()` sobre una copia en memoria |
+| Quién lo crea | **El operador.** El conector abre y verifica, nunca crea (S-024) |
+| Bucket vacío | **Estado válido**: el worker arranca y descarta todo con log |
+| Bucket inexistente | **Fail-fast**: el worker no arranca, y el log nombra el bucket |
+| Entrada mal formada | **Se ignora con `warn`** que nombra la clave. No tumba el watch ni el proceso |
 | Validación del `projectId` | **Ninguna.** No se verifica que el proyecto exista |
+
+**Lo que la mudanza al KV cambia, y es el motivo de REQ-005:** agregar un proyecto ya no exige
+editar una variable de entorno y **redesplegar el contenedor**. Un `nats kv put` aparece en el ruteo
+en segundos, con el worker corriendo.
+
+**Lo que NO cambia, y conviene decirlo porque es lo que se podría "mejorar" por accidente:** el
+conector sigue sin consultar el plano de lectura **para rutear**. El mapa es una copia local que el
+servidor actualiza sola; el ruteo sigue siendo un `Map.get()` en memoria, sin round-trip por mail.
 
 **Guardar el id y no el nombre del proyecto es la parte de la decisión que la hace autosuficiente:**
 con el nombre habría que resolverlo por consulta, y volvería a hacer falta el plano de lectura que
@@ -65,23 +80,36 @@ no de este repositorio.
 
 ## Implementation Rules
 
-- El Mapa de Tickets MUST cargarse desde variable de entorno o archivo montado, **al arrancar**
-- El mapa MUST validarse al arrancar. Un mapa mal formado (JSON inválido, `projectId` no entero, dos
-  entradas con el mismo `slug`) MUST provocar **fail-fast**: el proceso no arranca
-- Un mapa **vacío** MUST ser aceptado como estado válido: el worker arranca y descarta todo con log
-- Las claves del mapa MUST normalizarse **a minúsculas** al cargarlo
+**Reformuladas por S-025.** Las que cambiaron llevan la nota; las demás siguen vigentes verbatim.
+
+- El Mapa de Tickets MUST vivir en un **bucket KV del bus**, y el conector MUST seguirlo con
+  `watch()` sobre una copia en memoria *(S-025: antes era "desde variable de entorno o archivo
+  montado, al arrancar")*
+- El conector MUST NOT crear el bucket. Un bucket inexistente MUST provocar **fail-fast** con un
+  error que **nombre el bucket** *(S-024)*
+- Un bucket **vacío** MUST ser aceptado como estado válido: el worker arranca y descarta todo con log
+- El conector MUST esperar la **carga inicial completa** antes de schedular el primer tick, para que
+  ningún mail se rutee contra un mapa a medio llenar *(S-025)*
+- Una entrada con valor mal formado MUST **ignorarse con `warn` que nombre la clave**, sin tumbar el
+  watch ni el proceso *(S-025: antes un mapa mal formado era fail-fast. La inversión es deliberada —
+  un dato malo cargado a mano no debe dejar sin ruteo a los demás proyectos, y con el mapa en el KV
+  ya no hay un "momento de carga" en el que fallar)*
+- Un `delete` en el bucket MUST **sacar la clave** de la copia en memoria *(S-025)*
+- Si el `watch()` se cae, el conector MUST **conservar la última copia buena** y reintentar. MUST NOT
+  vaciar el mapa *(S-025: vaciarlo dejaría de rutear mails que se pueden rutear perfectamente)*
 - El slug extraído del mail MUST normalizarse **a minúsculas** antes de buscarlo (comparación en
   minúsculas **en las dos puntas**)
 - El valor de cada entrada MUST ser el `projectId` entero de Jiku. MUST NOT ser el nombre del proyecto
   ni su slug
 - El conector MUST NOT verificar contra Jiku que el `projectId` exista antes de publicar
-- El conector MUST NOT publicar en el plano de consultas del bus (`jiku-queries.*`)
+- El conector MUST NOT publicar en el plano de consultas del bus (`jiku-queries.*`) **para rutear**
 - El slug MUST extraerse del `recipient` con la regex `^<prefijo>\+([^@]+)@`, case-insensitive, con el
   prefijo configurable (default: `tickets`)
 - El `recipient` MUST tomarse de `Delivered-To`, con `To` como **único** fallback
 - Un mail sin match de slug MUST descartarse con log, sin crear nada
 - Un slug sin entrada en el mapa MUST descartarse con log que **nombre el slug buscado**
-- El mapa MUST vivir sólo en memoria: MUST NOT escribirse a disco ni cachearse fuera del proceso
+- La copia del mapa MUST vivir sólo en memoria: MUST NOT escribirse a disco ni cachearse fuera del
+  proceso. El bucket del bus **no** es "fuera del proceso" en este sentido: es la fuente, no una caché
 
 ## Consequences
 
@@ -97,13 +125,25 @@ no de este repositorio.
   proyecto inexistente), en vez de un error de autorización que confundiría.
 - **Arranque robusto:** un mapa vacío no impide arrancar, así que un despliegue nuevo no falla por
   configuración incompleta de negocio.
-- **Fail-fast donde importa:** un mapa mal formado se detecta al arrancar, no en el primer mail.
+- **Fail-fast donde importa:** un bucket inexistente se detecta al arrancar —nombrándolo— y no en
+  el primer mail.
+- **Sin redeploy por proyecto nuevo** *(S-025)*: un `nats kv put` alcanza, y el conector lo ve en
+  segundos. Tampoco paga un round-trip por mail: el `watch()` mantiene la copia, y el ruteo sigue
+  siendo un `Map.get()` en memoria.
+- **La unicidad del slug la garantiza el almacén** *(S-025)*, no una validación propia: en un KV una
+  clave es una sola por definición, así que el modo de falla "dos entradas con el mismo slug"
+  desaparece en vez de tener que detectarse.
 
 ### Negative
 
-- **Agregar o cambiar un slug exige reiniciar el proceso.** No hay recarga en caliente en v1.
+- ~~**Agregar o cambiar un slug exige reiniciar el proceso.**~~ **DEROGADA por S-025:** el `watch()`
+  del bucket propaga el cambio en caliente, en segundos, sin redeploy. Era la consecuencia negativa
+  principal de esta decisión y es el motivo por el que REQ-005 existe.
 - **El mapa es configuración a mano**, así que puede quedar desactualizado sin que nadie lo note. El
-  síntoma es un mail descartado con log, que nadie mira.
+  síntoma es un mail descartado con log, que nadie mira. *(Sigue vigente: cambió el medio de carga,
+  no el hecho de que lo cargue una persona.)*
+- **Aparece una precondición de despliegue nueva** *(S-024/S-025)*: JetStream habilitado, permisos de
+  KV en el auth-callout, y el bucket creado. Sin eso el conector no arranca.
 - **Un `projectId` equivocado se descubre por mail, no al configurar.** El síntoma es
   `project_not_found` y el mail **ya se perdió** (está `\Seen`).
 - **El mapa no es visible en la interfaz de Jiku.** Un operador no puede consultar qué slug apunta a

@@ -1,8 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
-import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import type { AppConfig } from '#config/index.js';
 import { EXPECTATIONS, ConfigValidationError } from '#config/errors.js';
@@ -15,33 +11,25 @@ import {
 } from '#config/schema.js';
 
 /**
- * Las rutas que `readFileSync` recibio, para el caso de la lectura unica (TS-32).
+ * NO HAY MOCK DE `node:fs` EN ESTE ARCHIVO, y su ausencia es una propiedad de S-025.
  *
- * El mock delega en la implementacion real: solo cuenta. En ESM no se puede `vi.spyOn` un modulo
- * nativo —el namespace no es configurable— asi que la unica forma de contar sin reemplazar el
- * comportamiento es esta.
+ * Hasta S-024 este archivo mockeaba `node:fs` para contar las lecturas del archivo del Mapa de
+ * Tickets: el `.transform()` de `TICKET_MAP_FILE` leia el filesystem DENTRO de la validacion del
+ * schema, que era la unica excepcion declarada a que la validacion fuera pura. Con la variable se
+ * fue la lectura, y con la lectura se fue la excepcion: **la validacion del schema ya no toca el
+ * filesystem en ningun camino**. La unica excepcion que queda es la llamada a `validate()` de
+ * node-cron en `POLL_CRON`, que no lo toca.
+ *
+ * Ver TS-30 en `test/config/source-properties.test.ts`, que lo afirma escaneando el archivo.
  */
-const readFileSyncCalls: unknown[] = [];
-
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-
-  return {
-    ...actual,
-    readFileSync: (path: unknown, ...rest: unknown[]) => {
-      readFileSyncCalls.push(path);
-      return (actual.readFileSync as (...args: unknown[]) => unknown)(path, ...rest);
-    },
-  };
-});
 
 /**
  * Entorno minimo valido. Los tests pasan objetos literales: nunca mutan process.env.
  *
  * Eran cuatro variables hasta S-006. S-007 sumo las tres credenciales de la casilla, que pasaron a
- * ser requeridas con la ingesta en alcance. S-012 sumo el Mapa de Tickets, que con el ruteo en
- * alcance pasa a ser requerido: su obligatoriedad es cross-field (una de las dos fuentes) y por eso
- * solo se ve desde loadEnv(), nunca desde el schema desnudo.
+ * ser requeridas con la ingesta en alcance. S-012 sumo el Mapa de Tickets y **S-025 lo saco**: su
+ * fuente es el bucket KV de slugs, asi que ninguna de sus dos claves se declara mas, y con ellas se
+ * fue la UNICA regla cross-field que el schema tenia.
  */
 const VALID_ENV = {
   JIKU_CREDS: '/run/secrets/sentinel.creds',
@@ -51,15 +39,15 @@ const VALID_ENV = {
   IMAP_HOST: 'imap.gmail.com',
   IMAP_USER: 'tickets@ejemplo.com',
   IMAP_PASSWORD: 'app-password-de-prueba',
-  TICKET_MAP: '{"alfa":42,"beta":7}',
 };
 
 /**
- * Las SIETE requeridas, en el orden alfabetico en que el formateador las lista.
+ * Las SEIS requeridas, en el orden alfabetico en que el formateador las lista.
  *
  * Eran ocho hasta que `JIKU_VERIFY_PROJECT_ID` se volvio OPCIONAL: la lee un solo consumidor
  * (`src/verify.ts`) y el worker no la toca, asi que su fail-fast se mudo a ese script
- * (`requireVerifyProjectId()`) en vez de exigirsela a todo despliegue.
+ * (`requireVerifyProjectId()`) en vez de exigirsela a todo despliegue. Y eran siete hasta S-025,
+ * que saco el Mapa de Tickets: su fuente es el KV, no la configuracion.
  */
 const ALL_REQUIRED = [
   'IMAP_HOST',
@@ -68,7 +56,6 @@ const ALL_REQUIRED = [
   'JIKU_CREDS',
   'JIKU_KEY_FILE',
   'JIKU_PROJECT_ID',
-  'TICKET_MAP',
 ];
 
 describe('loadEnv', () => {
@@ -153,20 +140,18 @@ describe('loadEnv', () => {
     }
   });
 
-  // INVERTIDO EN S-012, no borrado. Lo invirtio primero S-007 (antes afirmaba que loadEnv()
-  // resolvia SIN ninguna variable de IMAP) y lo vuelve a invertir S-012 en su ultima asercion: hasta
-  // S-011 afirmaba que ninguna clave del Mapa de Tickets se declaraba en este alcance, porque FG-3
-  // no estaba en scope. Con el ruteo en alcance el mapa se declara y ademas es requerido, asi que la
-  // misma asercion cambia de signo. Un test borrado no dejaria rastro de que la regla cambio a
-  // proposito.
-  // (TS-5, TS-43, TS-49)
+  // INVERTIDO TRES VECES, nunca borrado, y el historial es el punto. Lo invirtio primero S-007
+  // (antes afirmaba que loadEnv() resolvia SIN ninguna variable de IMAP); S-012 invirtio su ultima
+  // asercion (hasta S-011 afirmaba que ninguna clave del Mapa de Tickets se declaraba); y **S-025 la
+  // vuelve a invertir**: el mapa se muda al KV y sus claves desaparecen del schema. Un test borrado
+  // no dejaria rastro de que la regla cambio a proposito.
+  // (TS-5, TS-43, TS-49; TS-27/TS-31 de S-025)
   it('does not resolve when no IMAP variable is present', () => {
     const busOnly = {
       JIKU_CREDS: VALID_ENV.JIKU_CREDS,
       JIKU_KEY_FILE: VALID_ENV.JIKU_KEY_FILE,
       JIKU_PROJECT_ID: VALID_ENV.JIKU_PROJECT_ID,
       JIKU_VERIFY_PROJECT_ID: VALID_ENV.JIKU_VERIFY_PROJECT_ID,
-      TICKET_MAP: VALID_ENV.TICKET_MAP,
     };
 
     expect(() => loadEnv(busOnly)).toThrow(ConfigValidationError);
@@ -179,8 +164,9 @@ describe('loadEnv', () => {
       expect(err.variables).toEqual(['IMAP_HOST', 'IMAP_PASSWORD', 'IMAP_USER']);
     }
 
-    // Lo que cambio de signo: las claves del Mapa de Tickets SI se declaran en este alcance.
-    expect(Object.keys(loadEnv(VALID_ENV)).some((key) => key.includes('TICKET'))).toBe(true);
+    // Lo que volvio a cambiar de signo (TS-27 de S-025): NINGUNA clave del Mapa de Tickets se
+    // declara mas. El entorno valido de arriba no las lleva, y el resultado tampoco las expone.
+    expect(Object.keys(loadEnv(VALID_ENV)).some((key) => key.includes('TICKET_MAP'))).toBe(false);
   });
 
   // TS-21. `pollEnabled` es un interruptor operativo, no un modo de despliegue distinto.
@@ -191,7 +177,6 @@ describe('loadEnv', () => {
         JIKU_KEY_FILE: VALID_ENV.JIKU_KEY_FILE,
         JIKU_PROJECT_ID: VALID_ENV.JIKU_PROJECT_ID,
         JIKU_VERIFY_PROJECT_ID: VALID_ENV.JIKU_VERIFY_PROJECT_ID,
-        TICKET_MAP: VALID_ENV.TICKET_MAP,
         POLL_ENABLED: 'false',
       });
       expect.unreachable('should have thrown');
@@ -342,37 +327,27 @@ describe('#config/env.js module', () => {
 });
 
 /**
- * La regla de las dos fuentes excluyentes y la carga del archivo (S-012).
+ * La lista UNICA de issues, y el Mapa de Tickets que ya no la usa (S-002 / S-025).
  *
- * Estos tests escriben archivos temporales REALES y no un doble: `readFileSync` es la operacion
- * bajo prueba, y un mock del filesystem afirmaria sobre el mock.
+ * Hasta S-024 este bloque se llamaba "loadEnv and the Ticket Map" y tenia doce casos: la regla de
+ * las dos fuentes excluyentes, la carga del archivo con archivos temporales reales, el archivo
+ * inexistente, el directorio, la equivalencia entre las dos fuentes, y la lectura unica. **Se
+ * eliminaron**: probaban un MECANISMO que dejo de existir (las dos claves, su regla cross-field y la
+ * lectura de filesystem dentro del schema).
+ *
+ * Lo que NO se elimino, y es la distincion que importa: los casos que probaban la **acumulacion de
+ * issues de TODAS las claves en una sola invocacion de `onValidationError`**. Esa propiedad es de
+ * S-002, nadie la toco, y sigue viva — solo que la probaban USANDO el Mapa de Tickets como una de
+ * las claves que fallaban. Estan **reescritos con otras claves**, no borrados: borrarlos seria
+ * perder cobertura de una propiedad intacta.
+ *
+ * Y ganan un rol nuevo con S-025: son los que **verifican la decision de quitar `createFinalSchema`**
+ * de `src/config/env.ts`. Aquel envoltorio existia para que la regla cross-field no se perdiera
+ * cuando otra clave ya habia fallado; sin regla, se elimino y la librería volvió a su
+ * `parseWithDictionary()`. Que la acumulacion y la forma del `path` sobrevivan a eso es exactamente
+ * lo que estos casos afirman. (TS-31, TS-33 de S-025.)
  */
-describe('loadEnv and the Ticket Map', () => {
-  const dirs: string[] = [];
-
-  /** Escribe un archivo temporal con el contenido dado y devuelve su ruta. */
-  function tempFile(content: string, name = 'mapa.json'): string {
-    const dir = mkdtempSync(join(tmpdir(), 'jiku-ticket-map-'));
-    dirs.push(dir);
-    const path = join(dir, name);
-    writeFileSync(path, content, 'utf8');
-    return path;
-  }
-
-  /** Un directorio temporal vacio, para el caso del `readFileSync` sobre un directorio. */
-  function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'jiku-ticket-map-'));
-    dirs.push(dir);
-    return dir;
-  }
-
-  afterEach(() => {
-    while (dirs.length > 0) {
-      const dir = dirs.pop();
-      if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
+describe('loadEnv: the single issue list survives the removal of the cross-field rule', () => {
   function caught(source: Record<string, string | undefined>): ConfigValidationError {
     try {
       loadEnv(source);
@@ -383,190 +358,70 @@ describe('loadEnv and the Ticket Map', () => {
     throw new Error('unreachable');
   }
 
-  // TS-1. CA-1: el mapa pasa a ser requerido, y esto SUPERSEDE el criterio 40 de REQ-002. No arranca
-  // por ausencia, y lo informa en la lista unica como una variable mas.
-  it('does not start when the map is absent from both sources', () => {
-    const err = caught({ ...VALID_ENV, TICKET_MAP: undefined });
+  // TS-31 de S-025. El arranque NO exige ninguna variable del mapa: el entorno valido minimo ya no
+  // las lleva, y nada del reporte de error las menciona.
+  it('resolves without any Ticket Map variable, and never names one', () => {
+    expect(() => loadEnv(VALID_ENV)).not.toThrow();
 
-    expect(err).toBeInstanceOf(ConfigValidationError);
-    expect(err.variables).toContain('TICKET_MAP');
-    expect(err.message).toContain(EXPECTATIONS.TICKET_MAP);
+    // Y con una clave faltante, el reporte tampoco las nombra: no quedo ninguna regla que las cite.
+    const err = caught({ ...VALID_ENV, IMAP_HOST: undefined });
+    expect(err.message).not.toContain('TICKET_MAP');
+    expect(err.variables).not.toContain('TICKET_MAP');
+    expect(err.variables).not.toContain('TICKET_MAP_FILE');
   });
 
-  // TS-2. CA-2: elegir una en silencio dejaria a U-02 editando la que no tiene efecto.
-  it('does not start when both sources are declared at once', () => {
-    const err = caught({
-      ...VALID_ENV,
-      TICKET_MAP: '{}',
-      TICKET_MAP_FILE: tempFile('{"alfa":42}'),
-    });
+  // TS-33 de S-025 — REESCRITO, no borrado. Hasta S-024 este caso probaba la acumulacion usando
+  // `TICKET_MAP: undefined` como una de las dos claves que fallaban, porque era el caso CROSS-FIELD
+  // que distinguia la implementacion correcta de la que solo lo parecia.
+  //
+  // La propiedad que probaba —**la lista acumula TODAS las claves en una sola pasada**— es de S-002
+  // y sigue viva, asi que el caso se conserva con OTRAS DOS claves. Es ademas la verificacion de que
+  // quitar `createFinalSchema` no rompio nada: si `parseWithDictionary()` no acumulara, o si el
+  // `path` no llevara la clave como primer segmento, este caso se pone rojo.
+  it('reports two distinct missing variables together in one single list', () => {
+    const err = caught({ ...VALID_ENV, JIKU_CREDS: undefined, IMAP_HOST: undefined });
 
-    expect(err.variables).toContain('TICKET_MAP');
-    // El issue de las dos fuentes va al path de TICKET_MAP a proposito: variableNameOf() toma
-    // path[0] y lo busca en EXPECTATIONS, y es la entrada de TICKET_MAP la que explica la regla.
-    expect(err.message).toContain('TICKET_MAP_FILE');
+    expect(err.variables).toEqual(['IMAP_HOST', 'JIKU_CREDS']);
+    expect(err.message).toContain(EXPECTATIONS.JIKU_CREDS);
+    expect(err.message).toContain(EXPECTATIONS.IMAP_HOST);
   });
 
-  // TS-3. EL TEST MAS IMPORTANTE DE LA STORY (CA-3). Es el que distingue la implementacion correcta
-  // de la que PARECE correcta: con un `z.object(shape).superRefine(reglaDeDosFuentes)` este caso
-  // falla en silencio, porque Zod no corre el refinement si alguna clave del objeto ya fallo — y el
-  // issue del mapa no aparece nunca. Por eso la regla vive en un Standard Schema propio que
-  // CONCATENA las dos listas de issues sin cortar.
-  it('reports the bus, the mailbox and the map together in one single list', () => {
-    const err = caught({
-      JIKU_CREDS: undefined,
-      JIKU_KEY_FILE: undefined,
-      JIKU_PROJECT_ID: undefined,
-      JIKU_VERIFY_PROJECT_ID: '42',
-      IMAP_HOST: undefined,
-      IMAP_USER: 'u',
-      IMAP_PASSWORD: 'p',
-      TICKET_MAP: 'no-es-json',
-    });
-
-    expect(err.variables).toEqual([
-      'IMAP_HOST',
-      'JIKU_CREDS',
-      'JIKU_KEY_FILE',
-      'JIKU_PROJECT_ID',
-      'TICKET_MAP',
-    ]);
-    // Un solo string multilinea con las cinco: encabezado + cinco lineas + cierre.
-    expect(err.message.split('\n')).toHaveLength(7);
-  });
-
-  // TS-3, la mitad que de verdad distingue las dos implementaciones. El caso de arriba usa un mapa
-  // MAL FORMADO, que es un issue de clave y sale por el `.transform()`: ese camino sobrevive incluso
-  // a un superRefine ingenuo. El que NO sobrevive es este: el mapa AUSENTE, que es cross-field. Con
-  // `z.object(shape).superRefine(...)` el refinement no corre porque JIKU_CREDS ya fallo, y el issue
-  // del mapa DESAPARECE de la lista, en silencio y sin que nada falle. Si este caso se pone en
-  // verde con una implementacion que corta, la regla se rompio: el test es CA-3, no al reves.
-  it('reports the absent map together with a missing bus variable, in one single list', () => {
-    const err = caught({ ...VALID_ENV, JIKU_CREDS: undefined, TICKET_MAP: undefined });
-
-    expect(err.variables).toEqual(['JIKU_CREDS', 'TICKET_MAP']);
-    expect(err.message).toContain(EXPECTATIONS.TICKET_MAP);
-    expect(err.message).toContain('JIKU_CREDS');
-  });
-
-  // La misma prueba para la OTRA regla cross-field: las dos fuentes a la vez tampoco pueden
-  // perderse porque otra clave haya fallado antes.
-  it('reports the two declared sources together with a missing bus variable', () => {
+  // La otra mitad de la acumulacion, tambien reescrita con otras claves: mezcla una AUSENTE con una
+  // presente pero INVALIDA. Los dos caminos de issue —clave faltante y `.refine()`/coercion que
+  // rechaza— tienen que caer en la MISMA lista, que es lo que hace que un despliegue mal
+  // configurado se arregle en una pasada y no en tres.
+  it('reports an absent variable together with a present-but-invalid one', () => {
     const err = caught({
       ...VALID_ENV,
       JIKU_CREDS: undefined,
-      TICKET_MAP: '{}',
-      TICKET_MAP_FILE: tempFile('{"alfa":42}'),
+      POLL_CRON: 'no-es-un-cron',
+      POLL_MAX_PER_TICK: '0',
     });
 
-    expect(err.variables).toEqual(['JIKU_CREDS', 'TICKET_MAP']);
+    expect(err.variables).toEqual(['JIKU_CREDS', 'POLL_CRON', 'POLL_MAX_PER_TICK']);
+    // Un solo string multilinea con las tres: encabezado + tres lineas + cierre.
+    expect(err.message.split('\n')).toHaveLength(5);
   });
 
-  // TS-4. El archivo roto entra en la MISMA lista que una variable ausente, en UNA invocacion. Es
-  // el criterio que decide donde vive la carga del archivo: leerlo despues de loadEnvFromProcess()
-  // daria dos mensajes en dos formatos.
-  it('lists a broken map file together with a missing variable, in one invocation', () => {
-    const err = caught({
-      ...VALID_ENV,
-      IMAP_HOST: undefined,
-      TICKET_MAP: undefined,
-      TICKET_MAP_FILE: tempFile('no-es-json'),
-    });
-
-    expect(err.variables).toEqual(['IMAP_HOST', 'TICKET_MAP_FILE']);
-  });
-
-  // TS-14. El mensaje no incluye la ruta ni el contenido: el formateador lee solo issue.path.
-  it('does not start when the file path does not exist, without naming the path', () => {
-    const err = caught({
-      ...VALID_ENV,
-      TICKET_MAP: undefined,
-      TICKET_MAP_FILE: '/no/existe/mapa.json',
-    });
-
-    expect(err.variables).toEqual(['TICKET_MAP_FILE']);
-    expect(err.message).not.toContain('/no/existe/mapa.json');
-  });
-
-  // TS-15. Un directorio y no un chmod 000: si la suite corre como root, chmod 000 no bloquea nada y
-  // el test pasaria en verde sin probar el caso. El catch cubre los tres —inexistente, ilegible y
-  // directorio— porque el operador arregla lo mismo en los tres.
-  it('does not start when the path is a directory instead of a readable file', () => {
-    const err = caught({
-      ...VALID_ENV,
-      TICKET_MAP: undefined,
-      TICKET_MAP_FILE: tempDir(),
-    });
-
-    expect(err.variables).toEqual(['TICKET_MAP_FILE']);
-  });
-
-  // TS-17. Las dos fuentes producen EXACTAMENTE lo mismo: es la razon de que compartan una sola
-  // funcion de parseo y de que las dos acepten el mismo JSON.
-  it('produces the same map from the file source as from the inline one', () => {
-    const inline = loadEnv({ ...VALID_ENV, TICKET_MAP: '{"Alfa":42,"BETA":7}' }).TICKET_MAP;
-    const fromFile = loadEnv({
-      ...VALID_ENV,
-      TICKET_MAP: undefined,
-      TICKET_MAP_FILE: tempFile('{"Alfa":42,"BETA":7}'),
-    }).TICKET_MAP_FILE;
-
-    expect([...(inline as ReadonlyMap<string, number>).entries()]).toEqual([
-      ['alfa', 42],
-      ['beta', 7],
-    ]);
-    expect([...(fromFile as ReadonlyMap<string, number>).entries()]).toEqual([
-      ['alfa', 42],
-      ['beta', 7],
-    ]);
-  });
-
-  // TS-19. La AUSENCIA no arranca (TS-1); el vacio si, tambien desde el archivo.
-  it('accepts an empty map from the file source too', () => {
-    const env = loadEnv({
-      ...VALID_ENV,
-      TICKET_MAP: undefined,
-      TICKET_MAP_FILE: tempFile('{}'),
-    });
-
-    expect((env.TICKET_MAP_FILE as ReadonlyMap<string, number>).size).toBe(0);
-  });
-
-  // TS-22. `ReadonlyMap` en el contrato es lo que impide que un consumidor haga `.set()` sin darse
-  // cuenta. El Map real es mutable; el tipo es lo que lo sella.
+  // TS-22 de S-012, CONSERVADO y ahora mas importante que antes. `ReadonlyMap` en el contrato es lo
+  // que impide que un consumidor haga `.set()` sin darse cuenta, y desde S-025 el dueno del Map es
+  // el watch del KV: si el contrato se aflojara a `Map`, cualquier consumidor podria mutar la copia
+  // en memoria que el watch mantiene.
   //
   // La asercion es sobre el tipo de `AppConfig['ruteo']['ticketMap']` y NO sobre un cast local: un
-  // `as ReadonlyMap<...>` en el test probaria el cast y no el contrato, y seguiria compilando si
-  // alguien aflojara la interfaz a `Map`. Asi, aflojarla rompe `tsc`, que es el unico lugar donde
-  // esta garantia puede vivir: es de COMPILACION, no de runtime (el Map real es mutable, y
-  // `Object.freeze` no lo congelaria de todas formas).
-  it('types the resolved map as read-only in the AppConfig contract', () => {
+  // `as ReadonlyMap<...>` en el test probaria el cast y no el contrato. Asi, aflojar la interfaz
+  // rompe `tsc`, que es el unico lugar donde esta garantia puede vivir: es de COMPILACION, no de
+  // runtime (el Map real es mutable, y `Object.freeze` no lo congelaria de todas formas).
+  //
+  // **El tipo NO CAMBIO con S-025** (CA-6): el mapa cambio de dueno, no de tipo.
+  it('types the routed map as read-only in the AppConfig contract', () => {
     expectTypeOf<AppConfig['ruteo']['ticketMap']>().toEqualTypeOf<ReadonlyMap<string, number>>();
 
-    const map: ReadonlyMap<string, number> = loadEnv(VALID_ENV).TICKET_MAP as AppConfig['ruteo']['ticketMap'];
+    const map: AppConfig['ruteo']['ticketMap'] = new Map([['alfa', 42]]);
 
     // @ts-expect-error un ReadonlyMap no expone set()
     void map.set;
     expect(map.get('alfa')).toBe(42);
-  });
-
-  // TS-32. El archivo se lee EXACTAMENTE una vez por arranque: ni el schema lo relee por cada
-  // consumidor, ni queda ninguna recarga en caliente escondida (CA-11).
-  //
-  // Se cuenta con `vi.mock` de `node:fs` y no con `vi.spyOn`: en ESM el namespace del modulo no es
-  // configurable y `spyOn` lanza `Cannot redefine property`. El mock delega en la implementacion
-  // REAL (`importActual`), asi que lo que se afirma sigue siendo la cantidad de lecturas de verdad
-  // sobre ESE path, no el comportamiento de un doble.
-  it('reads the map file exactly once per load', async () => {
-    const path = tempFile('{"alfa":42}');
-    readFileSyncCalls.length = 0;
-
-    // La importacion dinamica es la que engancha el modulo mockeado: el `loadEnv` del import
-    // estatico de arriba ya cerro sobre el `node:fs` real.
-    const { loadEnv: loadEnvMocked } = await import('#config/env.js');
-    loadEnvMocked({ ...VALID_ENV, TICKET_MAP: undefined, TICKET_MAP_FILE: path });
-
-    expect(readFileSyncCalls.filter((target) => target === path)).toHaveLength(1);
   });
 });
 

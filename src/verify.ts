@@ -61,7 +61,7 @@ function requireVerifyProjectId(verifyProjectId: number | undefined): number {
 async function main(): Promise<void> {
   // Reusa la secuencia completa del arranque: misma configuracion, mismo logger, misma identidad,
   // UNA sola conexion. No la duplica.
-  const { config, logger, client } = await runStartup();
+  const { config, logger, client, ticketMapWatch } = await runStartup();
 
   // El chequeo va DESPUES de `runStartup()`, y no antes, porque el valor validado sale de la
   // configuracion que esa funcion carga — ver el comentario de `requireVerifyProjectId()` sobre por
@@ -101,6 +101,17 @@ async function main(): Promise<void> {
     // sintaxis `await using` necesita Node 24 y es un ERROR DE SINTAXIS en Node 22, que es el
     // runtime de este servicio. S-004 dejo esta funcion sin consumidor exactamente para este
     // momento.
+    // El watch del Mapa de Tickets (S-025) se baja ANTES de cerrar el bus, y este proceso lo
+    // necesita mas que el worker: el `verify` TERMINA. Sin este `stop()`, `closeBus()` terminaria el
+    // iterador del watch y el loop de background lo leeria como una CAIDA —lo es, desde su punto de
+    // vista— emitiendo un `warn` espurio y programando un reintento sobre una conexion que ya no
+    // esta. El reintento esta `unref()` eado y no colgaria el proceso, pero el `warn` mentiria.
+    //
+    // El `verify` hereda el paso 5.6 por usar `runStartup()`, y eso es CORRECTO (el modo de
+    // verificacion tiene que fallar igual que el worker contra un despliegue sin buckets); lo que
+    // no hereda es el apagado ordenado del worker, asi que lo baja acá.
+    ticketMapWatch.stop();
+
     await closeBus();
   }
 }

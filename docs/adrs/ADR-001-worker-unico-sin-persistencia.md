@@ -1,9 +1,14 @@
 # ADR-001: Worker único sin persistencia propia
 
-**Status:** Accepted
+**Status:** Accepted (matizada el 2026-09-08 por REQ-005 / S-025)
 **Date:** 2026-08-26
+**Amended:** 2026-09-08 — el conector pasa a usar dos buckets KV de NATS como su mecanismo de
+estado. **El título ya decía lo correcto y no cambia: "sin persistencia PROPIA".** El matiz exacto
+es que el conector no administra un almacén propio —sigue sin base de datos, sin migraciones, sin
+cliente de PostgreSQL y sin nada en `docs/db-schemas/`—, sino que usa un almacén **del bus**, que ya
+era su dependencia. Lo que se deroga es la lectura absoluta de *"no persiste NADA"*.
 **Deciders:** Technical Leader, Product Owner
-**Tags:** arquitectura, servicios, persistencia, idempotencia
+**Tags:** arquitectura, servicios, persistencia, idempotencia, kv
 
 ## Context
 
@@ -40,6 +45,19 @@ función, secuencialmente, un mail a la vez.
 El **único mecanismo de idempotencia es el flag `\Seen` de IMAP**, que vive en el servidor de mail.
 El conector no persiste nada: los mails normalizados viven en memoria durante un tick y se descartan
 al terminar.
+
+> **Matizado por REQ-005 (2026-09-08).** *"No persiste nada"* pasa a ser **"no tiene persistencia
+> propia"**. Desde S-025 el conector mantiene estado en **dos buckets KV del bus de Jiku**: el Mapa
+> de Tickets (`slug → projectId`, que administra un operador) y el Mapa de Hilos
+> (`sha256(Message-Id) → requirementId`, que el conector escribe en cada mail). Sigue sin haber base
+> de datos, migraciones, cliente de base ni documento en `docs/db-schemas/`: un bucket KV no es
+> ninguna de esas cosas, y el almacén es una dependencia que el conector ya tenía.
+>
+> **Lo que NO cambia, y es lo que esta ADR realmente decide:** el `\Seen` de IMAP sigue siendo el
+> **único** mecanismo de idempotencia, y las dos pérdidas de abajo siguen aceptadas tal cual. El KV
+> **no debe** aprovecharse para idempotencia — sería otra decisión, con su propio análisis, y no la
+> tomó REQ-005. Los mails normalizados siguen viviendo en memoria durante un tick y descartándose al
+> terminar.
 
 **Se acepta explícitamente que no hay garantía de entrega en ninguna de las dos direcciones:**
 

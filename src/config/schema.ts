@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-
 import { validate as isValidCron } from 'node-cron';
 import { z } from 'zod';
 
@@ -71,8 +69,9 @@ export const DEFAULT_PUT_TIMEOUT_MS = 30_000;
 
 // --- KV de NATS (los dos buckets, el TTL esperado y el reintento del watch -- REQ-005 / S-024) ---
 //
-// El bucket de SLUGS (el Mapa de Tickets): configuracion que administra un humano. `TICKETS` es
-// valido contra el `validBucketRe` de @nats-io/kv (lib/kv.js:88, /^[-\w]+$/).
+// El bucket de SLUGS (el Mapa de Tickets): configuracion que administra un humano, y desde S-025 la
+// UNICA fuente del mapa — se sigue con `watch()` sobre una copia en memoria. `TICKETS` es valido
+// contra el `validBucketRe` de @nats-io/kv (lib/kv.js:88, /^[-\w]+$/).
 export const DEFAULT_KV_TICKETS_BUCKET = 'TICKETS';
 
 // El bucket de HILOS (el Mapa de Hilos): estado que el conector escribe en cada mail. Distinto
@@ -87,9 +86,9 @@ export const DEFAULT_KV_THREADS_BUCKET = 'MAIL_THREADS';
 // avisar con un `warn` si difiere. Un TTL distinto no rompe el ruteo, solo cambia la ventana.
 export const DEFAULT_KV_THREADS_TTL_DAYS = 90;
 
-// El intervalo del reintento del `watch()` caido. Se DECLARA aca y se USA en S-025, igual que
-// PUT_TIMEOUT_MS se declaro en S-017 y lo consumio S-019: declararla ahora evita que S-025 tenga
-// que volver a tocar el schema. Separador numerico consistente con MIN_TIMEOUT_MS = 15_000.
+// El intervalo del reintento del `watch()` caido. La declaro S-024 y la CONSUME S-025
+// (`startTicketMapWatch()` en src/infra/kv/ticket-map.ts). Separador numerico consistente con
+// MIN_TIMEOUT_MS = 15_000.
 export const DEFAULT_KV_WATCH_RETRY_MS = 30_000;
 
 // El tope de 10 NO es una env var -- CA-12 de S-017 lo exige fijo en codigo: es el `maxItems` del
@@ -100,9 +99,9 @@ export const MAX_ATTACHMENTS_PER_REQUIREMENT = 10;
 /**
  * Parsea una lista separada por comas a un array de strings no vacio, trim()eando cada elemento.
  *
- * Compartida por las dos listas blancas (extensiones y MIME) a proposito -- mismo criterio que
- * `parseTicketMap`: dos copias divergen, y el operador tendria que aprender dos formatos para
- * configurar dos listas que son estructuralmente lo mismo (un array plano de strings).
+ * Compartida por las dos listas blancas (extensiones y MIME) a proposito: dos copias divergen, y el
+ * operador tendria que aprender dos formatos para configurar dos listas que son estructuralmente lo
+ * mismo (un array plano de strings).
  *
  * NUNCA lanza: un throw dentro del transform escapa de `createEnv`. Todos los fallos salen por
  * `ctx.addIssue()` y devuelven `z.NEVER` -- una lista vacia tras el parseo (todo el string era
@@ -135,76 +134,6 @@ function parseNonEmptyLowercaseList(raw: string, ctx: z.RefinementCtx): string[]
   }
 
   return items;
-}
-
-/** La forma valida del Mapa de Tickets ya parseado: pares slug -> projectId entero positivo. */
-const ticketMapShape = z.record(z.string(), z.number().int().positive());
-
-/**
- * Parsea, valida y normaliza el Mapa de Tickets desde su contenido crudo.
- *
- * Vive en el `.transform()` de CADA UNA de las dos claves —y no en un refinement sobre el objeto
- * entero— porque `@t3-oss/env-core` valida clave por clave con `parseWithDictionary()` y ACUMULA
- * los issues de todas antes de invocar `onValidationError` una sola vez. Un fallo del mapa emitido
- * desde aca sale en la MISMA lista que un `IMAP_HOST` ausente, que es exactamente lo que CA-3 pide;
- * emitido desde un refinement del objeto, Zod cortaria antes de correrlo si otra clave ya fallo, y
- * el operador leeria dos mensajes en dos formatos.
- *
- * Las dos fuentes comparten esta unica funcion a proposito: dos copias divergen, y el operador
- * tendria que aprender dos formatos para configurar una sola cosa.
- *
- * NUNCA lanza: un throw dentro del transform escapa de `createEnv` y rompe la lista unica. Todos
- * los fallos salen por `ctx.addIssue()` y devuelven `z.NEVER`.
- */
-function parseTicketMap(raw: string, ctx: z.RefinementCtx): ReadonlyMap<string, number> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    ctx.addIssue({ code: 'custom', message: 'no es JSON parseable' });
-    return z.NEVER;
-  }
-
-  // El mensaje que ve el operador sale de EXPECTATIONS, no de aca: el formateador lee solo
-  // `issue.path`. Estos textos existen para el que lee el codigo, y no interpolan ningun valor.
-  const shaped = ticketMapShape.safeParse(parsed);
-  if (!shaped.success) {
-    ctx.addIssue({ code: 'custom', message: 'no es un objeto de pares slug -> projectId' });
-    return z.NEVER;
-  }
-
-  // La deteccion de duplicados corre sobre las claves ORIGINALES y antes de construir el Map: sobre
-  // el objeto ya parseado seria imposible, porque `Alfa` y `alfa` son dos claves distintas hasta que
-  // se normalizan, y despues de normalizarlas una piso a la otra sin dejar rastro.
-  //
-  // LIMITACION DECLARADA, no fingida (CA-6): la clave EXACTAMENTE repetida (`{"alfa":42,"alfa":7}`)
-  // ya la resolvio `JSON.parse` antes de que este codigo vea nada, y gana la ultima. No se puede
-  // detectar sin un parser propio de JSON, que no vale el costo. Lo que si se garantiza es que el
-  // resultado nunca es un ruteo arbitrario silencioso: con claves identicas el valor es
-  // deterministico, y con claves que difieren en casing —el caso real, el que un operador comete—
-  // el worker no arranca.
-  const entries = Object.entries(shaped.data);
-  const counts = new Map<string, number>();
-
-  for (const [key] of entries) {
-    const slug = key.trim().toLowerCase();
-    if (slug === '') {
-      ctx.addIssue({ code: 'custom', message: 'hay un slug vacio' });
-      return z.NEVER;
-    }
-    counts.set(slug, (counts.get(slug) ?? 0) + 1);
-  }
-
-  // Un issue por CADA slug duplicado inundaria la lista unica con ruido en un mapa grande. Uno que
-  // nombre el problema alcanza: el operador va a mirar el mapa entero igual.
-  for (const count of counts.values()) {
-    if (count > 1) {
-      ctx.addIssue({ code: 'custom', message: 'hay slugs duplicados una vez normalizados' });
-      return z.NEVER;
-    }
-  }
-
-  return new Map(entries.map(([key, projectId]) => [key.trim().toLowerCase(), projectId]));
 }
 
 export const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'] as const;
@@ -295,41 +224,17 @@ export const envSchema = {
   // criterio.
   POLL_MAX_PER_TICK: z.coerce.number().int().min(1).default(DEFAULT_POLL_MAX_PER_TICK),
 
-  // --- Ruteo (Mapa de Tickets, prefijo y placeholders) ---
-  // Las dos fuentes del mapa se declaran OPCIONALES a nivel de clave, y no es un descuido: su
-  // obligatoriedad es cross-field —exactamente una de las dos— y se resuelve en `createFinalSchema`
-  // (src/config/env.ts). Declararlas requeridas aca haria imposible la regla "una de las dos".
+  // --- Ruteo (prefijo del subaddress y placeholders) ---
   //
-  // El transform lee el filesystem, que es una excepcion deliberada a que la validacion del schema
-  // sea pura: la alternativa —cargar el archivo despues de loadEnvFromProcess()— informaria el
-  // archivo roto en un segundo mensaje, con otro formato, y eso es lo que CA-3 prohibe. Es la misma
-  // clase de excepcion que POLL_CRON ya hace llamando a validate() de node-cron en el arranque, y
-  // por la misma razon: un fallo diferido en un worker sin healthcheck no tiene sintoma.
-  TICKET_MAP: z.string().min(1).optional().transform((raw, ctx) => {
-    if (raw === undefined) return undefined;
-    return parseTicketMap(raw, ctx);
-  }),
-
-  // readFileSync y no la version asincrona porque el schema de createEnv no admite refinements
-  // asincronicos (ensureSynchronous() lanza si un validador devuelve una Promise). Bloquear el
-  // event loop aca es gratis: es el arranque, no hay ningun trabajo concurrente todavia.
+  // El Mapa de Tickets YA NO ES CONFIGURACION DEL PROCESO (S-025): su dueno es el bucket KV de
+  // slugs, seguido con `watch()`. Con el se fueron `TICKET_MAP`, `TICKET_MAP_FILE`, la funcion que
+  // las parseaba, y la UNICA regla cross-field del schema. Y con `TICKET_MAP_FILE` se fue la unica
+  // lectura de filesystem que ocurria DENTRO de la validacion: **la excepcion declarada a que la
+  // validacion sea pura ya no existe**. La unica excepcion que queda es la llamada a
+  // `validate()` de node-cron en `POLL_CRON`, que no toca el filesystem.
   //
-  // El catch cubre a la vez el archivo inexistente, el ilegible y el directorio: los tres son "no se
-  // puede leer" y el operador arregla lo mismo en los tres casos. El issue NO nombra la ruta ni el
-  // contenido.
-  TICKET_MAP_FILE: z.string().min(1).optional().transform((path, ctx) => {
-    if (path === undefined) return undefined;
-
-    let raw: string;
-    try {
-      raw = readFileSync(path, 'utf8');
-    } catch {
-      ctx.addIssue({ code: 'custom', message: 'no se puede leer el archivo' });
-      return z.NEVER;
-    }
-
-    return parseTicketMap(raw, ctx);
-  }),
+  // No se repone ningun default "razonable" para el mapa: un mapa vacio es un estado valido, y su
+  // fuente ya no es este archivo.
 
   // Los tres rechazan un valor que sea solo espacios. El string vacio no llega hasta aca:
   // `emptyStringAsUndefined` lo convierte en ausente y cae al default, que es lo correcto.
@@ -347,8 +252,9 @@ export const envSchema = {
     .default(DEFAULT_PLACEHOLDER_BODY),
 
   // --- Politica local de archivos (adjuntos, FG-4 / S-017) ---
-  // Las cuatro claves son independientes entre si -- ninguna es cross-field, a diferencia de
-  // TICKET_MAP/TICKET_MAP_FILE -- asi que no tocan src/config/env.ts ni createFinalSchema.
+  // Las cuatro claves son independientes entre si -- ninguna es cross-field -- asi que no tocan
+  // src/config/env.ts ni createFinalSchema. Desde S-025 el schema NO TIENE NINGUNA regla
+  // cross-field: la unica que hubo (las dos fuentes del Mapa de Tickets) se elimino con ellas.
   ATTACHMENT_ALLOWED_EXTENSIONS: z
     .string()
     .min(1)
@@ -372,13 +278,14 @@ export const envSchema = {
 
   // --- KV (buckets, TTL y reintento del watch -- S-024) ---
   //
-  // Las cuatro claves son INDEPENDIENTES entre si: ninguna es cross-field, a diferencia de
-  // TICKET_MAP/TICKET_MAP_FILE, asi que NINGUNA toca src/config/env.ts ni `createFinalSchema`
-  // (CA-9 de S-024, afirmado por un test de propiedad que escanea env.ts buscando estos nombres).
+  // Las cuatro claves son INDEPENDIENTES entre si: ninguna es cross-field, asi que NINGUNA toca
+  // src/config/env.ts ni `createFinalSchema` (CA-9 de S-024, afirmado por un test de propiedad que
+  // escanea env.ts buscando estos nombres).
   //
-  // Esto NO es un detalle de implementacion: cuando S-025 elimine las dos fuentes del Mapa de
-  // Tickets y su regla cross-field, va a ser tentador "unificar" estas cuatro con lo que quede
-  // ahi. No hay nada que unificar — son cuatro valores sueltos sin ninguna relacion entre si.
+  // Esto NO es un detalle de implementacion, y AHORA ES CUANDO APLICA: S-025 elimino las dos
+  // fuentes del Mapa de Tickets y su regla cross-field, asi que es tentador "unificar" estas cuatro
+  // con lo que quedo ahi. NO HAY NADA QUE UNIFICAR — son cuatro valores sueltos sin ninguna
+  // relacion entre si, y el schema ya no tiene ninguna regla cross-field donde meterlas.
   //
   // Los dos de nombre de bucket rechazan un valor que sea solo espacios, con el mismo patron que
   // SUBADDRESS_PREFIX: el string vacio no llega hasta aca porque `emptyStringAsUndefined` lo
@@ -400,7 +307,7 @@ export const envSchema = {
   // comparacion, con su constante MS_PER_DAY nombrada.
   KV_THREADS_TTL_DAYS: z.coerce.number().int().positive().default(DEFAULT_KV_THREADS_TTL_DAYS),
 
-  // No se usa en S-024 -- lo consume S-025 (el reintento del watch caido).
+  // La consume S-025: el reintento del watch caido del Mapa de Tickets.
   KV_WATCH_RETRY_MS: z.coerce.number().int().positive().default(DEFAULT_KV_WATCH_RETRY_MS),
 };
 

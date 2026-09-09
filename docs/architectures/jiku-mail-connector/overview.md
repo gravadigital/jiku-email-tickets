@@ -22,8 +22,8 @@ worker en node
   indicador de solapamiento **siempre** —incluso si el tick lanza—, y responde a `SIGTERM`/`SIGINT`
   esperando el tick en vuelo antes de cerrar el bus y salir con codigo `0`. Desde S-014/S-015, cada
   mail normalizado se rutea y publica dentro de la misma iteracion del tick — ver el modulo `ruteo`.
-- **ruteo** — Resolucion del slug del subaddress contra el Mapa de Tickets (KV en memoria, cargado
-  al arrancar). Un mail sin slug mapeado se descarta con motivo logueado. **Estado (S-012 a S-016):**
+- **ruteo** — Resolucion del slug del subaddress contra el Mapa de Tickets (copia en memoria de un
+  bucket KV del bus, cargada al arrancar y actualizada **en caliente** por `watch()` desde S-025). Un mail sin slug mapeado se descarta con motivo logueado. **Estado (S-012 a S-016):**
   **implementado** de punta a punta — el arbol de decision puro de `routeMail()` (`es_respuesta` →
   `sin_slug` → `slug_no_mapeado` → resuelto, S-013), cableado en el tick junto con la publicacion
   (S-014), y con las propiedades del sistema completo afirmadas por tests (slug literal en el log
@@ -36,8 +36,12 @@ worker en node
   `openKvStores()` los abre con `open()` y verifica que existen con `status()`, falla rapido con un
   error que **nombra el bucket faltante**, y compara el TTL del bucket de hilos avisando con un
   `warn` sin fijarlo. El conector **no crea buckets** y **no fija el TTL**, las dos cosas afirmadas
-  por tests que escanean `src/`. **Pendiente:** el `watch()` del Mapa de Tickets con su copia en
-  memoria (S-025), y las operaciones del Mapa de Hilos —el write y el lookup— (S-026). Documentado
+  por tests que escanean `src/`. **S-025 sumo el `watch()` del Mapa de Tickets**: `startTicketMapWatch()`
+  espera la carga inicial completa antes de que se schedule el primer tick y despues mantiene la copia
+  en memoria al dia, mutando SIEMPRE el mismo `Map` —nunca reemplazandolo— que es lo que hace que
+  `config.ruteo.ticketMap` vea las actualizaciones. Si el watch se cae, el mapa **se conserva** y se
+  reintenta; vaciarlo convertiria una caida del bus en perdida de tickets. **Pendiente:** las
+  operaciones del Mapa de Hilos —el write y el lookup— (S-026). Documentado
   en el Paso 5.5 de [arranque-y-conexion-al-bus](../../flows/arranque-y-conexion-al-bus.md), que
   registra los cuatro hallazgos verificados del KV (entre ellos que `open()` **no** verifica
   existencia, y que el TTL viene en milisegundos).

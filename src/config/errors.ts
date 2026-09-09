@@ -39,19 +39,11 @@ export const EXPECTATIONS: Record<string, string> = {
   POLL_ENABLED: 'se esperaba uno de: true, false',
   POLL_MAX_PER_TICK: 'se esperaba un entero mayor o igual a 1 (el maximo de mails por tick)',
 
-  // --- Ruteo (S-012) ---
-  // Esta entrada es la unica de la tabla que describe una REGLA y no solo un formato, y es
-  // deliberado: los dos issues cross-field de las dos fuentes excluyentes aterrizan en el path de
-  // TICKET_MAP, asi que esto es lo unico que el operador va a leer cuando se equivoque. Si dijera
-  // solo "se esperaba un JSON de objeto", quien declaro las dos fuentes no tendria forma de saber
-  // que el problema es haber declarado tambien el archivo.
-  TICKET_MAP:
-    'se esperaba el Mapa de Tickets como JSON de objeto slug -> projectId entero positivo, ' +
-    'declarado en EXACTAMENTE UNA de las dos fuentes: esta variable o TICKET_MAP_FILE. ' +
-    'Declarar las dos, o ninguna, no arranca. Un mapa vacio ({}) es valido',
-  TICKET_MAP_FILE:
-    'se esperaba la ruta a un archivo legible con el Mapa de Tickets, con el mismo JSON que ' +
-    'TICKET_MAP y excluyente con ella',
+  // --- Ruteo (S-012, con el Mapa de Tickets removido en S-025) ---
+  // Las dos entradas del Mapa de Tickets se eliminaron junto con sus claves: su fuente es el bucket
+  // KV de slugs, no la configuracion. Con ellas se fue la unica entrada de toda esta tabla que
+  // describia una REGLA y no un formato — no quedo ninguna, porque el schema ya no tiene ninguna
+  // regla cross-field que explicar.
   SUBADDRESS_PREFIX:
     'se esperaba el prefijo del subaddress, no vacio (por default tickets)',
   // A diferencia de las otras dos, esta entrada NO cita su default literal, y es a proposito: el

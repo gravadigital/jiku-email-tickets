@@ -22,7 +22,7 @@ loadDotenvUnlessTest();
  * propiedad que escanea el codigo para afirmarlo.
  */
 async function main(): Promise<void> {
-  const { config, logger, client } = await runStartup();
+  const { config, logger, client, ticketMapWatch } = await runStartup();
 
   // Apagado ordenado (CA-8, CA-9, CA-10): los handlers de SIGTERM/SIGINT se registran ACA, ANTES
   // de `scheduleTick()`, y no despues. `shutdown` se reconstruye (mismo `waitForCurrentTick` y
@@ -36,6 +36,9 @@ async function main(): Promise<void> {
   let shutdown = createShutdownHandler({
     scheduledTask: undefined,
     waitForCurrentTick,
+    // El watch YA esta activo cuando esto se registra: `runStartup()` lo dio de alta en el paso 5.6
+    // y espero su carga inicial, asi que una señal que llegue en esta ventana lo baja igual.
+    stopTicketMapWatch: ticketMapWatch.stop,
     closeBus,
     exit: (code) => process.exit(code),
   });
@@ -65,6 +68,7 @@ async function main(): Promise<void> {
   shutdown = createShutdownHandler({
     scheduledTask,
     waitForCurrentTick,
+    stopTicketMapWatch: ticketMapWatch.stop,
     closeBus,
     exit: (code) => process.exit(code),
   });

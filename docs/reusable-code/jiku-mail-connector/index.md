@@ -68,7 +68,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 28**
+**Total: 29**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -178,6 +178,17 @@ N/A (no HTTP surface - ADR-001)
   first and stopping there. Compares the threads bucket's TTL against the configured one and emits a
   single `warn` if they differ — it never **sets** it, and it never **creates** a bucket. Takes
   `logger` by parameter, not via `getLogger()`, so tests can inject a capture.
+
+- **startTicketMapWatch()** (`src/infra/kv/ticket-map.ts`) - Loads the Ticket Map from the KV bucket
+  and keeps it live with `watch()`, returning the `Map` plus a `stop()` for the ordered shutdown.
+  Waits for the **complete initial load** before returning, so no tick ever routes against a
+  half-filled map. Three traps it exists to avoid, all verified empirically: an **empty bucket emits
+  no entry at all** (so waiting for one hangs startup forever on any new deployment — it reads
+  `status().values` first); a **dropped watch ends the `for await` normally rather than throwing**
+  (so the retry is triggered after the loop, not from a `catch`); and a **`DEL` arrives with an empty
+  value** (so the operation is checked before the value is parsed). It **mutates one `Map` for the
+  life of the process and never replaces it** — a defensive copy anywhere in the path would break
+  liveness without failing to compile.
 
 See full details in [services.md](./services.md)
 
