@@ -172,6 +172,119 @@ describe('README deployment section', () => {
 
   // CA-10 desde el lado de la documentacion: para que un operador no busque una variable de
   // carpeta que no existe.
+  /* ========================================================================================
+   * S-028 (CA-16): las precondiciones del KV, completas y CONSISTENTES entre si.
+   *
+   * # POR QUE ESTOS CASOS SON DE AUDITORIA Y NO DE ESCRITURA
+   *
+   * El README YA tenia la precondicion 8 con las cuatro cosas, los dos `nats kv add` con el
+   * `--ttl=90d`, la nota de que el operador los crea, y las cuatro variables `KV_*` en la tabla:
+   * S-024 a S-027 las fueron dejando. Lo que faltaba no era el CONTENIDO sino LA ASERCION, y en
+   * particular la de CONSISTENCIA — que es la unica falla que nadie ve leyendo una seccion sola.
+   *
+   * Por eso el caso de consistencia CRUZA las dos secciones del mismo archivo (extrae el nombre del
+   * bucket del bloque de comandos y el default de la tabla de variables, y los compara entre si) en
+   * vez de afirmar cada uno contra una constante del test. Afirmar contra constantes detectaria que
+   * una seccion cambio; cruzarlas detecta que las dos DIVERGIERON, que es la falla que importa: un
+   * operador que copia el comando de una seccion y la variable de la otra termina con un bucket
+   * creado con un nombre y un conector buscando otro — y el sintoma es un conector que descarta
+   * todo sin decir por que.
+   * ======================================================================================== */
+
+  // TS-62
+  it('the KV precondition names all FOUR things: JetStream, KV permissions, and both buckets', () => {
+    // Las cuatro, explicitas. Si falta una, el operador despliega y el conector no arranca por una
+    // razon que la seccion no le anticipo.
+    expect(deployment).toMatch(/JetStream/);
+    // Los permisos van en el auth-callout, que es un sistema distinto del bus y del conector.
+    expect(deployment).toMatch(/auth-callout/);
+    expect(deployment).toMatch(/permisos de KV/i);
+    // Y los dos buckets, el de hilos con su TTL.
+    expect(deployment).toContain('TICKETS');
+    expect(deployment).toContain('MAIL_THREADS');
+    expect(deployment).toContain('--ttl=90d');
+  });
+
+  // TS-62, segunda mitad: el bloque de comandos con los DOS `nats kv add`.
+  it('carries both nats kv add commands, and the threads one with its --ttl=90d', () => {
+    const adds = deployment.match(/nats kv add/g) ?? [];
+    expect(adds.length, 'tienen que estar los DOS `nats kv add`').toBeGreaterThanOrEqual(2);
+
+    expect(deployment).toMatch(/nats kv add\s+TICKETS/);
+    // El del de hilos lleva el TTL en la MISMA linea: separarlo lo volveria un comando que el
+    // operador puede copiar sin el flag.
+    expect(deployment).toMatch(/nats kv add\s+MAIL_THREADS[^\n]*--ttl=90d/);
+  });
+
+  // TS-63
+  it('says the operator creates the buckets, that the connector does NOT, and why', () => {
+    // Que los crea el operador, y que el conector no.
+    expect(deployment).toMatch(/no crea/i);
+    // EL PORQUE, que es lo que evita que alguien lo "arregle" agregando el create(): un typo
+    // crearia un bucket VACIO en silencio, y el sintoma seria un conector aparentemente sano que
+    // descarta TODOS los mails sin decir por que.
+    expect(deployment).toMatch(/vac[ií]o/i);
+    expect(deployment).toMatch(/silencio/i);
+    expect(deployment).toMatch(/descarta/i);
+
+    // Y el TTL: lo COMPARA y AVISA, no lo fija.
+    expect(deployment).toMatch(/no lo fija|tampoco lo fija/i);
+    expect(deployment).toMatch(/compara/i);
+    expect(deployment).toMatch(/warn/);
+  });
+
+  // TS-63, la contraparte: que pasa si falta cada cosa. Los dos diagnosticos son distintos y el
+  // arreglo de cada uno vive en otro lugar.
+  it('states what happens if each piece is missing, with its diagnosis', () => {
+    expect(deployment).toContain('KV_BUCKET_MISSING_ERROR');
+    // Falta un bucket -> el log NOMBRA cual. Es el dato que hace falta para crearlo.
+    expect(deployment).toContain('bucket_inexistente');
+    expect(deployment).toMatch(/nombra cu[aá]l/i);
+    // Falta JetStream o los permisos -> indistinguibles desde el cliente, asi que el mensaje nombra
+    // las DOS cosas en vez de elegir una y mandar al operador al lugar equivocado.
+    expect(deployment).toContain('kv_no_disponible');
+    expect(deployment).toMatch(/indistinguibles/i);
+  });
+
+  // TS-64 — LA CONSISTENCIA INTERNA, cruzando las dos secciones del mismo archivo.
+  it('keeps the command block and the variables table CONSISTENT with each other', () => {
+    // Los nombres de bucket que el bloque de comandos le dice al operador que cree.
+    const ticketsEnComando = /nats kv add\s+([A-Z_][A-Z0-9_]*)/.exec(deployment)?.[1];
+    const threadsEnComando = /nats kv add\s+([A-Z_][A-Z0-9_]*)[^\n]*--ttl=(\d+)d/.exec(deployment);
+
+    expect(ticketsEnComando, 'el comando del bucket de slugs debe nombrar su bucket').toBeDefined();
+    expect(threadsEnComando, 'el comando del bucket de hilos debe nombrar su bucket y su TTL').not.toBeNull();
+
+    // Y los defaults que la tabla de variables declara para las mismas dos variables.
+    //
+    // Se lee la FILA de la tabla y se toma su TERCERA columna, que es la del default. Buscar "el
+    // primer valor entre backticks despues del nombre" seria fragil: la cuarta columna trae
+    // `nats kv add` entre backticks, y una regex mal anclada terminaria comparando contra eso.
+    const defaultDe = (variable: string): string | undefined => {
+      const row = readme.split('\n').find((line) => line.startsWith(`| \`${variable}\``));
+      // Columnas de la fila: ['', variable, requerida, default, descripcion, ''].
+      return row?.split('|')[3]?.trim().replace(/`/g, '');
+    };
+
+    const ticketsDefault = defaultDe('KV_TICKETS_BUCKET');
+    const threadsDefault = defaultDe('KV_THREADS_BUCKET');
+
+    expect(ticketsDefault, 'KV_TICKETS_BUCKET debe declarar su default en la tabla').toBeDefined();
+    expect(threadsDefault, 'KV_THREADS_BUCKET debe declarar su default en la tabla').toBeDefined();
+
+    // LA ASERCION QUE IMPORTA: las dos secciones dicen LO MISMO. Si divergieran, el operador
+    // crearia un bucket con un nombre y el conector buscaria otro.
+    expect(ticketsEnComando).toBe(ticketsDefault);
+    expect(threadsEnComando?.[1]).toBe(threadsDefault);
+
+    // Y el TTL del comando coincide con el default de `KV_THREADS_TTL_DAYS`. Si no coincidieran, el
+    // conector arrancaria emitiendo un `warn` de TTL discrepante en TODO despliegue nuevo — un
+    // aviso que nadie puede arreglar porque la documentacion misma lo produce.
+    const ttlDefault = defaultDe('KV_THREADS_TTL_DAYS');
+    expect(ttlDefault, 'KV_THREADS_TTL_DAYS debe declarar su default en la tabla').toBeDefined();
+    expect(threadsEnComando?.[2]).toBe(ttlDefault);
+  });
+
   it('states that INBOX is fixed and not configurable', () => {
     expect(deployment).toContain('INBOX');
     expect(deployment).toMatch(/no es configurable|fija/i);

@@ -51,8 +51,13 @@ worker en node
   la unica marca—, las tres cosas afirmadas por tests que escanean `src/`. El parseo del entero leido
   del KV vive **compartido** en `parse.ts` (`parsePositiveId()`), consumido por los dos buckets.
   **S-027 le dio consumidor al lookup**: la respuesta con match se publica como Comentario y
-  `comentados` empieza a incrementarse. **El modulo esta completo** — REQ-005 no deja nada pendiente
-  en `infra/kv`. Documentado en el Paso 5.5 de [arranque-y-conexion-al-bus](../../flows/arranque-y-conexion-al-bus.md), que
+  `comentados` empieza a incrementarse. **S-028 lo verifico de punta a punta** contra un NATS real con
+  JetStream —el ciclo alta → write → respuesta → comentario → write → respuesta a la respuesta
+  (`test/infra/kv/e2e-kv.test.ts`), el fail-fast del bucket faltante encadenado con
+  `reportStartupFailure()` para los dos buckets, el `watch()` en caliente medido **sobre el tick**
+  (`test/infra/kv/e2e-watch-tick.test.ts`), y las propiedades del sistema sobre `runTick()` cableado
+  (`test/ingesta/tick-propiedades-kv.test.ts`)—. **El modulo esta completo y verificado** — REQ-005
+  **no deja nada pendiente** en `infra/kv`. Documentado en el Paso 5.5 de [arranque-y-conexion-al-bus](../../flows/arranque-y-conexion-al-bus.md), que
   registra los cuatro hallazgos verificados del KV (entre ellos que `open()` **no** verifica
   existencia, y que el TTL viene en milisegundos), y de punta a punta en
   [mapa-de-hilos-en-kv](../../flows/mapa-de-hilos-en-kv.md).

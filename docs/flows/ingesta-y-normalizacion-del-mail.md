@@ -4,8 +4,8 @@ title: Ingesta y normalización del mail
 type: event
 status: Active
 created: 2026-08-27
-last_updated: 2026-09-01
-stories: [S-007, S-008, S-009, S-010, S-011, S-012, S-013, S-014, S-015, S-016, S-022]
+last_updated: 2026-09-09
+stories: [S-007, S-008, S-009, S-010, S-011, S-012, S-013, S-014, S-015, S-016, S-022, S-028]
 ---
 
 # Ingesta y Normalización del Mail
@@ -243,8 +243,9 @@ saltos más allá). **Evento publicado:** `requirements.new`, cuando `routeMail(
 
 - `lock.release()` y `client.logout()`.
 - `logger.info({ ingestados, parseados, creados, descartados, fallidos }, 'tick completado')` — **los
-  cinco contadores, todos con valores reales** desde S-014/S-015: `creados` cuenta las altas que
-  `publishRequirementFromMail()` confirma, `descartados` cuenta los cinco motivos reales
+  SEIS contadores, todos con valores reales** (eran cinco hasta S-025; S-026 agregó `comentados`,
+  que S-027 empezó a incrementar): `creados` cuenta las altas que
+  `publishRequirementFromMail()` confirma, `descartados` cuenta los seis motivos reales
   (`es_respuesta`, `sin_slug`, `slug_no_mapeado`, `sin_message_id`, y — para completar el catálogo —
   el `no_parseable` cuenta como `fallidos`, no como descarte).
 
@@ -275,7 +276,7 @@ emisión al final del camino feliz— este requisito **falla en silencio**.
 emite la línea de métricas en su propio `finally` — corre siempre que el batch haya empezado, con
 éxito o con fallo a mitad de camino. Pero si la conexión nunca llega a abrirse (falla `connect()` o
 `getMailboxLock()`), `runTick()` nunca arranca y ese `finally` nunca corre. Por eso `runIngestaTick()`
-(el punto de entrada del módulo) tiene su **propio** `catch`, que emite la línea con los cinco
+(el punto de entrada del módulo) tiene su **propio** `catch`, que emite la línea con los seis
 contadores en `0` **sólo si el batch nunca llegó a empezar** — nunca duplica la línea si `runTick()` sí
 corrió. La distinción entre "el batch empezó" y "nunca empezó" se decide con una bandera que se marca
 justo antes de invocar `runTick()`, **no** inspeccionando el tipo de excepción: un `getMailboxLock()`
@@ -300,7 +301,7 @@ que preservar deliberadamente**. Jiku sí persiste: un alta exitosa escribe un r
   motivo, o fallido con su causa. **Ningún mail termina sin rastro** — el único que puede aparecer sin
   `Message-Id` es el que se descarta justamente por no tenerlo (`no_parseable` deja la línea del
   `uid`).
-- **Una línea por tick** con los cinco contadores reales, emitida también en el camino de fallo.
+- **Una línea por tick** con los seis contadores reales, emitida también en el camino de fallo.
 - **Un `warn` por diferidos** cuando el cap recortó, con cuántos quedaron.
 - **Un `warn` por tick salteado** cuando el guard rechazó un disparo.
 

@@ -5,7 +5,7 @@ type: event
 status: Active
 created: 2026-08-31
 last_updated: 2026-09-09
-stories: [S-012, S-013, S-014, S-015, S-016, S-022, S-026, S-027]
+stories: [S-012, S-013, S-014, S-015, S-016, S-022, S-026, S-027, S-028]
 ---
 
 # Ruteo y Alta del Requisito
@@ -18,14 +18,17 @@ después del `success` del alta; el Paso 3 gana el lookup que resuelve el motivo
 respuesta, con `hilo_desconocido` como motivo nuevo y `es_respuesta` cambiando de significado.
 S-027: la respuesta con match deja de descartarse y se publica como Comentario — ver
 [publicacion-requirements-comment](publicacion-requirements-comment.md))
-**Stories:** S-012, S-013, S-014, S-015, S-016, S-022, S-026
+**Stories:** S-012, S-013, S-014, S-015, S-016, S-022, S-026, S-027, S-028
 
-> **Alcance de la actualización de S-026.** El **diagrama Mermaid de este flujo NO se tocó** y la rama
-> del comentario **no está**: las dos son de S-027, y escribir hoy un flujo que describe una salida
-> que todavía no existe dejaría documentación que miente durante toda una story. Lo que S-026 agrega
-> acá está en el Paso 3, el Paso 6 y la tabla de Manejo de Errores. Las operaciones del Mapa de Hilos
-> —el hash, el write, el lookup, el TTL— viven en su flujo propio:
-> [mapa-de-hilos-en-kv](mapa-de-hilos-en-kv.md).
+> **El diagrama incluye la rama del comentario desde S-028.** La nota de alcance de S-026 decía que
+> el Mermaid **no se tocaba** porque la salida por comentario era de S-027 y *"escribir hoy un flujo
+> que describe una salida que todavía no existe dejaría documentación que miente durante toda una
+> story"*. Ese razonamiento era correcto **entonces** y quedó vencido cuando S-027 construyó la
+> salida: el diagrama pasó a mentir por el otro lado, mostrando la respuesta con match cayendo en el
+> descarte. S-028 lo corrigió al releer los flujos contra el código, que es alcance explícito de esa
+> story. Las operaciones del Mapa de Hilos —el hash, el write, el lookup, el TTL— siguen viviendo en
+> su flujo propio: [mapa-de-hilos-en-kv](mapa-de-hilos-en-kv.md), y la publicación del comentario en
+> [publicacion-requirements-comment](publicacion-requirements-comment.md).
 
 ## Descripción
 
@@ -75,11 +78,24 @@ sequenceDiagram
         ROUTE-->>TICK: { ok: true, projectId, slug }
     end
 
-    alt route.ok === false
+    alt 'intencion' in route  (la RESPUESTA — S-027)
+        Note over TICK: NO es un descarte: esta variante no tiene motivo. El lookup decide.
+        TICK->>TICK: lookupThread({ threads, referenceIds, logger })
+        alt hilo.found === true
+            Note over TICK: se comenta — ver publicacion-requirements-comment
+            TICK->>TICK: counters.comentados += 1  (NO creados)
+        else found:false, consultable:true
+            TICK->>LOG: warn { messageId, motivo: 'hilo_desconocido' } 'mail descartado'
+            TICK->>TICK: counters.descartados += 1
+        else found:false, consultable:false
+            TICK->>LOG: warn { messageId, motivo: 'es_respuesta' } 'mail descartado'
+            TICK->>TICK: counters.descartados += 1
+        end
+    else route.ok === false  (el DESCARTE por ruteo)
         TICK->>LOG: warn { messageId, motivo, slug? } 'mail descartado'
         TICK->>TICK: counters.descartados += 1
         Note over TICK: el mail se descarta aca, dentro de la misma iteracion — no se acumula
-    else route.ok === true
+    else route.ok === true  (EL ALTA)
         TICK->>ADJ: procesarAdjuntosDelMail(mail.attachments, config.adjuntos, { client, logger })
         loop por cada adjunto, EN SERIE (par por archivo)
             alt rechazo LOCAL (particionar/deduplicar/aplicarTope)
@@ -90,7 +106,7 @@ sequenceDiagram
                 BUS->>CORE: entrega el comando
                 alt core rechaza (failure de negocio)
                     CORE-->>ADJ: failure { errorCode }
-                    ADJ->>LOG: warn { code, nombre, mime } 'permiso de subida rechazado'
+                    ADJ->>LOG: warn { code, nombre, mime } 'core rechazo el adjunto por politica de archivos'
                     ADJ->>ADJ: avisosDeRechazo.push(aviso)
                 else core concede
                     CORE-->>ADJ: success { fileId, uploadUrl }
@@ -117,6 +133,8 @@ sequenceDiagram
             BUS-->>PUB: { id }
             PUB->>LOG: info { messageId, projectId, requirementId, archivosVinculados, archivosConAviso } 'requisito creado en Jiku'
             TICK->>TICK: counters.creados += 1
+            TICK->>TICK: recordThreadEntry({ threads, messageId, requirementId, logger })
+            Note over TICK: el write va DESPUES de creados += 1 y solo con exito. Su fallo NO cancela el alta.
         else core o el bus rechazan
             BUS-->>PUB: PublishError (diagnosis, sdkErrorClass, code?, hint?)
             PUB->>LOG: error { messageId, ...error.logContext(projectId) } 'fallo la publicacion de requirements.new'
@@ -312,8 +330,9 @@ iteración**:
 que veía. `counters.creados` **no se revierte**, no hay compensación, y el `for` continúa. El write es
 un efecto **posterior** y **fuera del camino crítico** del alta.
 
-**La línea del tick pasa a emitir seis contadores:** se agrega `comentados`, que en S-026 queda
-**siempre en 0** —la salida por comentario es S-027— y que es un contador **separado** de `creados`
+**La línea del tick emite seis contadores:** S-026 agregó `comentados`, que en esa story quedaba
+**siempre en 0** —la salida por comentario era S-027— y que **desde S-027 se incrementa de verdad**.
+Es un contador **separado** de `creados`
 porque `creados` cuenta sólo altas de Requisito.
 
 **Ref:** S-005, S-015 CA-9 a CA-14; S-016 CA-10, CA-12; S-026 CA-1, CA-3, CA-4, CA-11; ADR-001,
