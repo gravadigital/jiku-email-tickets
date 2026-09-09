@@ -22,7 +22,7 @@ loadDotenvUnlessTest();
  * propiedad que escanea el codigo para afirmarlo.
  */
 async function main(): Promise<void> {
-  const { config, logger, client, ticketMapWatch } = await runStartup();
+  const { config, logger, client, kv, ticketMapWatch } = await runStartup();
 
   // Apagado ordenado (CA-8, CA-9, CA-10): los handlers de SIGTERM/SIGINT se registran ACA, ANTES
   // de `scheduleTick()`, y no despues. `shutdown` se reconstruye (mismo `waitForCurrentTick` y
@@ -59,7 +59,13 @@ async function main(): Promise<void> {
   // nueva (ADR-002): es el mismo que el tick usara para publicar `requirements.new` (S-015). Este
   // archivo NO importa nada de `#domain/publicacion/` para lograrlo — el import queda encapsulado
   // en `tick.ts` (CA-24).
-  const scheduledTask = scheduleTick(config, logger, client);
+  //
+  // El handle del bucket de HILOS viaja hasta el tick por esta cadena, con la misma forma con que
+  // ya viaja el `client` (S-026). Es el que `openKvStores()` ya abrio y verifico sobre la conexion
+  // UNICA del proceso: aca no se abre nada nuevo (ADR-002). Se pasa el bucket suelto y no el
+  // `KvStores` entero — el tick necesita el de hilos, no el de tickets, que ya le llega por
+  // `config.ruteo.ticketMap`.
+  const scheduledTask = scheduleTick(config, logger, client, kv.threads);
 
   // El proceso queda VIVO en ambas ramas. Con el poll habilitado, ademas hay un cron activo. Con
   // el poll deshabilitado (CA-3/CA-4), el proceso sigue vivo igual, pero NO por codigo de esta

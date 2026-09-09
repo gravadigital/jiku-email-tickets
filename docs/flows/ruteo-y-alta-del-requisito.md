@@ -4,8 +4,8 @@ title: Ruteo y alta del requisito
 type: event
 status: Active
 created: 2026-08-31
-last_updated: 2026-09-01
-stories: [S-012, S-013, S-014, S-015, S-016, S-022]
+last_updated: 2026-09-08
+stories: [S-012, S-013, S-014, S-015, S-016, S-022, S-026]
 ---
 
 # Ruteo y Alta del Requisito
@@ -13,10 +13,17 @@ stories: [S-012, S-013, S-014, S-015, S-016, S-022]
 **Tipo:** Evento
 **Status:** Active
 **Creado:** 2026-08-31
-**Última actualización:** 2026-09-01 (S-022 implementada: se inserta el procesamiento completo de
-adjuntos entre el árbol de decisión de `routeMail()` y el armado del payload, con sus tres ramas de
-rechazo/fallo, y el pico de memoria de un mail a la vez pasa de advertencia a hecho cumplido)
-**Stories:** S-012, S-013, S-014, S-015, S-016, S-022
+**Última actualización:** 2026-09-08 (S-026 implementada: el Paso 6 gana el write al Mapa de Hilos
+después del `success` del alta; el Paso 3 gana el lookup que resuelve el motivo final de una
+respuesta, con `hilo_desconocido` como motivo nuevo y `es_respuesta` cambiando de significado)
+**Stories:** S-012, S-013, S-014, S-015, S-016, S-022, S-026
+
+> **Alcance de la actualización de S-026.** El **diagrama Mermaid de este flujo NO se tocó** y la rama
+> del comentario **no está**: las dos son de S-027, y escribir hoy un flujo que describe una salida
+> que todavía no existe dejaría documentación que miente durante toda una story. Lo que S-026 agrega
+> acá está en el Paso 3, el Paso 6 y la tabla de Manejo de Errores. Las operaciones del Mapa de Hilos
+> —el hash, el write, el lookup, el TTL— viven en su flujo propio:
+> [mapa-de-hilos-en-kv](mapa-de-hilos-en-kv.md).
 
 ## Descripción
 
@@ -173,11 +180,33 @@ Si `route.ok === false`: una única línea `warn` con
 `slug` viaja **sólo** cuando está presente en el resultado (únicamente `slug_no_mapeado` lo lleva) —
 nunca `slug: undefined` a mano. `counters.descartados += 1`.
 
+**Desde S-026, el motivo FINAL de una respuesta no es el que devolvió `routeMail()`.** Cuando
+`route.motivo === 'es_respuesta'` —y **sólo** entonces; `sin_slug` y `slug_no_mapeado` no tienen
+referencias que consultar y no pagan el round-trip— el tick invoca
+`lookupThread({ threads, referenceIds: mail.referenceIds, logger })` **antes** de emitir la línea, y
+el resultado resuelve el motivo:
+
+| Resultado del lookup | Motivo emitido |
+|---|---|
+| Sin match, consultable | `hilo_desconocido` |
+| No consultable (bucket inaccesible) | `es_respuesta` |
+| Con match | `es_respuesta` — el hilo **sí** se conoce, y en S-026 todavía no hay salida por comentario |
+
+**`es_respuesta` cambia de significado.** Pasa de cubrir *"toda respuesta"* a cubrir además *"no pude
+averiguar a qué hilo apunta"*. La distinción contra `hilo_desconocido` —*"esta respuesta apunta a un
+hilo que no conozco"*— es deliberada y el log tiene que sostenerla: uno se arregla cargando el hilo,
+el otro arreglando el bucket. Los dos significados de `es_respuesta` conviven a propósito y S-027
+resuelve el primero.
+
+**Sigue habiendo UNA sola línea de log por descarte:** el motivo se resuelve en una variable antes del
+`logger.warn`. `routeMail()` **no cambia** — ni su firma, ni su árbol, ni su orden de evaluación.
+
 **El mail (y el `RouteResult`) se descartan acá**: no se acumulan en ningún array del tick — el pico de
 memoria del proceso es de **un mail a la vez**, nunca del lote entero. No publica, no responde, no
 persiste.
 
-**Ref:** S-014 CA-3, CA-4; S-016 CA-9, CA-11, CA-19; ADR-001, ADR-006
+**Ref:** S-014 CA-3, CA-4; S-016 CA-9, CA-11, CA-19; S-026 CA-6, CA-8, CA-9, CA-10, CA-13; ADR-001,
+ADR-006. Detalle completo del lookup en [mapa-de-hilos-en-kv](mapa-de-hilos-en-kv.md), Paso 3.
 
 ---
 
@@ -266,13 +295,32 @@ iteración**:
   `hint()` cuando existen) — el tick no vuelve a loguear, solo cuenta y continúa con el siguiente UID,
   sin reintento.
 
-**Ref:** S-005, S-015 CA-9 a CA-14; S-016 CA-10, CA-12; ADR-001, ADR-002, ADR-006
+**Desde S-026, el éxito gana un efecto posterior: el write al Mapa de Hilos.** En el mismo `try`,
+**después** de `counters.creados += 1`, se invoca
+`recordThreadEntry({ threads, messageId: mail.messageId, requirementId, logger })` — con el
+`Message-Id` **crudo**, que la función hashea. Va **sólo** en el camino de éxito: si el alta falló, el
+`catch` cuenta `fallidos` y **no se escribe nada**.
+
+**El fallo del write no cancela el alta.** `recordThreadEntry()` **no lanza** (absorbe su fallo con un
+`warn`), así que no necesita un `try/catch` propio y el `catch` de `PublishError` sigue viendo sólo lo
+que veía. `counters.creados` **no se revierte**, no hay compensación, y el `for` continúa. El write es
+un efecto **posterior** y **fuera del camino crítico** del alta.
+
+**La línea del tick pasa a emitir seis contadores:** se agrega `comentados`, que en S-026 queda
+**siempre en 0** —la salida por comentario es S-027— y que es un contador **separado** de `creados`
+porque `creados` cuenta sólo altas de Requisito.
+
+**Ref:** S-005, S-015 CA-9 a CA-14; S-016 CA-10, CA-12; S-026 CA-1, CA-3, CA-4, CA-11; ADR-001,
+ADR-002, ADR-006. Detalle completo del write en [mapa-de-hilos-en-kv](mapa-de-hilos-en-kv.md),
+Paso 2.
 
 ## Manejo de Errores
 
 | Motivo/Diagnóstico | Nivel | Quién lo produce | Comportamiento |
 |---|---|---|---|
-| `es_respuesta` | `warn` | `routeMail()` | `counters.descartados += 1`. Incluye el falso positivo aceptado del reenvío |
+| `es_respuesta` | `warn` | `routeMail()`, con el motivo final confirmado por el lookup | `counters.descartados += 1`. **Desde S-026** cubre dos cosas: una respuesta CON match (todavía sin salida por comentario) y un lookup que **no se pudo hacer** (bucket de hilos inaccesible) |
+| `hilo_desconocido` | `warn` | `lookupThread()`, resuelto en el tick **(S-026)** | `counters.descartados += 1`. El lookup **sí** se pudo hacer y ninguna referencia matcheó. **No se crea nada.** Cubre el reenvío de hilo interno con slug mapeado y la entrada expirada por el TTL de 90 días |
+| El `put()` al Mapa de Hilos falla **(S-026)** | `warn` | `recordThreadEntry()` | **El tick continúa.** El alta **no se cancela ni se compensa** y `counters.creados` no se revierte |
 | `sin_slug` | `warn` | `routeMail()` | `counters.descartados += 1` |
 | `slug_no_mapeado` | `warn` | `routeMail()` | `counters.descartados += 1`, con el `slug` en la línea |
 | `rechazo_del_bus_por_subject` / `bus_sin_endpoint` | `error` | Bus NATS, vía `PublishError` | `counters.fallidos += 1`, sin reintento |

@@ -40,11 +40,22 @@ worker en node
   espera la carga inicial completa antes de que se schedule el primer tick y despues mantiene la copia
   en memoria al dia, mutando SIEMPRE el mismo `Map` —nunca reemplazandolo— que es lo que hace que
   `config.ruteo.ticketMap` vea las actualizaciones. Si el watch se cae, el mapa **se conserva** y se
-  reintenta; vaciarlo convertiria una caida del bus en perdida de tickets. **Pendiente:** las
-  operaciones del Mapa de Hilos —el write y el lookup— (S-026). Documentado
+  reintenta; vaciarlo convertiria una caida del bus en perdida de tickets. **S-026 sumo las
+  operaciones del Mapa de Hilos** (`threads.ts`): `sha256hex()` construye la clave —el sha256 en hex
+  del `Message-Id` **crudo**, porque `validKeyRe` de la libreria rechaza `<`, `>` y `@`—,
+  `recordThreadEntry()` escribe la entrada despues del alta con una falla **no cancelante**, y
+  `lookupThread()` recorre los `referenceIds` **en orden** y **corta en el primer hit**. El bucket de
+  hilos se lee con `get()` **puntual, sin `watch()` y sin copia en memoria**: es estado de alto
+  cardinal que cambia en cada mail, y el contraste con el Mapa de Tickets es deliberado. Ninguna de
+  las dos operaciones lanza, y **el bucket NO participa de la idempotencia** —el `\Seen` sigue siendo
+  la unica marca—, las tres cosas afirmadas por tests que escanean `src/`. El parseo del entero leido
+  del KV vive **compartido** en `parse.ts` (`parsePositiveId()`), consumido por los dos buckets.
+  **Pendiente:** la publicacion del comentario desde una respuesta con match, que es la que le va a
+  dar consumidor al lookup y va a empezar a incrementar `comentados` (S-027). Documentado
   en el Paso 5.5 de [arranque-y-conexion-al-bus](../../flows/arranque-y-conexion-al-bus.md), que
   registra los cuatro hallazgos verificados del KV (entre ellos que `open()` **no** verifica
-  existencia, y que el TTL viene en milisegundos).
+  existencia, y que el TTL viene en milisegundos), y de punta a punta en
+  [mapa-de-hilos-en-kv](../../flows/mapa-de-hilos-en-kv.md).
 - **publicacion** — Los dos comandos de escritura al bus via el SDK: `files.request-upload` y
   `requirements.new`. El `PUT` del byte del adjunto a la URL prefirmada que devuelve `core`.
   **Estado (S-005 a S-022):** `requirements.new` esta **implementado** de punta a punta —schema Zod

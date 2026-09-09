@@ -1,7 +1,12 @@
 # ADR-006: Observabilidad por logs estructurados a stdout, con el origen del rechazo explícito
 
-**Status:** Accepted
+**Status:** Accepted (matizada el 2026-09-08 por REQ-005 / S-026)
 **Date:** 2026-08-26
+**Amended:** 2026-09-08 — el catálogo de motivos de descarte pasa de **cinco a seis** literales, y la
+línea de métricas del tick pasa de **cinco a seis** contadores. Lo que la ADR decide —que cada mail
+deje rastro, que el motivo sea un literal exacto y que el tick emita una línea de métricas— no cambia:
+lo que cambia es la enumeración de dos catálogos que la ADR fija por extensión. Ver la nota al pie de
+las Implementation Rules.
 **Deciders:** Technical Leader
 **Tags:** observabilidad, logging, manejo-de-errores, operabilidad
 
@@ -44,7 +49,7 @@ qué sistema rechazó cada comando.**
 | Formato | Estructurado; **JSON en producción** |
 | Nivel default | `info` |
 | A quién le reporta un fallo | **A nadie.** No hay usuario esperando ni request que responder |
-| Métricas por tick | `ingestados`, `parseados`, `creados`, `descartados`, `fallidos` |
+| Métricas por tick | `ingestados`, `parseados`, `creados`, `descartados`, `fallidos`, `comentados` (S-026) |
 | Healthcheck | **Fuera de alcance v1** |
 
 ### Qué nunca se loguea
@@ -90,20 +95,55 @@ peor resultado posible en un servicio sin nadie mirando.
   Ningún mail termina sin rastro
 - Un alta exitosa MUST loguear `messageId`, `projectId` y el `id` del requisito creado, juntos
 - Un descarte MUST loguear `messageId` y el **motivo** (`sin_slug`, `slug_no_mapeado`, `es_respuesta`,
-  `sin_message_id`, `no_parseable`)
+  `sin_message_id`, `no_parseable`, `hilo_desconocido`)
 - Un descarte por slug no mapeado MUST incluir **el slug buscado** (es el dato que hace falta para
   cargarlo)
 - Un fallo de comando MUST loguear la **clase de error del SDK** y, cuando exista, el `code` y el
   `hint()`. MUST NOT reducirse a un mensaje genérico de "falló el comando"
 - Un `errorCode` desconocido MUST loguearse con su `code` y su `hint()` sin mapearse a otro error
-- Cada tick MUST emitir una línea con los cinco contadores: `ingestados`, `parseados`, `creados`,
-  `descartados`, `fallidos`
+- Cada tick MUST emitir una línea con los seis contadores: `ingestados`, `parseados`, `creados`,
+  `descartados`, `fallidos`, `comentados`
 - Un tick que difiere mails por el cap MUST loguear un `warn` con **cuántos** quedaron diferidos
 - Un fallo del refresh del token MUST loguearse como `error` (vía `onTokenError`) sin terminar el
   proceso
 - El timeout del comando MUST quedar en **15000 ms** (el default del SDK). **MUST NOT bajarse**
 - Un tick salteado por solapamiento MUST loguear un `warn`
 - MUST NOT implementarse endpoint de healthcheck ni exportador de métricas en v1
+
+> **Matizado por REQ-005 / S-026 (2026-09-08).** Dos de las reglas de arriba enumeran un catálogo por
+> extensión, y S-026 agrega un miembro a cada uno. Las dos reglas ya están escritas con el catálogo
+> ampliado; esta nota registra **qué** cambió y **por qué**, para que no se lea como un error.
+>
+> **1. El catálogo de motivos de descarte pasa de cinco a seis: se agrega `hilo_desconocido`.**
+>
+> El literal es exacto, en minúscula con guión bajo, y se loguea tal cual — como los otros cinco.
+> `es_respuesta` **se conserva**: no se reemplaza ni se depreca, y los dos conviven a propósito
+> porque cubren situaciones distintas cuyo arreglo está en lugares distintos:
+>
+> - `hilo_desconocido` — *"esta respuesta apunta a un hilo que no conozco"*. El lookup al Mapa de
+>   Hilos **sí se pudo hacer** y ninguna referencia matcheó. Cubre, indistinguibles a propósito, el
+>   reenvío de un hilo interno con slug mapeado, una entrada expirada por el TTL de 90 días, y un
+>   hilo anterior al despliegue. El arreglo, si lo hay, es del lado del hilo.
+> - `es_respuesta` — pasa a cubrir, **además** de su significado original, *"no pude averiguar a qué
+>   hilo apunta"*: el bucket de hilos estaba inaccesible y el lookup no se pudo hacer. El arreglo es
+>   del lado de la infraestructura.
+>
+> Colapsarlos en un literal borraría exactamente la señal que distingue *cargar el hilo* de
+> *arreglar el bucket*, que es la clase de distinción que esta ADR existe para preservar en el plano
+> de los rechazos de comando.
+>
+> **2. La línea del tick pasa de cinco contadores a seis: se agrega `comentados`.**
+>
+> Cuenta los comentarios publicados sobre un Requisito existente desde una respuesta con match en el
+> Mapa de Hilos. En S-026 queda **siempre en 0** —todavía no hay salida por comentario— y S-027 es
+> quien lo empieza a incrementar; se emite desde ya para que la **forma** de la línea de métricas no
+> cambie cuando eso pase.
+>
+> **Por qué es un contador separado y no se suma a `creados`:** `creados` cuenta **solo altas de
+> Requisito**. Sumarlos borraría la distinción entre *"se creó un ticket nuevo"* y *"se comentó uno
+> existente"* en la **única línea de métricas que el tick emite** — y esta ADR ya decidió que no hay
+> healthcheck ni exportador de métricas en v1, así que esa línea es todo lo que hay. Es además la
+> métrica que S-027 va a mirar para verificar que el comentario empezó a funcionar de verdad.
 
 ## Consequences
 

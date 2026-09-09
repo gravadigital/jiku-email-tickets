@@ -6,6 +6,10 @@ import type { KV, KvWatchEntry, QueuedIterator } from '@gravadigital/jiku/nats';
 import type { Logger } from 'pino';
 
 import type { AppConfig } from '#config/index.js';
+// El parseo del entero vive COMPARTIDO desde S-026: el `requirementId` del Mapa de Hilos necesita
+// exactamente la misma regla (entero seguro, positivo, que se re-serialice identico). Duplicarla
+// produciria dos copias que divergen en el primer cambio.
+import { parsePositiveId } from '#infra/kv/parse.js';
 
 /**
  * El Mapa de Tickets seguido con `watch()` sobre una copia en memoria.
@@ -134,31 +138,6 @@ export interface TicketMapWatch {
 }
 
 /**
- * Parsea el `projectId` de una entrada del bucket.
- *
- * `Number.parseInt` y NO `Number()` a secas: `Number('4.5')` da `4.5` y `Number('')` da `0`, asi
- * que la validacion posterior tendria que atrapar los dos casos igual, pero `parseInt` deja el
- * intento explicito. La validacion es la que decide: entero seguro y estrictamente positivo.
- *
- * `Number.isSafeInteger` y no `Number.isInteger`: un id que no sobrevive el ida y vuelta a `double`
- * no es un id, es un valor corrupto.
- *
- * Devuelve `undefined` para todo lo que no sea un `projectId` valido: el `0`, los negativos, los no
- * enteros, y cualquier cosa que no sea numerica. El llamador loguea y saltea.
- */
-function parseProjectId(raw: string): number | undefined {
-  const parsed = Number.parseInt(raw.trim(), 10);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined;
-
-  // `parseInt('4.5')` devuelve `4`, que es un entero positivo valido y pasaria el chequeo de
-  // arriba. La comparacion contra el texto original es lo que rechaza `'4.5'`, `'42abc'` y `'0x2a'`:
-  // un valor que no se re-serializa identico no era un entero, era otra cosa que empezaba con uno.
-  if (String(parsed) !== raw.trim()) return undefined;
-
-  return parsed;
-}
-
-/**
  * Da de alta el `watch()` del bucket de slugs, mantiene la copia en memoria, ESPERA la carga
  * inicial antes de devolver, y REINTENTA en background si el watch se cae.
  *
@@ -209,7 +188,7 @@ export async function startTicketMapWatch({
       return;
     }
 
-    const projectId = parseProjectId(entry.string());
+    const projectId = parsePositiveId(entry.string());
 
     if (projectId === undefined) {
       // Contexto PLANO de un nivel (convencion `logging`): la redaccion de Pino no tiene comodin

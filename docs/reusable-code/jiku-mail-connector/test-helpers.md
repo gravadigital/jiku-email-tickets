@@ -360,3 +360,48 @@ const { logger, capture } = testLoggerWithCapture();
 await normalize(rawMail, logger);
 const warnLine = capture.lines().find((line) => line['level'] === 'warn');
 ```
+
+---
+
+## fakeThreadsKv
+
+**Location:** `test/ingesta/fake-threads-kv.ts`
+
+**Description:** An in-memory double of the threads KV bucket, for the tick suites that are **not**
+about the Thread Map.
+
+**Signature:**
+
+```ts
+interface FakeThreadsKv {
+  readonly kv: KV;
+  readonly puts: { key: string; value: string }[];  // keys written, in order
+  readonly gets: string[];                          // keys queried, in order
+  seed(key: string, value: string): void;
+}
+
+function fakeThreadsKv(): FakeThreadsKv
+```
+
+**Usage example:**
+
+```ts
+import { fakeThreadsKv } from './fake-threads-kv.js';
+
+const THREADS_KV = fakeThreadsKv().kv;
+
+await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+```
+
+**Notes:**
+
+- **It does not violate "the bus is never mocked".** The threads bucket is a dependency those suites
+  neither exercise nor assert on; all they need is that the write the tick performs after each create
+  does not fail, without forcing them to start a second container with JetStream.
+- **The suites that ARE about the Thread Map run against a real KV** — `test/infra/kv/threads.test.ts`
+  and `test/ingesta/tick-hilos.test.ts` both start their own `-js` container via
+  `startJetStreamNats()`. That is where the behaviour matters and where it is verified.
+- **It reproduces the one behaviour the code under test depends on:** `get()` returns `null` for a
+  missing key rather than throwing. Getting that wrong would make `lookupThread()` look broken.
+- **`puts` and `gets` make absence assertable** — e.g. "a mail with no `Message-Id` writes nothing"
+  is `expect(spy.puts).toEqual([])`, which a store-only double could not express.

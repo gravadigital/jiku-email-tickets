@@ -30,8 +30,19 @@ N/A (Backend service)
 
 ## Utils/Helpers
 
-**Total: 9**
+**Total: 11**
 
+- **sha256hex()** (`src/infra/kv/threads.ts`) - The sha256 of a string, hex-encoded (64 chars of
+  `[0-9a-f]`), over the value **exactly as given** — no `trim()`, no `toLowerCase()`, no
+  normalization of any kind. It is how the Thread Map's key is built from a raw `Message-Id`: the
+  library's `validKeyRe` (`/^[-/=.\w]+$/`) rejects `<`, `>` and `@`, all three present in a real
+  `Message-Id`. Normalizing instead of hashing would let two distinct `Message-Id`s collapse onto the
+  same key and route a comment to the wrong requirement.
+- **parsePositiveId()** (`src/infra/kv/parse.ts`) - Parses a **safe, strictly positive integer** from
+  the raw text of a KV entry, returning `undefined` for anything else. Rejects `'0'`, negatives,
+  `'4.5'`, `'42abc'` and `'0x2a'` — the last three because the parsed value must **re-serialize
+  identically**. Shared by both buckets (the Ticket Map's `projectId` and the Thread Map's
+  `requirementId`): two copies of the rule would diverge on the first change.
 - **cleanSubject()** (`src/domain/ingesta/subject.ts`) - Strips `Re:`/`Fwd:`/`RV:` prefixes
   iteratively and case-insensitively. An all-prefix subject is left as `''`, a valid state.
 - **mergeReferenceIds()** (`src/domain/ingesta/headers.ts`) - Deduplicated union of `In-Reply-To`
@@ -68,7 +79,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 29**
+**Total: 31**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -190,11 +201,31 @@ N/A (no HTTP surface - ADR-001)
   life of the process and never replaces it** — a defensive copy anywhere in the path would break
   liveness without failing to compile.
 
+- **recordThreadEntry()** (`src/infra/kv/threads.ts`) - Writes the Thread Map entry
+  `sha256(raw Message-Id) → requirementId` after a requirement is created, over the handle
+  `openKvStores()` already opened. **Never throws**: a rejected `put()` is absorbed with a single
+  `warn` carrying `{ messageId, messageIdHash, requirementId }` and the function resolves normally —
+  the requirement already exists in Jiku and there is no compensating command, so the write is a
+  **posterior** effect outside the create's critical path and `creados` is never reverted. The value
+  is the integer as **text** (`String(requirementId)`), not JSON: `entry.json<T>()` throws on an
+  unparseable payload. The `put()` takes **no options object** — the TTL belongs to the bucket and
+  the operator sets it.
+- **lookupThread()** (`src/infra/kv/threads.ts`) - Walks `referenceIds` **in the order received**,
+  sequentially, doing `get(sha256hex(refId))` on each, and **stops at the first valid hit**. Returns
+  a discriminated union with **three** states — found, not-found-but-queryable, and
+  **could-not-query** — because `number | undefined` would collapse "it isn't there" with "I
+  couldn't ask", which is the exact distinction that separates the `hilo_desconocido` discard from
+  the `es_respuesta` one. **Never throws.** A malformed value is not a hit: it is skipped with a
+  `warn` naming the `messageIdHash` and iteration **continues**; a rejected `get()`, by contrast,
+  **stops** — an unreachable bucket does not become reachable on the next reference. An empty
+  `referenceIds` costs **zero** round-trips. **Never `Promise.all`**: that would erase both the
+  first-hit cutoff and the ordering that makes the `In-Reply-To` reference win.
+
 See full details in [services.md](./services.md)
 
 ## Test Helpers
 
-**Total: 10**
+**Total: 11**
 
 - **setupTestBus** (`test/bus/helpers.ts`) - Opens a NATS connection against the suite's shared
   container and builds a bus `Client` with `Client.fromConnection()`, returning a context with
@@ -212,6 +243,12 @@ See full details in [services.md](./services.md)
   container runs **without** JetStream, so the KV happy path is inexpressible against it; `-js` is
   deliberately **not** added there, because buckets seeded by one file would be visible to the others.
   This helper is the only place in the repo that calls `kvm.create()` — production code never does.
+- **fakeThreadsKv** (`test/ingesta/fake-threads-kv.ts`) - An in-memory double of the threads bucket
+  for the tick suites that are **not** about the Thread Map. It reproduces the one behaviour those
+  suites depend on — `get()` returns `null` for a missing key rather than throwing — and records
+  `puts`/`gets` so a suite can assert the **absence** of a round-trip. The suites that *are* about
+  the Thread Map (`test/infra/kv/threads.test.ts`, `test/ingesta/tick-hilos.test.ts`) run against a
+  **real** KV with JetStream, which is where the property matters.
 - **fakeTokenSource / rotatingTokenSource / failingTokenSource** (`test/bus/auth-helpers.ts`) -
   `TokenSource` doubles at the edge for the connection tests, since the real `ServiceUser` would call
   Zitadel.
@@ -240,7 +277,7 @@ See full details in [test-helpers.md](./test-helpers.md)
 
 ## Types
 
-**Total: 39**
+**Total: 40**
 
 - **AppError** (`src/shared/errors/base.ts`) - Abstract base of the service's error hierarchy, with a
   public `code`, an `httpStatus` and optional non-sensitive `details`.
@@ -288,6 +325,13 @@ See full details in [test-helpers.md](./test-helpers.md)
   positive instead of depending on recognizing the library's plain `Error`.
 - **KvStores** (`src/infra/kv/stores.ts`) - The two open handles (`tickets`, `threads`) that S-025 and
   S-026 consume.
+- **ThreadLookupResult** (`src/infra/kv/threads.ts`) - The outcome of a Thread Map lookup, as a
+  discriminated union of **three** states: `{ found: true, requirementId }`,
+  `{ found: false, consultable: true }` (queried, no match) and
+  `{ found: false, consultable: false }` (could not query). All three are typed return values —
+  none is an exception. The third state is what lets the caller tell `hilo_desconocido` ("this reply
+  points at a thread I don't know") from `es_respuesta` ("I couldn't find out which thread it points
+  at").
 - **NewRequirementPayload** (`src/domain/publicacion/requirement.types.ts`) - The `requirements.new`
   payload, **inferred** from the schema with `z.infer`. The SDK exports no type for this command, so
   the schema is the only definition of the contract in the repo.
