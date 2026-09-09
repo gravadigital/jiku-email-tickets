@@ -1,6 +1,6 @@
 # ADR-003: Toda escritura por comandos del bus, con el byte fuera de banda
 
-**Status:** Accepted
+**Status:** Accepted (regla de los comandos permitidos reescrita el 2026-09-08 por REQ-005 / S-027)
 **Date:** 2026-08-26
 **Deciders:** Technical Leader
 **Tags:** integracion, escritura, bus, storage, adjuntos
@@ -63,8 +63,12 @@ con el barrido de abandonados fuera del alcance del producto entero.
 
 - Toda escritura de dominio MUST hacerse publicando un comando por el bus. MUST NOT haber ninguna
   escritura directa a PostgreSQL ni a storage con credenciales propias
-- Los únicos comandos permitidos son **`files.request-upload`** y **`requirements.new`**. MUST NOT
-  publicarse ningún otro
+- Los únicos comandos permitidos son **`files.request-upload`**, **`requirements.new`** y
+  **`requirements.{id}.comment`**. MUST NOT publicarse ningún otro
+  *(REESCRITA por REQ-005 / S-027: hasta entonces la enumeración era cerrada en los dos primeros. El
+  tercero es el que convierte la respuesta de un cliente en un Comentario del Requisito, y es el
+  único de los tres cuyo `method` lleva un id embebido — lo arma el publicador y el SDK deriva el
+  subject, sin concatenar subjects a mano.)*
 - El conector MUST NOT publicar en el plano de consultas (`jiku-queries.*`) ni suscribirse a subjects
   de otros servicios
 - El byte de un adjunto MUST viajar por `PUT` HTTPS a la `uploadUrl` devuelta por

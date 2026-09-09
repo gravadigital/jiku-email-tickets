@@ -11,6 +11,7 @@ import type { MailSource } from '#domain/ingesta/ports.js';
 import { componerDescripcion } from '#domain/publicacion/description.js';
 import { resolveCuerpoBase } from '#domain/publicacion/mail-payload.js';
 import { procesarAdjuntosDelMail } from '#domain/publicacion/procesar-adjuntos-mail.js';
+import { publishCommentFromMail } from '#domain/publicacion/publish-comment.js';
 import { PublishError } from '#domain/publicacion/publish-errors.js';
 import { publishRequirementFromMail } from '#domain/publicacion/publish-requirement.js';
 import { routeMail } from '#domain/ruteo/route-mail.js';
@@ -158,68 +159,7 @@ export async function runTick(
         // que el ruteo ya decidio.
         const route = routeMail(mail, config.ruteo);
 
-        if (!route.ok) {
-          // ==== EL LOOKUP AL MAPA DE HILOS (S-026) ====
-          //
-          // Va ACA, ANTES de emitir la linea del descarte, y SOLO cuando el motivo es
-          // `es_respuesta`: los otros dos motivos (`sin_slug`, `slug_no_mapeado`) no tienen
-          // referencias que consultar y no deben pagar el round-trip. Un mail NUEVO —el caso
-          // `route.ok === true`— tampoco lo paga: nunca entra en esta rama.
-          //
-          // El resultado solo cambia el MOTIVO del descarte; no cambia el contador, no cambia el
-          // literal del mensaje, y no agrega una segunda linea de log. CA-3 de S-014 exige UNA
-          // sola linea por descarte y hay tests que lo afirman, asi que el motivo se resuelve en
-          // una variable y sigue habiendo una sola llamada a `logger.warn` en esta rama.
-          let motivo: MotivoDescarte = route.motivo;
-
-          if (route.motivo === 'es_respuesta') {
-            const hilo = await lookupThread({
-              threads,
-              referenceIds: mail.referenceIds,
-              logger,
-            });
-
-            if (!hilo.found && hilo.consultable) {
-              // Se pudo preguntar y ninguna referencia matcheo: "esta respuesta apunta a un hilo
-              // que no conozco". Cubre los TRES casos indistinguibles a proposito — el reenvio de
-              // un hilo interno con slug mapeado, una entrada expirada por el TTL de 90 dias, y un
-              // hilo anterior al despliegue de esta funcionalidad. No se crea NADA en ninguno.
-              motivo = 'hilo_desconocido';
-            }
-
-            // Los otros dos resultados dejan el motivo en `es_respuesta`, y cada uno por su razon:
-            //
-            // - NO CONSULTABLE (bucket inaccesible): "no pude averiguar a que hilo apunta". La
-            //   distincion contra `hilo_desconocido` es deliberada y el log tiene que sostenerla:
-            //   uno se arregla cargando el hilo, el otro arreglando el bucket.
-            // - CON MATCH: el hilo SI se conoce, asi que `hilo_desconocido` seria falso y ademas
-            //   ensuciaria la metrica que S-027 va a mirar para verificar que empezo a comentar.
-            //   En S-026 el mail se descarta igual porque TODAVIA NO HAY SALIDA POR COMENTARIO —
-            //   estado intermedio desplegable y deliberado.
-            //
-            // >>> ESTE ES EL PUNTO EXACTO donde S-027 reemplaza el descarte por la publicacion del
-            // >>> comentario sobre `hilo.requirementId`, e incrementa `counters.comentados`.
-          }
-
-          // Una sola linea `warn` agrupable por los seis motivos (CA-3): mismo literal
-          // `'mail descartado'` que ya emite `normalize()` para `sin_message_id`. El `slug` viaja
-          // SOLO cuando esta presente en el resultado (unicamente `slug_no_mapeado` lo lleva,
-          // Integration Points) — nunca `slug: undefined` a mano (CA-4). NO se emite tambien la
-          // linea `'mail procesado'` para este mail: CA-3 exige UNA sola linea por descarte, y
-          // "normalizado" seria enganoso para un mail que en definitiva se descarta.
-          logger.warn(
-            {
-              messageId: mail.messageId,
-              motivo,
-              ...(route.slug !== undefined ? { slug: route.slug } : {}),
-            },
-            'mail descartado',
-          );
-          counters.descartados += 1;
-          // El mail (y el `RouteResult`) se descartan aca: no se acumulan en ningun array del tick
-          // (CA-11, CA-16). No publica, no responde, no mueve de carpeta, no persiste (CA-6) — el
-          // alcance de esta story termina en el reporte del descarte.
-        } else {
+        if (route.ok) {
           // El procesamiento COMPLETO de adjuntos (S-021) corre ACA, dentro de la MISMA iteracion
           // del mail, ANTES del armado del payload (CA-1). `procesarAdjuntosDelMail()` NUNCA lanza
           // para un resultado de negocio (rechazo, fallo de archivo) -- siempre devuelve, asi que
@@ -297,6 +237,126 @@ export async function runTick(
             if (!(cause instanceof PublishError)) throw cause;
             counters.fallidos += 1;
           }
+        } else if ('intencion' in route) {
+          // ==== LA RAMA DE LA RESPUESTA (S-027) ====
+          //
+          // `routeMail()` no decide si esta respuesta se comenta: devuelve la INTENCION y el lookup
+          // decide. El estrechamiento discrimina por `'intencion' in route` y no por `route.motivo`
+          // porque esta variante NO TIENE `motivo` — no es un descarte.
+          //
+          // Solo esta rama paga el round-trip del lookup. Los otros motivos (`sin_slug`,
+          // `slug_no_mapeado`) no tienen referencias que consultar, y un mail NUEVO nunca entra
+          // aca.
+          const hilo = await lookupThread({
+            threads,
+            referenceIds: mail.referenceIds,
+            logger,
+          });
+
+          if (hilo.found) {
+            // ---- CON MATCH: el hilo se conoce y la respuesta se publica como Comentario ----
+            //
+            // El procesamiento de adjuntos es EL MISMO que el del alta y con la MISMA politica
+            // (doble lista blanca, tope de tamaño, tope de 10, dedup INTRA-MAIL, placeholders al
+            // final, continue-on-failure). No hay dedup contra el hilo, y es deliberado: serian N+1
+            // consultas por respuesta y obligaria a tocar el plano de consultas, que ADR-003
+            // prohibe. El costo aceptado es que Gmail, que arrastra los adjuntos del original en la
+            // respuesta, los suba de nuevo.
+            //
+            // SIN try/catch propio: `procesarAdjuntosDelMail()` nunca lanza para un resultado de
+            // negocio, igual que en la rama del alta.
+            const adjuntos = await procesarAdjuntosDelMail(mail.attachments, config.adjuntos, {
+              client,
+              logger,
+            });
+
+            // La composicion es la MISMA que la del alta, con las mismas funciones compartidas: el
+            // cuerpo del comentario se arma igual que la description de un requisito, con sus
+            // avisos y placeholders en el mismo orden.
+            const cuerpoBase = resolveCuerpoBase(mail.body, config.ruteo);
+            const comment = componerDescripcion({
+              cuerpoBase,
+              avisosDeRechazo: adjuntos.avisosDeRechazo,
+              avisosDeFallo: adjuntos.avisosDeFallo,
+              placeholders: adjuntos.placeholders,
+            });
+
+            try {
+              await publishCommentFromMail(
+                mail,
+                hilo.requirementId,
+                comment,
+                { client, logger },
+                adjuntos.fileIds,
+                adjuntos.avisosDeRechazo.length + adjuntos.avisosDeFallo.length,
+              );
+              // `comentados` y NO `creados`: son dos efectos distintos, y sumarlos borraria la
+              // distincion en la unica linea de metricas que el tick emite (ADR-006). En esta rama
+              // NO se publica `requirements.new` — el Requisito ya existe.
+              counters.comentados += 1;
+
+              // ==== EL WRITE QUE CIERRA EL CICLO DEL HILO ====
+              //
+              // Va ACA: dentro del `try`, DESPUES de `comentados += 1`, y solo tras el `success`.
+              // Es la misma posicion que el write del alta ocupa respecto de `creados += 1`, y por
+              // la misma razon — pero aca la consecuencia de equivocarse es peor: un write
+              // anticipado dejaria el bucket apuntando a un comentario QUE NO EXISTE, y la proxima
+              // respuesta rutearia a un hilo cuyo ultimo eslabon se perdio. Si el comentario lanza,
+              // el `catch` cuenta `fallidos` y esta linea NUNCA se alcanza.
+              //
+              // El `messageId` es el de LA RESPUESTA, no el de la referencia que matcheo. Eso es lo
+              // que hace que una respuesta a la respuesta rutee aunque el cliente recorte
+              // `References`. Escribir el de la referencia reescribiria una entrada que ya existe:
+              // inutil y silencioso.
+              //
+              // SIN try/catch propio, por lo mismo que en la rama del alta: `recordThreadEntry()`
+              // no lanza, y envolverla sugeriria lo contrario de su contrato.
+              await recordThreadEntry({
+                threads,
+                messageId: mail.messageId,
+                requirementId: hilo.requirementId,
+                logger,
+              });
+            } catch (cause) {
+              // `publishCommentFromMail()` ya logueo el fallo con su propio `catch` interno — este
+              // NO vuelve a loguear: seria la linea de resultado duplicada que ADR-006 evita. Solo
+              // cuenta y continua con el siguiente UID, sin reintento.
+              if (!(cause instanceof PublishError)) throw cause;
+              counters.fallidos += 1;
+            }
+          } else {
+            // ---- SIN MATCH: se descarta, y el motivo distingue los dos casos ----
+            //
+            // - CONSULTABLE: se pudo preguntar y ninguna referencia matcheo. "Esta respuesta apunta
+            //   a un hilo que no conozco" — un reenvio de hilo interno, una entrada expirada por el
+            //   TTL, o un hilo anterior al despliegue. Los tres son indistinguibles a proposito.
+            // - NO CONSULTABLE: el bucket no se pudo leer. "No pude averiguar a que hilo apunta".
+            //   La distincion importa porque uno se arregla cargando el hilo y el otro arreglando
+            //   el bucket.
+            const motivo: MotivoDescarte = hilo.consultable ? 'hilo_desconocido' : 'es_respuesta';
+
+            logger.warn({ messageId: mail.messageId, motivo }, 'mail descartado');
+            counters.descartados += 1;
+          }
+        } else {
+          // ==== EL DESCARTE POR RUTEO (`sin_slug`, `slug_no_mapeado`) ====
+          //
+          // Una sola linea `warn` agrupable por motivo (CA-3): mismo literal `'mail descartado'`
+          // que ya emite `normalize()` para `sin_message_id`. El `slug` viaja SOLO cuando esta
+          // presente en el resultado (unicamente `slug_no_mapeado` lo lleva) — nunca
+          // `slug: undefined` a mano (CA-4). NO se emite tambien la linea `'mail procesado'`:
+          // CA-3 exige UNA sola linea por descarte.
+          logger.warn(
+            {
+              messageId: mail.messageId,
+              motivo: route.motivo,
+              ...(route.slug !== undefined ? { slug: route.slug } : {}),
+            },
+            'mail descartado',
+          );
+          counters.descartados += 1;
+          // El mail (y el `RouteResult`) se descartan aca: no se acumulan en ningun array del tick
+          // (CA-11, CA-16). No publica, no responde, no mueve de carpeta, no persiste (CA-6).
         }
       } catch (cause) {
         // Distincion por CLASE, nunca por texto del mensaje (ADR-002, CA-9): `MissingMessageIdError`

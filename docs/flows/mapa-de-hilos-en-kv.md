@@ -4,8 +4,8 @@ title: El Mapa de Hilos en el KV — la clave hasheada, el write y el lookup
 type: event
 status: Active
 created: 2026-09-08
-last_updated: 2026-09-08
-stories: [S-026]
+last_updated: 2026-09-09
+stories: [S-026, S-027]
 ---
 
 # El Mapa de Hilos en el KV
@@ -31,7 +31,7 @@ entidades eran efímeras o de configuración administrada por un humano.
 | Trigger | Story | Estado |
 |---|---|---|
 | El alta de un Requisito desde un mail nuevo | S-026 | **Implementado** |
-| El comentario exitoso desde una respuesta con match | S-027 | **Pendiente** — no se describe acá como si funcionara |
+| El comentario exitoso desde una respuesta con match | S-027 | **Implementado.** El write del segundo trigger ocurre tras el `success` del comentario — ver [publicacion-requirements-comment](publicacion-requirements-comment.md) |
 
 En S-026 el lookup **funciona y está afirmado por tests**, pero su resultado todavía no tiene
 consumidor: una respuesta con match **se descarta igual**, porque no hay salida por comentario. El
@@ -159,7 +159,7 @@ segura.
 **Destino:** Bucket `MAIL_THREADS`
 **Tipo:** Evento (lectura puntual del KV)
 
-En la rama `route.ok === false`, **sólo** cuando `route.motivo === 'es_respuesta'` y **antes** de
+En la rama de la intención de comentario (S-027; hasta S-026, `route.motivo === 'es_respuesta'`), **antes** de
 emitir la línea del descarte. Los otros dos motivos (`sin_slug`, `slug_no_mapeado`) no tienen
 referencias que consultar y **no pagan el round-trip**; un mail nuevo tampoco: nunca entra en esta
 rama.

@@ -31,8 +31,10 @@
  * - `hilo_desconocido`: *"esta respuesta apunta a un hilo que no conozco"* — el lookup al Mapa de
  *   Hilos SI se pudo hacer y ninguna referencia matcheo.
  * - `es_respuesta`: *"no pude averiguar a que hilo apunta"* — el bucket estaba inaccesible y el
- *   lookup no se pudo hacer. Y, mientras S-027 no exista, tambien el descarte de una respuesta CON
- *   match, porque todavia no hay salida por comentario.
+ *   lookup no se pudo hacer. DESDE S-027 ese es su UNICO significado: una respuesta CON match ya
+ *   no se descarta, se comenta (la clausula "y, mientras S-027 no exista, tambien el descarte de
+ *   una respuesta CON match" dejo de valer). El motivo NO se depreca: el bucket inaccesible sigue
+ *   ocurriendo y sigue necesitando su propio literal.
  *
  * Colapsarlos en uno solo borraria la unica senal que distingue un hilo desconocido de una consulta
  * imposible, que es la diferencia entre "cargar el hilo" y "arreglar el bucket".
@@ -46,7 +48,24 @@ export type MotivoDescarte =
   | 'hilo_desconocido';
 
 /**
- * El resultado de `routeMail()`: o el proyecto resuelto, o el motivo del descarte.
+ * El resultado de `routeMail()`: el proyecto resuelto, la intencion de comentar, o el motivo del
+ * descarte. TRES formas desde S-027 — hasta S-026 eran dos.
+ *
+ * LA TERCERA FORMA (`intencion: 'comentario'`, S-027) es una UNION DISCRIMINADA y no un
+ * `MotivoDescarte` nuevo, y las tres condiciones que cumple son deliberadas:
+ *
+ * 1. Es discriminable por el typechecker sin castear (`'intencion' in route`), mismo patron que
+ *    `ThreadLookupResult` en `infra/kv/threads.ts` y `UploadResultado` en `files.types.ts`.
+ * 2. NO lleva `motivo`, porque NO ES UN DESCARTE. Meterla en el catalogo de motivos la haria
+ *    loguearse como uno, que es exactamente lo que esta story deja de hacer.
+ * 3. No rompe el `if (route.ok)` del tick, pero SI obliga a discriminar antes de llegar a
+ *    `route.motivo` — con `ok: false` en dos variantes, `route.motivo` no compila hasta que se
+ *    decida que hacer con la respuesta. Es el typechecker forzando a escribir la rama nueva, no un
+ *    inconveniente a silenciar con un cast.
+ *
+ * `routeMail()` sigue siendo PURA Y SINCRONICA: la intencion es lo unico que la funcion puede
+ * decidir con lo que sabe. El lookup asincrono al Mapa de Hilos vive en el tick, que ya es el
+ * unico que compone modulos — `ruteo` no importa de `#infra/` ni de `#domain/publicacion/`.
  *
  * `slug?` (opcional) y no `slug: string | undefined` en la rama de descarte (CA-13): la diferencia
  * importa porque `slug?` permite omitir la clave por completo (`'slug' in result === false`),
@@ -58,4 +77,5 @@ export type MotivoDescarte =
  */
 export type RouteResult =
   | { readonly ok: true; readonly projectId: number; readonly slug: string }
+  | { readonly ok: false; readonly intencion: 'comentario' }
   | { readonly ok: false; readonly motivo: MotivoDescarte; readonly slug?: string };

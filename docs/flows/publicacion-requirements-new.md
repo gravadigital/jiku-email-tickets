@@ -21,6 +21,11 @@ no cambia)
 
 ## Descripción
 
+> **Hermano (S-027):** el conector publica un tercer comando,
+> [`requirements.{id}.comment`](publicacion-requirements-comment.md), cuando un cliente responde por
+> mail al hilo de su ticket. Este flujo **no cambia**: el alta de un Requisito sigue siendo
+> exactamente lo que era.
+
 Flujo de publicación del comando `requirements.new` al bus de Jiku y traducción de su respuesta.
 **Dos disparadores, desde S-015:** el **modo de verificación** —un script explícito del repositorio,
 separado del arranque normal— con un payload **fijo**; y el **tick** (FG-3), con un payload

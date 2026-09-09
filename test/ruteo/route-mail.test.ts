@@ -56,53 +56,116 @@ describe('camino feliz', () => {
   });
 });
 
-describe('es_respuesta', () => {
-  it('descarta por In-Reply-To poblado, sobre slug valido y mapeado', () => {
-    // TS-8
+/**
+ * S-027 — la SEGUNDA SALIDA del ruteo (TS-1 a TS-6, CA-2, CA-3).
+ *
+ * Hasta S-026 la rama 1 devolvia `{ ok: false, motivo: 'es_respuesta' }` y toda respuesta se
+ * descartaba. Desde esta story devuelve una INTENCION de comentario: no es un descarte, no lleva
+ * `motivo`, y es el tick —el unico que compone modulos— quien hace el lookup asincrono al KV.
+ *
+ * `es_respuesta` NO desaparece del catalogo: sigue siendo el motivo del bucket inaccesible, que el
+ * tick resuelve despues del lookup. Lo que desaparece es que `routeMail()` lo produzca.
+ */
+describe('intencion de comentario (S-027)', () => {
+  it('TS-1: una respuesta devuelve la intencion de comentario, no un descarte', () => {
     const result = routeMail(
-      { referenceIds: ['<abc@grava.io>'], recipient: 'tickets+alfa@grava.io' },
+      { referenceIds: ['<abc@cliente.com>'], recipient: 'tickets+alfa@grava.io' },
       { ticketMap, subaddressPrefix },
     );
-    expect(result).toEqual({ ok: false, motivo: 'es_respuesta' });
+    expect(result).toEqual({ ok: false, intencion: 'comentario' });
+    // Ni `motivo` ni `slug`: no es un descarte y no hay slug evaluado.
+    expect('motivo' in result).toBe(false);
     expect('slug' in result).toBe(false);
   });
 
-  it('descarta antes de tocar el slug: mismo caso que TS-8 pero con recipient que tambien seria sin_slug', () => {
-    // TS-9
+  it('TS-2: la rama 1 se sigue evaluando primero — el slug NO se evalua', () => {
+    // `recipient` sin subaddress y `ticketMap` vacio: si el orden del arbol se alterara, esto seria
+    // `sin_slug`. La consecuencia observable de CA-3 se afirma aca, en la funcion pura.
     const result = routeMail(
-      { referenceIds: ['<abc@grava.io>'], recipient: 'soporte@grava.io' },
+      { referenceIds: ['<abc@cliente.com>'], recipient: 'no-hay-slug@grava.io' },
+      { ticketMap: new Map(), subaddressPrefix },
+    );
+    expect(result).toEqual({ ok: false, intencion: 'comentario' });
+  });
+
+  it('TS-3: con referenceIds vacio el arbol no cambia en nada', () => {
+    const result = routeMail(
+      { referenceIds: [], recipient: 'tickets+alfa@grava.io' },
       { ticketMap, subaddressPrefix },
     );
-    expect(result).toEqual({ ok: false, motivo: 'es_respuesta' });
+    expect(result).toEqual({ ok: true, projectId: 42, slug: 'alfa' });
+  });
+
+  it('TS-4: routeMail() sigue siendo SINCRONICA: el retorno no es una Promise', () => {
+    const result: unknown = routeMail(
+      { referenceIds: ['<abc@cliente.com>'], recipient: 'tickets+alfa@grava.io' },
+      { ticketMap, subaddressPrefix },
+    );
+    expect(result).not.toBeInstanceOf(Promise);
+    expect(typeof (result as { then?: unknown }).then).toBe('undefined');
+  });
+
+  it('TS-5: routeMail() sigue sin loguear y sin importar infra ni publicacion', () => {
+    // El escaneo va sobre el CODIGO sin comentarios: la cabecera del archivo explica en prosa por
+    // que NO hace el lookup, y sin stripear esa explicacion haria fallar su propio test.
+    const source = readFileSync(
+      fileURLToPath(new URL('../../src/domain/ruteo/route-mail.ts', import.meta.url)),
+      'utf8',
+    );
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+    for (const forbidden of ['logger.', 'console.', 'await ', 'lookupThread', '#infra/']) {
+      expect(code, `route-mail.ts must not contain ${forbidden}`).not.toContain(forbidden);
+    }
+    expect(code).not.toMatch(/\basync\b/);
+  });
+
+  it('TS-6: los otros tres resultados del arbol no cambian', () => {
+    expect(
+      routeMail({ referenceIds: [], recipient: 'soporte@grava.io' }, { ticketMap, subaddressPrefix }),
+    ).toEqual({ ok: false, motivo: 'sin_slug' });
+
+    expect(
+      routeMail(
+        { referenceIds: [], recipient: 'tickets+beta@grava.io' },
+        { ticketMap, subaddressPrefix },
+      ),
+    ).toEqual({ ok: false, motivo: 'slug_no_mapeado', slug: 'beta' });
+
+    expect(
+      routeMail({ referenceIds: [], recipient: 'tickets+alfa@grava.io' }, { ticketMap, subaddressPrefix }),
+    ).toEqual({ ok: true, projectId: 42, slug: 'alfa' });
   });
 
   it('referenceIds no vacio basta, sin importar a que apunten las referencias', () => {
-    // TS-10
+    // Antes TS-10: el comportamiento del ARBOL no cambia (la rama 1 no mira las referencias), solo
+    // cambia lo que devuelve. Quien decide si el hilo se conoce es el lookup del tick.
     const result = routeMail(
       { referenceIds: ['<random-thread-id@otrodominio.com>'], recipient: 'tickets+alfa@grava.io' },
       { ticketMap, subaddressPrefix },
     );
-    expect(result).toEqual({ ok: false, motivo: 'es_respuesta' });
+    expect(result).toEqual({ ok: false, intencion: 'comentario' });
   });
 
-  it('falso positivo de reenvio aceptado: References poblado con un pedido nuevo legitimo', () => {
-    // TS-11: decision 9 del PRD, G-04 manda degradar hacia el descarte. Comportamiento identico a
-    // TS-8/TS-10, documentado como aceptado en route-mail.ts.
+  it('un reenvio con References poblado sigue entrando por la misma rama', () => {
+    // Antes TS-11. El falso positivo del reenvio SIGUE existiendo, pero ya no termina en un
+    // descarte automatico: termina en un lookup que no matchea y el tick lo descarta como
+    // `hilo_desconocido` (S-026). La decision 9 del PRD quedo derogada por REQ-005.
     const result = routeMail(
       { referenceIds: ['<hilo-interno@grava.io>'], recipient: 'tickets+alfa@grava.io' },
       { ticketMap, subaddressPrefix },
     );
-    expect(result).toEqual({ ok: false, motivo: 'es_respuesta' });
+    expect(result).toEqual({ ok: false, intencion: 'comentario' });
   });
 
-  it('una respuesta a un slug no mapeado reporta es_respuesta, sin slug (no se filtra por slug_no_mapeado)', () => {
-    // TS-18
+  it('una respuesta a un slug no mapeado tampoco se filtra por slug_no_mapeado', () => {
+    // Antes TS-18. El slug no se evalua: la respuesta sale por la intencion, no por el catalogo de
+    // descartes.
     const result = routeMail(
       { referenceIds: ['<a@x>'], recipient: 'tickets+beta@grava.io' },
       { ticketMap: new Map([['alfa', 42]]), subaddressPrefix },
     );
-    expect(result).toEqual({ ok: false, motivo: 'es_respuesta' });
-    expect('slug' in result).toBe(false);
+    expect(result).toEqual({ ok: false, intencion: 'comentario' });
   });
 });
 
@@ -151,13 +214,15 @@ describe('pureza y estructura', () => {
     expect('slug' in result).toBe(false);
   });
 
-  it('el slug solo aparece en el resultado cuando el motivo es slug_no_mapeado (verificacion sobre es_respuesta)', () => {
-    // TS-17
+  it('el slug tampoco aparece en la intencion de comentario (S-027)', () => {
+    // Antes TS-17 sobre `es_respuesta`. La variante de la intencion no lleva `slug` NI `motivo`:
+    // es una tercera forma, no un descarte con otro nombre.
     const result = routeMail(
       { referenceIds: ['<a@x>'], recipient: 'tickets+alfa@grava.io' },
       { ticketMap, subaddressPrefix },
     );
     expect('slug' in result).toBe(false);
+    expect('motivo' in result).toBe(false);
   });
 
   it('MotivoDescarte tiene un unico lugar de definicion con los literales exactos', () => {

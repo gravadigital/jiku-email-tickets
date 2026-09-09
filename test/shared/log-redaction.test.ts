@@ -34,6 +34,14 @@ describe('REDACT_PATHS', () => {
     }
   });
 
+  // TS-60 (S-027). El texto del comentario es contenido del CLIENTE, misma clase que `body`.
+  it('covers the comment text in both root and one-level-nested form', () => {
+    // LAS DOS FORMAS: pino no tiene comodin profundo, asi que una sola dejaria el otro nivel en
+    // claro sin fallar y sin avisar.
+    expect(paths, "missing root path 'comment'").toContain('comment');
+    expect(paths, "missing wildcard path '*.comment'").toContain('*.comment');
+  });
+
   it('covers every token spelling in both root and one-level-nested form', () => {
     for (const field of ['accessToken', 'token', 'access_token']) {
       expect(paths, `missing root path ${field}`).toContain(field);
@@ -148,6 +156,24 @@ describe('REDACT_PATHS depth boundary', () => {
   it('censors a password nested one level, which is where imap.password sits', () => {
     const capture = createLogCapture();
     createLogger(CFG, capture.stream).info({ imap: { password: SECRET } }, 'x');
+
+    expect(capture.raw().join('\n')).not.toContain(SECRET);
+    expect(capture.raw().join('\n')).toContain(REDACT_CENSOR);
+  });
+
+  // TS-61 (S-027): el texto del comentario se censura en la raiz.
+  it('censors the comment text at the root', () => {
+    const capture = createLogCapture();
+    createLogger(CFG, capture.stream).info({ comment: SECRET }, 'x');
+
+    expect(capture.raw().join('\n')).not.toContain(SECRET);
+    expect(capture.raw().join('\n')).toContain(REDACT_CENSOR);
+  });
+
+  // TS-62 (S-027): y tambien un nivel abajo, que es donde caeria si alguien logueara el payload.
+  it('censors the comment text nested one level, where a payload would put it', () => {
+    const capture = createLogCapture();
+    createLogger(CFG, capture.stream).info({ payload: { comment: SECRET } }, 'x');
 
     expect(capture.raw().join('\n')).not.toContain(SECRET);
     expect(capture.raw().join('\n')).toContain(REDACT_CENSOR);

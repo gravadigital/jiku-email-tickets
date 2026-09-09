@@ -50,14 +50,15 @@ worker en node
   las dos operaciones lanza, y **el bucket NO participa de la idempotencia** —el `\Seen` sigue siendo
   la unica marca—, las tres cosas afirmadas por tests que escanean `src/`. El parseo del entero leido
   del KV vive **compartido** en `parse.ts` (`parsePositiveId()`), consumido por los dos buckets.
-  **Pendiente:** la publicacion del comentario desde una respuesta con match, que es la que le va a
-  dar consumidor al lookup y va a empezar a incrementar `comentados` (S-027). Documentado
-  en el Paso 5.5 de [arranque-y-conexion-al-bus](../../flows/arranque-y-conexion-al-bus.md), que
+  **S-027 le dio consumidor al lookup**: la respuesta con match se publica como Comentario y
+  `comentados` empieza a incrementarse. **El modulo esta completo** — REQ-005 no deja nada pendiente
+  en `infra/kv`. Documentado en el Paso 5.5 de [arranque-y-conexion-al-bus](../../flows/arranque-y-conexion-al-bus.md), que
   registra los cuatro hallazgos verificados del KV (entre ellos que `open()` **no** verifica
   existencia, y que el TTL viene en milisegundos), y de punta a punta en
   [mapa-de-hilos-en-kv](../../flows/mapa-de-hilos-en-kv.md).
-- **publicacion** — Los dos comandos de escritura al bus via el SDK: `files.request-upload` y
-  `requirements.new`. El `PUT` del byte del adjunto a la URL prefirmada que devuelve `core`.
+- **publicacion** — Los TRES comandos de escritura al bus via el SDK: `files.request-upload`,
+  `requirements.new` y —desde S-027— `requirements.{id}.comment`. El `PUT` del byte del adjunto a la
+  URL prefirmada que devuelve `core`.
   **Estado (S-005 a S-022):** `requirements.new` esta **implementado** de punta a punta —schema Zod
   del contrato, publicacion con `client.command()` y la traduccion de las 9 ramas de diagnostico del
   SDK al sistema que rechazo (S-005)— con **dos disparadores** desde S-015: el modo de verificacion
@@ -72,7 +73,12 @@ worker en node
   invariante, el tope no recalculado tras un fallo de `PUT`, el pico de memoria de un mail a la vez, y
   que ningun log filtra el contenido de un adjunto ni la `uploadUrl`— quedan afirmadas por tests sobre
   `runTick()`, no solo sobre los modulos puros (S-022), que tambien verifica de punta a punta el
-  camino completo con un adjunto sin instancia real de Jiku.
+  camino completo con un adjunto sin instancia real de Jiku. **S-027 agrega el TERCER comando**
+  (`requirements.{id}.comment`): la respuesta de un cliente al hilo de su ticket se publica como
+  Comentario **publico** —`visibilityLevel` explicito, porque el default del contrato es `internal` y
+  un comentario interno no lo veria el cliente— con sus adjuntos por la misma politica, y REUSANDO
+  la traduccion de errores sin agregarle ramas. Documentado en
+  [publicacion-requirements-comment](../../flows/publicacion-requirements-comment.md).
 
 ## Notas adicionales
 

@@ -89,11 +89,29 @@ export const REDACT_PATHS = [
   '*.content',
   'attachments[*].content',
   '*.attachments[*].content',
+
+  // --- Texto del comentario publicado desde una respuesta (S-027, REQ-005 RF-24) ---
+  //
+  // Misma clase de dato que `body`: CONTENIDO DEL CLIENTE. La regla de ADR-006 nombraba el cuerpo
+  // del mail y el contenido de un adjunto; el texto del comentario se agrega EXPLICITAMENTE porque
+  // es exactamente lo mismo y el nombre del campo es otro.
+  //
+  // Es una defensa de SEGUNDA linea, no la primera. La primera es estructural: ningun punto de log
+  // del publicador incluye el texto, y hay un test de propiedad que lo afirma escaneando `src/`.
+  // Esta entrada existe para cubrir el log que agregue codigo FUTURO sin acordarse de la regla —
+  // exactamente el mismo motivo por el que `body` y `content` se declararon antes de que existieran
+  // los datos que nombran.
+  //
+  // LAS DOS FORMAS, y no es redundancia: pino NO tiene comodin profundo, asi que `'comment'` sola
+  // dejaria `{ payload: { comment } }` en claro, y `'*.comment'` sola dejaria `{ comment }` en
+  // claro. Cualquiera de las dos por separado falla EN SILENCIO, sin error y sin aviso.
+  'comment',
+  '*.comment',
 ] as const satisfies readonly string[];
 
-// NO se agrega a la lista: `messageId`, `projectId`, `slug`, `instance`, `id`. ADR-006 exige
-// explicitamente que esos campos SI se logueen — son el rastro que hace reconstruible un ticket
-// perdido. Redactarlos convierte el log en inutil, que es el fallo opuesto y no menos grave.
+// NO se agrega a la lista: `messageId`, `projectId`, `requirementId`, `slug`, `instance`, `id`.
+// ADR-006 exige explicitamente que esos campos SI se logueen — son el rastro que hace reconstruible
+// un ticket perdido. Redactarlos convierte el log en inutil, que es el fallo opuesto y no menos grave.
 //
 // NO se copian del catalogo: `req.headers.authorization`, `req.headers.cookie`. El servicio no
 // expone HTTP (ADR-001), asi que esas rutas no pueden ocurrir jamas y solo agregan ruido a una

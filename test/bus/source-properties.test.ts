@@ -154,14 +154,20 @@ describe('src/ bus source properties', () => {
     //
     // ACTUALIZADO EN S-018: se agrega un SEGUNDO publicador autorizado —`files.request-upload`, en
     // `domain/publicacion/upload-file.ts`— asi que la lista de publicadores deja de ser un unico
-    // archivo y pasa a ser la lista CERRADA de los dos que ADR-003 permite. La propiedad que sigue
+    // archivo y pasa a ser la lista CERRADA de los que ADR-003 permite. La propiedad que sigue
     // valiendo es la misma de siempre, mas precisa: el conector no publica NINGUN comando
     // relacionado con `users`, y publica solo desde los archivos autorizados. La cota de cuantos y
     // cuales comandos existen la afirma `test/publicacion/source-properties.test.ts`; lo que se
     // defiende aca es la fila en `users`.
+    //
+    // ACTUALIZADO EN S-027: un TERCER publicador autorizado —`requirements.{id}.comment`, en
+    // `domain/publicacion/publish-comment.ts`—, que es el tercer comando que ADR-003 permite desde
+    // REQ-005. La lista se AMPLIA una entrada por comando permitido; lo que nunca se hace es
+    // relajarla a un patron, que dejaria entrar cualquier publicador nuevo en silencio.
     const PUBLISHERS = [
       `domain${sep}publicacion${sep}publish-requirement.ts`,
       `domain${sep}publicacion${sep}upload-file.ts`,
+      `domain${sep}publicacion${sep}publish-comment.ts`,
     ];
 
     for (const file of FILES) {
