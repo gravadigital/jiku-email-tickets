@@ -434,11 +434,19 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
     expect(responder?.count()).toBe(0);
   });
 
-  // TS-27
-  it('TS-27: una respuesta CON match se sigue descartando en esta story, y el lookup SI corrio', async () => {
+  // TS-27, INVERTIDO EN S-027 — y esta inversion es el valor entero de REQ-005.
+  //
+  // Hasta S-026 este caso afirmaba que una respuesta CON match se descartaba igual como
+  // `es_respuesta`, porque todavia no habia salida por comentario. El comentario de aquel test
+  // decia literalmente "TODAVIA NO HAY SALIDA POR COMENTARIO — estado intermedio desplegable y
+  // deliberado". S-027 construye esa salida: ahora se comenta.
+  it('TS-27: una respuesta CON match se publica como Comentario, no se descarta', async () => {
     const threads = await freshThreads();
     const { logger, capture } = testLoggerWithCapture();
-    await coreRespondeExito([999]);
+    const comentarios = await respondTo(bus.connection, 'requirements.*.comment', {
+      status: 'success' as const,
+      data: { id: 4242 },
+    });
     await threads.put(sha256hex('<r1@x>'), '77');
     const spy = spyOn(threads);
 
@@ -452,18 +460,20 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
 
     const lines = capture.lines();
     const tick = lines.find((l) => l['msg'] === 'tick completado');
-    expect(tick).toMatchObject({ descartados: 1, creados: 0, comentados: 0 });
+    // `comentados` en 1, y NADA en `descartados`: la respuesta se proceso, no se tiro.
+    expect(tick).toMatchObject({ comentados: 1, descartados: 0, creados: 0, fallidos: 0 });
 
-    // Con match el motivo NO es `hilo_desconocido` — seria falso, el hilo SI se conoce — y tampoco
-    // hay salida por comentario todavia: el mail se descarta como `es_respuesta`.
-    expect(lines.find((l) => l['msg'] === 'mail descartado')).toMatchObject({
-      motivo: 'es_respuesta',
-    });
+    // Ninguna linea de descarte para este mail.
+    expect(lines.find((l) => l['msg'] === 'mail descartado')).toBeUndefined();
 
-    // El lookup SI se ejecuto y resolvio: sin esta asercion, un lookup que nunca corre pasaria el
-    // test de "no publica nada" por la razon equivocada.
+    // El lookup corrio y resolvio.
     expect(spy.gets).toEqual([sha256hex('<r1@x>')]);
-    expect(responder?.count()).toBe(0);
+
+    // Y el comentario viajo al subject del REQUISITO que el lookup resolvio (77), no a otro.
+    expect(comentarios.count()).toBe(1);
+    expect(comentarios.subjects()[0]).toContain('requirements.77.comment');
+
+    await comentarios.stop();
   });
 
   // TS-28
@@ -572,13 +582,21 @@ describe('runTick — los seis contadores de la linea del tick (TS-29, TS-30, TS
     expect(tick).toMatchObject({ ingestados: 3, parseados: 3, creados: 3, comentados: 0 });
   });
 
-  // TS-31 (y TS-30 sobre el mismo tick, que incluye una respuesta CON match)
-  it('TS-31: 2 mails nuevos + 1 respuesta con match dan creados:2, comentados:0, descartados:1', async () => {
+  // TS-31, INVERTIDO EN S-027: la respuesta con match ya no engrosa `descartados` sino `comentados`.
+  //
+  // Lo que este caso protege de verdad —y no cambio— es que los DOS contadores no se contaminan
+  // entre si: un comentario NO es un alta, y sumarlos borraria la distincion en la unica linea de
+  // metricas que el tick emite (ADR-006, no hay healthcheck ni exportador).
+  it('TS-31: 2 mails nuevos + 1 respuesta con match dan creados:2, comentados:1, descartados:0', async () => {
     const threads = await freshThreads();
     const { logger, capture } = testLoggerWithCapture();
-    // Solo DOS ids: si el tick publicara un comando por la respuesta, el responder se quedaria sin
-    // respuestas y el fallo se veria en los contadores.
+    // Solo DOS ids para `requirements.new`: si el tick publicara un ALTA por la respuesta, el
+    // responder se quedaria sin respuestas y el fallo se veria en los contadores.
     await coreRespondeExito([810, 811]);
+    const comentarios = await respondTo(bus.connection, 'requirements.*.comment', {
+      status: 'success' as const,
+      data: { id: 900 },
+    });
 
     await threads.put(sha256hex('<viejo@x>'), '77');
 
@@ -601,14 +619,17 @@ describe('runTick — los seis contadores de la linea del tick (TS-29, TS-30, TS
       ingestados: 3,
       parseados: 3,
       creados: 2,
-      // TS-30: `comentados` queda en 0 INCLUSO con una respuesta que SI matcheo — es la senal de
-      // que la salida por comentario todavia no existe.
-      comentados: 0,
-      descartados: 1,
+      comentados: 1,
+      descartados: 0,
       fallidos: 0,
     });
-    // `creados` no se contamina con el hilo: la respuesta con match NO publico ningun comando.
+
+    // La separacion, medida en el bus y no solo en los contadores: DOS altas y UN comentario, cada
+    // uno por su subject. `creados` no se contamina con el comentario ni al reves.
     expect(responder?.count()).toBe(2);
+    expect(comentarios.count()).toBe(1);
+
+    await comentarios.stop();
   });
 });
 
@@ -657,13 +678,19 @@ describe('runTick — el Mapa de Hilos NO participa de la idempotencia (TS-37)',
  * genera todavia un efecto en Jiku. Es la tarea que evita el modo de falla clasico de una story de
  * "estado antes que consumidor": que cada pieza pase sus tests y el conjunto haga algo raro.
  */
-describe('runTick — el estado intermedio desplegable de punta a punta (TS-40)', () => {
+describe('runTick — el ciclo completo de punta a punta (TS-40)', () => {
+  // INVERTIDO EN S-027: el mismo tick mixto, ahora con la salida por comentario construida. Los
+  // cuatro mails ejercitan los cuatro caminos que el tick puede tomar, en un solo lote.
   it('TS-40: un tick mixto deja los seis contadores exactos, el bucket coherente y los 4 UIDs \\Seen', async () => {
     const threads = await freshThreads();
     const { logger, capture } = testLoggerWithCapture();
-    // Un solo id disponible: si el tick publicara un comando de mas, el responder se quedaria sin
-    // respuestas y el fallo seria visible en los contadores.
+    // Un solo id disponible para el ALTA: si el tick publicara un alta de mas, el responder se
+    // quedaria sin respuestas y el fallo seria visible en los contadores.
     await coreRespondeExito([500]);
+    const comentarios = await respondTo(bus.connection, 'requirements.*.comment', {
+      status: 'success' as const,
+      data: { id: 901 },
+    });
 
     await threads.put(sha256hex('<viejo@x>'), '77');
     const spy = spyOn(threads);
@@ -693,15 +720,23 @@ describe('runTick — el estado intermedio desplegable de punta a punta (TS-40)'
       ingestados: 4,
       parseados: 4,
       creados: 1,
-      comentados: 0,
-      descartados: 3,
+      // La respuesta con match ahora se comenta: es el efecto que S-027 construye.
+      comentados: 1,
+      // Y quedan DOS descartes, no tres: la respuesta sin match y el slug no mapeado.
+      descartados: 2,
       fallidos: 0,
     });
 
-    // El bucket termina con DOS entradas: la sembrada mas la del mail nuevo. Ninguna respuesta
-    // escribio nada — eso es S-027.
-    expect(await countKeys(threads)).toBe(2);
-    expect(spy.puts).toEqual([sha256hex('<uid-4@fixtures.local>')]);
+    // El bucket termina con TRES entradas: la sembrada, la del mail nuevo, y —la que cierra el
+    // ciclo— la de la RESPUESTA que se comento. Esa ultima es la que hace que una respuesta a la
+    // respuesta rutee aunque el cliente recorte `References`.
+    expect(await countKeys(threads)).toBe(3);
+    // El del alta (mail nuevo, uid 4) y el de LA RESPUESTA que se comento (uid 3). El segundo usa
+    // el Message-Id de la RESPUESTA y no el de la referencia que matcheo: es lo que hace que una
+    // respuesta a la respuesta rutee.
+    expect(spy.puts.sort()).toEqual(
+      [sha256hex('<uid-4@fixtures.local>'), sha256hex('<reply-3@fixtures.local>')].sort(),
+    );
 
     // Los cuatro UIDs quedan \Seen: el Mapa de Hilos NO participa de la idempotencia (CA-14).
     expect(source.markSeenCalls).toEqual([4, 3, 2, 1]);
@@ -709,13 +744,17 @@ describe('runTick — el estado intermedio desplegable de punta a punta (TS-40)'
     // El lookup corrio SOLO en las dos respuestas, en el orden del lote.
     expect(spy.gets).toEqual([sha256hex('<viejo@x>'), sha256hex('<nadie@x>')]);
 
-    // EXACTAMENTE UN comando publicado, el del alta. La respuesta CON match no publico nada.
+    // UN alta y UN comentario, cada uno por su subject. Los dos efectos coexisten sin mezclarse.
     expect(responder?.count()).toBe(1);
+    expect(comentarios.count()).toBe(1);
+    expect(comentarios.subjects()[0]).toContain('requirements.77.comment');
 
     const motivos = lines
       .filter((l) => l['msg'] === 'mail descartado')
       .map((l) => l['motivo']);
-    expect(motivos.sort()).toEqual(['es_respuesta', 'hilo_desconocido', 'slug_no_mapeado']);
+    expect(motivos.sort()).toEqual(['hilo_desconocido', 'slug_no_mapeado']);
+
+    await comentarios.stop();
   });
 });
 

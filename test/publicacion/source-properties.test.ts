@@ -21,6 +21,8 @@ const SRC_ROOT = fileURLToPath(new URL('../../src/', import.meta.url));
 const PUBLICACION = `domain${sep}publicacion${sep}`;
 const PUBLISH_REQUIREMENT = `${PUBLICACION}publish-requirement.ts`;
 const UPLOAD_FILE = `${PUBLICACION}upload-file.ts`;
+// S-027: el tercer punto de publicacion, el del Comentario.
+const PUBLISH_COMMENT = `${PUBLICACION}publish-comment.ts`;
 const UPLOAD_BYTE = `${PUBLICACION}upload-byte.ts`;
 
 function sourceFiles(dir: string): string[] {
@@ -79,11 +81,18 @@ describe('src/ publication source properties', () => {
     }
   });
 
-  it('publishes only the two commands ADR-003 allows', () => {
+  it('publishes only the three commands ADR-003 allows', () => {
     // El nombre del comando vive en la constante `COMMAND` del publicador, no inline en la llamada:
     // por eso se buscan los NOMBRES DE COMANDO declarados en todo `src/` en vez del argumento
     // literal de `.command(`. Buscar solo el argumento daria vacio y el test pasaria sin verificar
     // nada — que es el falso negativo, no el falso positivo, y por eso importa mas.
+    //
+    // ACTUALIZADO EN S-027, y el motivo es exactamente ese falso negativo. El tercer comando,
+    // `requirements.{id}.comment`, tiene el id EMBEBIDO, asi que su nombre no puede ser un literal
+    // entero: se declara partido en `COMMAND_PREFIX = 'requirements.'` + `COMMAND_SUFFIX =
+    // '.comment'`. NINGUNA de las dos mitades matchea el regex de nombres completos, asi que este
+    // caso pasaba en verde SIN VER el comando nuevo — verificado. Por eso ahora se buscan las dos
+    // formas: los nombres estaticos, y el par prefijo/sufijo del dinamico.
     const declared = FILES.flatMap((file) =>
       [...file.code.matchAll(/['"`]([a-z-]+\.[a-z-]+)['"`]/g)]
         .map((match) => match[1] as string)
@@ -92,12 +101,31 @@ describe('src/ publication source properties', () => {
         .filter((candidate) => /^(requirements|files|users|projects|tasks|comments)\./.test(candidate)),
     );
 
-    // Los DOS comandos que ADR-003 permite, y ninguno mas: `requirements.new` (S-005) y
-    // `files.request-upload` (esta story). Orden no relevante.
+    // Los DOS comandos de nombre ESTATICO: `requirements.new` (S-005) y `files.request-upload`
+    // (S-018). Orden no relevante.
     expect([...new Set(declared)].sort()).toEqual(['files.request-upload', 'requirements.new']);
 
     for (const command of declared) {
       expect(['requirements.new', 'files.request-upload']).toContain(command);
+    }
+
+    // Y el TERCERO, el dinamico, con su nombre partido. Se afirma que existe —si alguien borrara la
+    // publicacion del comentario este caso tiene que fallar— y que las dos mitades son las
+    // esperadas, para que un `requirements.` combinado con otro sufijo no pase inadvertido.
+    const publisher = FILES.find((file) => file.relativePath.endsWith('publish-comment.ts'));
+    expect(publisher, 'publish-comment.ts must exist: it is the third allowed command').toBeDefined();
+    expect(publisher?.code).toMatch(/COMMAND_PREFIX\s*=\s*['"`]requirements\.['"`]/);
+    expect(publisher?.code).toMatch(/COMMAND_SUFFIX\s*=\s*['"`]\.comment['"`]/);
+
+    // Ningun OTRO sufijo de comando dinamico sobre `requirements.`: los subjects de edicion
+    // (`.update`, `.delete`, `.close`) estan prohibidos por ADR-003 y por CA-17 de esta story.
+    for (const file of FILES) {
+      for (const forbidden of ['.update', '.delete', '.close', '.assign', '.reopen']) {
+        expect(
+          file.code.includes(`COMMAND_SUFFIX = '${forbidden}'`),
+          `${file.relativePath} declares a forbidden dynamic command suffix ${forbidden}`,
+        ).toBe(false);
+      }
     }
   });
 
@@ -140,16 +168,23 @@ describe('src/ publication source properties', () => {
     }
   });
 
-  it('invokes client.command in exactly two files', () => {
+  it('invokes client.command in exactly three files', () => {
     const publishers = FILES.filter((file) => /\.command\s*\(/.test(file.code)).map(
       (f) => f.relativePath,
     );
 
-    // DOS puntos de publicacion desde esta story: `publish-requirement.ts` (`requirements.new`) y
-    // `upload-file.ts` (`files.request-upload`). Un tercero esta prohibido — es lo que hace que la
-    // traduccion de errores y la linea de log no se puedan saltear: un archivo nuevo que publicara
-    // sin pasar por ninguno de los dos lo haria sin el `try/catch` que esta suite ya protege.
-    expect([...publishers].sort()).toEqual([PUBLISH_REQUIREMENT, UPLOAD_FILE].sort());
+    // TRES puntos de publicacion desde S-027: `publish-requirement.ts` (`requirements.new`),
+    // `upload-file.ts` (`files.request-upload`) y `publish-comment.ts`
+    // (`requirements.{id}.comment`). Un CUARTO sigue prohibido, y la propiedad que esto defiende no
+    // cambio: la traduccion de errores y la linea de log no se pueden saltear. Un archivo nuevo que
+    // publicara sin pasar por ninguno de los tres lo haria sin el `try/catch` que esta suite
+    // protege, y sus fallos de `core` saldrian sin diagnostico.
+    //
+    // La lista se AMPLIA una entrada por story que agrega un comando permitido por ADR-003 — nunca
+    // se relaja a un `toBeGreaterThan`, que dejaria entrar cualquier publicador nuevo en silencio.
+    expect([...publishers].sort()).toEqual(
+      [PUBLISH_REQUIREMENT, UPLOAD_FILE, PUBLISH_COMMENT].sort(),
+    );
   });
 
   it('invokes client.command exactly once per function, with two arguments', () => {
@@ -180,6 +215,57 @@ describe('src/ publication source properties', () => {
 
     expect(publisher?.code).toMatch(/\.command\(COMMAND,\s*payload\)/);
     expect(publisher?.code).not.toMatch(/\.command\([^)]*timeoutMs/);
+  });
+
+  // TS-66 (S-027): la misma propiedad, ahora sobre el publicador del comentario.
+  it('invokes client.command exactly once in publish-comment.ts, with two arguments', () => {
+    const publisher = FILES.find((file) => file.relativePath === PUBLISH_COMMENT);
+    expect(publisher).toBeDefined();
+
+    const invocations = publisher?.code.match(/\.command\s*\(/g) ?? [];
+    expect(invocations).toHaveLength(1);
+
+    // DOS argumentos: el `method` (armado con el id embebido) y el payload. Un TERCERO seria un
+    // `timeoutMs` propio, y ADR-006 lo prohibe: convertiria los errores explicados de core en
+    // timeouts mudos.
+    expect(publisher?.code).toMatch(/\.command\(method,\s*payload\)/);
+    expect(publisher?.code).not.toMatch(/\.command\([^)]*timeoutMs/);
+  });
+
+  // TS-68 (S-027): el publicador del comentario REUSA la traduccion de errores, no la reimplementa.
+  it('reuses the shared error translation instead of defining its own', () => {
+    const publisher = FILES.find((file) => file.relativePath === PUBLISH_COMMENT);
+    expect(publisher).toBeDefined();
+
+    // Importa la traduccion compartida...
+    expect(publisher?.code).toMatch(/diagnosePublishFailure/);
+    // ...y NO declara un mapa de codigos propio. Una segunda traduccion divergiria de la primera en
+    // el primer codigo nuevo que core agregue, y la que quedaria vieja es la que nadie mira.
+    expect(publisher?.code).not.toMatch(/const\s+\w*(?:CODES|DIAGNOSES|REMEDIES)\w*\s*[:=]/);
+    expect(publisher?.code).not.toMatch(/requirement_not_found/);
+    expect(publisher?.code).not.toMatch(/file_not_owned/);
+  });
+
+  // TS-69 (S-027): ni el publicador ni el schema leen el entorno o el logger global.
+  it('keeps the comment modules free of process.env and getLogger', () => {
+    const comentario = FILES.filter(
+      (file) =>
+        file.relativePath === PUBLISH_COMMENT ||
+        file.relativePath.endsWith(`comment.schema.ts`) ||
+        file.relativePath.endsWith(`comment.types.ts`),
+    );
+
+    // Sanidad: los tres archivos existen y el filtro no quedo vacio.
+    expect(comentario.length).toBeGreaterThanOrEqual(2);
+
+    for (const file of comentario) {
+      expect(file.code, `${file.relativePath} must not read process.env`).not.toContain(
+        'process.env',
+      );
+      // El logger llega POR PARAMETRO, igual que en las dos hermanas: es lo que permite inyectar un
+      // logger de captura en los tests sin tocar el singleton del proceso.
+      expect(file.code, `${file.relativePath} must not use getLogger()`).not.toContain('getLogger(');
+    }
   });
 
   it('never retries a failed publication', () => {

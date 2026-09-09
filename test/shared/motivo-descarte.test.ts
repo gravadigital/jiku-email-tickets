@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import type { MotivoDescarte } from '#shared/motivo-descarte.js';
+import type { MotivoDescarte, RouteResult } from '#shared/motivo-descarte.js';
 
 /**
  * TS-17 y TS-18 del Story Plan de S-026: el catalogo cerrado de motivos de descarte.
@@ -80,5 +80,54 @@ describe('MotivoDescarte — el catalogo cerrado (S-026)', () => {
     // Un `enum` (numerico, o con valores PascalCase) romperia la igualdad literal que ADR-006 pide.
     expect(SOURCE).not.toMatch(/\benum\s+MotivoDescarte\b/);
     expect(SOURCE).toMatch(/export type MotivoDescarte\s*=/);
+  });
+});
+
+/**
+ * S-027: `RouteResult` gana una TERCERA forma — la intencion de comentario.
+ *
+ * No es un `MotivoDescarte` nuevo y no debe serlo: una intencion de comentario NO es un descarte, y
+ * meterla en ese catalogo la haria loguearse como motivo, que es justo lo que deja de pasar.
+ */
+describe('RouteResult — la tercera forma, la intencion de comentario (S-027)', () => {
+  it('las tres variantes son asignables y discriminables sin castear', () => {
+    const resuelto: RouteResult = { ok: true, projectId: 42, slug: 'alfa' };
+    const comentario: RouteResult = { ok: false, intencion: 'comentario' };
+    const descarte: RouteResult = { ok: false, motivo: 'sin_slug' };
+
+    // El estrechamiento que el tick usa: `ok` parte en dos, y la presencia de `intencion` parte la
+    // mitad negativa. Sin el segundo paso, `route.motivo` no compila — que es deseable: es el
+    // typechecker obligando a decidir que hacer con la respuesta.
+    for (const result of [resuelto, comentario, descarte]) {
+      if (result.ok) {
+        expect(result.projectId).toBe(42);
+      } else if ('intencion' in result) {
+        expect(result.intencion).toBe('comentario');
+      } else {
+        expect(result.motivo).toBe('sin_slug');
+      }
+    }
+  });
+
+  it('la intencion NO lleva motivo: no es un descarte', () => {
+    const comentario: RouteResult = { ok: false, intencion: 'comentario' };
+    expect('motivo' in comentario).toBe(false);
+    expect('slug' in comentario).toBe(false);
+  });
+
+  it("'comentario' no es un MotivoDescarte: el catalogo de descartes no lo incorpora", () => {
+    // @ts-expect-error la intencion no pertenece al catalogo de motivos de descarte
+    const invalido: MotivoDescarte = 'comentario';
+    expect(invalido).toBe('comentario');
+  });
+
+  it('la union del archivo declara EXACTAMENTE tres variantes de RouteResult', () => {
+    const code = SOURCE.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    // El `;` de cierre es el que termina la SENTENCIA, al final de linea: un `;$` sin `m` o un
+    // `;` a secas cortaria en el primer separador de campo de la primera variante.
+    const declaracion = /export type RouteResult =([\s\S]*?);\s*$/m.exec(code)?.[1] ?? '';
+    // Tres ramas separadas por `|` de nivel superior; cada una abre con `{ readonly ok:`.
+    expect([...declaracion.matchAll(/readonly ok:/g)]).toHaveLength(3);
+    expect(declaracion).toContain("intencion: 'comentario'");
   });
 });

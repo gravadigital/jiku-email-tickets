@@ -29,12 +29,23 @@ function escapeRegExp(value: string): string {
  *
  * Orden de evaluacion -- descarta lo mas barato primero (CA-8):
  *
- * 1. `referenceIds.length > 0` -> `es_respuesta`. ANTES de tocar el slug: una respuesta no gasta el
- *    regex ni el lookup. Basta con que `referenceIds` no este vacio, sin importar a que apunten las
- *    referencias (CA-9) -- incluye el falso positivo CONOCIDO Y ACEPTADO del reenvio: un mail
- *    reenviado por un cliente desde un hilo interno, con `References` poblado y un pedido nuevo
- *    legitimo, se descarta igual como `es_respuesta` (decision 9 del PRD, G-04 manda degradar hacia
- *    el descarte -- CA-10). No es un bug, es una decision de producto aceptada.
+ * 1. `referenceIds.length > 0` -> LA INTENCION DE COMENTAR (`{ ok: false, intencion: 'comentario' }`,
+ *    S-027). ANTES de tocar el slug: una respuesta no gasta el regex ni el lookup, y la consecuencia
+ *    OBSERVABLE de ese orden es que EL SLUG NO SE EVALUA NUNCA PARA UNA RESPUESTA -- una respuesta a
+ *    un hilo conocido se comenta aunque su `recipient` no resuelva ningun slug valido. Basta con que
+ *    `referenceIds` no este vacio, sin importar a que apunten las referencias: quien decide si el
+ *    hilo se conoce es el LOOKUP DEL TICK, no esta funcion.
+ *
+ *    HASTA S-026 esta rama devolvia `{ ok: false, motivo: 'es_respuesta' }` y toda respuesta se
+ *    descartaba. Lo que devuelve ahora NO ES UN DESCARTE y por eso no lleva `motivo`: es una
+ *    intencion que el tick resuelve con `lookupThread()`. El falso positivo del reenvio sigue
+ *    existiendo (un hilo interno reenviado con `References` poblado), pero ya no termina en un
+ *    descarte automatico: termina en un lookup que no matchea, y el tick lo descarta como
+ *    `hilo_desconocido`. La decision 9 del PRD quedo derogada por REQ-005.
+ *
+ *    Y EL LOOKUP NO VIVE ACA, ni debe: es asincrono y toca `#infra/kv`, y esta funcion es pura,
+ *    sincronica y sin logging. Meterlo aca seria la "simplificacion" mas tentadora y la que rompe
+ *    la direccion de dependencias que esta cabecera documenta.
  * 2. Aislar el email del `recipient` crudo (`extractAddress`, CA-3), aplicar
  *    `^<prefijo>\+([^@]+)@` case-insensitive, normalizar el slug capturado a minusculas. Si el
  *    `recipient` esta vacio, no matchea, o el slug queda vacio -> `sin_slug` (CA-5, CA-11). El slug
@@ -49,7 +60,7 @@ export function routeMail(
   config: Pick<RuteoConfig, 'ticketMap' | 'subaddressPrefix'>,
 ): RouteResult {
   if (mail.referenceIds.length > 0) {
-    return { ok: false, motivo: 'es_respuesta' };
+    return { ok: false, intencion: 'comentario' };
   }
 
   const address = extractAddress(mail.recipient);

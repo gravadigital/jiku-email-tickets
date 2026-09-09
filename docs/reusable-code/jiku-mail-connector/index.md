@@ -79,7 +79,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 31**
+**Total: 32**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -220,6 +220,17 @@ N/A (no HTTP surface - ADR-001)
   **stops** — an unreachable bucket does not become reachable on the next reference. An empty
   `referenceIds` costs **zero** round-trips. **Never `Promise.all`**: that would erase both the
   first-hit cutoff and the ordering that makes the `In-Reply-To` reference win.
+
+- **publishCommentFromMail()** (`src/domain/publicacion/publish-comment.ts`) - The connector's
+  **third** and last write command (`requirements.{id}.comment`, S-027): publishes a client's mail
+  reply as a **public** comment on the requirement its thread resolved to. Sets `visibilityLevel`
+  **explicitly** even though the contract makes it optional — the contract's default is `internal`,
+  which is the opposite of what is needed, and core would answer `success` either way, so omitting it
+  would silently produce a comment **the client cannot see**. The `{id}` travels in the `method`, not
+  in a hand-built subject; the SDK derives the subject. **Reuses `diagnosePublishFailure()` unchanged**
+  rather than adding branches for `requirement_not_found` / `file_not_owned`: those fall into
+  `core_rechazo_desconocido` on purpose, because a second copy of core's growing code catalogue would
+  be the one that goes stale.
 
 See full details in [services.md](./services.md)
 

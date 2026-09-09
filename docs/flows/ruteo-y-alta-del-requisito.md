@@ -4,8 +4,8 @@ title: Ruteo y alta del requisito
 type: event
 status: Active
 created: 2026-08-31
-last_updated: 2026-09-08
-stories: [S-012, S-013, S-014, S-015, S-016, S-022, S-026]
+last_updated: 2026-09-09
+stories: [S-012, S-013, S-014, S-015, S-016, S-022, S-026, S-027]
 ---
 
 # Ruteo y Alta del Requisito
@@ -15,7 +15,9 @@ stories: [S-012, S-013, S-014, S-015, S-016, S-022, S-026]
 **Creado:** 2026-08-31
 **Última actualización:** 2026-09-08 (S-026 implementada: el Paso 6 gana el write al Mapa de Hilos
 después del `success` del alta; el Paso 3 gana el lookup que resuelve el motivo final de una
-respuesta, con `hilo_desconocido` como motivo nuevo y `es_respuesta` cambiando de significado)
+respuesta, con `hilo_desconocido` como motivo nuevo y `es_respuesta` cambiando de significado.
+S-027: la respuesta con match deja de descartarse y se publica como Comentario — ver
+[publicacion-requirements-comment](publicacion-requirements-comment.md))
 **Stories:** S-012, S-013, S-014, S-015, S-016, S-022, S-026
 
 > **Alcance de la actualización de S-026.** El **diagrama Mermaid de este flujo NO se tocó** y la rama
@@ -64,7 +66,7 @@ sequenceDiagram
     Note over TICK: mail ya normalizado (Paso 4 de ingesta-y-normalizacion-del-mail)
     TICK->>ROUTE: routeMail(mail, config.ruteo)
     alt referenceIds.length > 0
-        ROUTE-->>TICK: { ok: false, motivo: 'es_respuesta' }
+        ROUTE-->>TICK: { ok: false, intencion: 'comentario' }
     else sin match de subaddress o slug vacío
         ROUTE-->>TICK: { ok: false, motivo: 'sin_slug' }
     else slug no está en el Mapa de Tickets
@@ -149,7 +151,9 @@ descarte.
 tick decide qué hacer con el resultado y es quien loguea. **Orden de evaluación exacto** — descarta lo
 más barato primero:
 
-1. **`mail.referenceIds.length > 0`** → `{ ok: false, motivo: 'es_respuesta' }`. Se evalúa **primero**,
+1. **`mail.referenceIds.length > 0`** → `{ ok: false, intencion: 'comentario' }` (S-027; hasta S-026
+   era `{ ok: false, motivo: 'es_respuesta' }`). **No es un descarte** —por eso esa variante no lleva
+   `motivo`— sino la intención que el lookup del tick resuelve. Se evalúa **primero**,
    antes de tocar el slug: una respuesta no gasta el regex ni el lookup. Basta con que
    `referenceIds` no esté vacío, sin importar a qué apunten las referencias — incluye el **falso
    positivo conocido y aceptado del reenvío**: un mail reenviado por un cliente desde un hilo interno,
@@ -181,7 +185,7 @@ Si `route.ok === false`: una única línea `warn` con
 nunca `slug: undefined` a mano. `counters.descartados += 1`.
 
 **Desde S-026, el motivo FINAL de una respuesta no es el que devolvió `routeMail()`.** Cuando
-`route.motivo === 'es_respuesta'` —y **sólo** entonces; `sin_slug` y `slug_no_mapeado` no tienen
+la intención es de comentario —y **sólo** entonces; `sin_slug` y `slug_no_mapeado` no tienen
 referencias que consultar y no pagan el round-trip— el tick invoca
 `lookupThread({ threads, referenceIds: mail.referenceIds, logger })` **antes** de emitir la línea, y
 el resultado resuelve el motivo:
@@ -190,12 +194,14 @@ el resultado resuelve el motivo:
 |---|---|
 | Sin match, consultable | `hilo_desconocido` |
 | No consultable (bucket inaccesible) | `es_respuesta` |
-| Con match | `es_respuesta` — el hilo **sí** se conoce, y en S-026 todavía no hay salida por comentario |
+| Con match | **No se descarta.** Desde S-027 se publica como Comentario del Requisito y cuenta en `comentados` |
 
-**`es_respuesta` cambia de significado.** Pasa de cubrir *"toda respuesta"* a cubrir además *"no pude
+**`es_respuesta` cambió de significado dos veces.** Primero pasó de cubrir *"toda respuesta"* a cubrir *"no pude
 averiguar a qué hilo apunta"*. La distinción contra `hilo_desconocido` —*"esta respuesta apunta a un
 hilo que no conozco"*— es deliberada y el log tiene que sostenerla: uno se arregla cargando el hilo,
-el otro arreglando el bucket. Los dos significados de `es_respuesta` conviven a propósito y S-027
+el otro arreglando el bucket. Y **S-027 le quitó el primero**: una respuesta con match ya no se
+descarta, así que hoy `es_respuesta` significa **únicamente** *"no pude consultar el Mapa de Hilos"*.
+Es el motivo más raro de los seis, y eso es correcto: sólo aparece con el bucket caído. S-027
 resuelve el primero.
 
 **Sigue habiendo UNA sola línea de log por descarte:** el motivo se resuelve en una variable antes del
@@ -318,7 +324,7 @@ Paso 2.
 
 | Motivo/Diagnóstico | Nivel | Quién lo produce | Comportamiento |
 |---|---|---|---|
-| `es_respuesta` | `warn` | `routeMail()`, con el motivo final confirmado por el lookup | `counters.descartados += 1`. **Desde S-026** cubre dos cosas: una respuesta CON match (todavía sin salida por comentario) y un lookup que **no se pudo hacer** (bucket de hilos inaccesible) |
+| `es_respuesta` | `warn` | El lookup del tick | `counters.descartados += 1`. **Desde S-027** cubre UNA sola cosa: el lookup **no se pudo hacer** (bucket de hilos inaccesible). La respuesta con match ya no llega acá — se comenta |
 | `hilo_desconocido` | `warn` | `lookupThread()`, resuelto en el tick **(S-026)** | `counters.descartados += 1`. El lookup **sí** se pudo hacer y ninguna referencia matcheó. **No se crea nada.** Cubre el reenvío de hilo interno con slug mapeado y la entrada expirada por el TTL de 90 días |
 | El `put()` al Mapa de Hilos falla **(S-026)** | `warn` | `recordThreadEntry()` | **El tick continúa.** El alta **no se cancela ni se compensa** y `counters.creados` no se revierte |
 | `sin_slug` | `warn` | `routeMail()` | `counters.descartados += 1` |
