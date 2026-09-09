@@ -5,7 +5,7 @@ type: event
 status: Active
 created: 2026-09-08
 last_updated: 2026-09-09
-stories: [S-026, S-027]
+stories: [S-026, S-027, S-028]
 ---
 
 # El Mapa de Hilos en el KV
@@ -13,9 +13,10 @@ stories: [S-026, S-027]
 **Tipo:** Evento
 **Status:** Active
 **Creado:** 2026-09-08
-**Última actualización:** 2026-09-08 (S-026: se implementan las dos operaciones sobre el bucket que
-S-024 ya abre y verifica — el write después del alta y el lookup ordenado de la respuesta)
-**Stories:** S-026
+**Última actualización:** 2026-09-09 (S-028: el flujo queda **completo y verificado E2E** contra un
+NATS real. Antes: S-026 implementó las dos operaciones sobre el bucket que S-024 abre y verifica —el
+write después del alta y el lookup ordenado de la respuesta—, y S-027 le dio consumidor al lookup)
+**Stories:** S-026, S-027, S-028
 
 ## Descripción
 
@@ -26,17 +27,31 @@ saber a qué Requisito pertenece su hilo.
 Es la **primera entidad que el conector escribe y que sobrevive al tick** — hasta S-025 todas sus
 entidades eran efímeras o de configuración administrada por un humano.
 
-**Estado incompleto a propósito.** El flujo tiene **dos triggers** y hoy sólo uno existe:
+**Estado COMPLETO.** El flujo tiene **dos triggers**, y desde S-027 los **dos** existen:
 
 | Trigger | Story | Estado |
 |---|---|---|
-| El alta de un Requisito desde un mail nuevo | S-026 | **Implementado** |
-| El comentario exitoso desde una respuesta con match | S-027 | **Implementado.** El write del segundo trigger ocurre tras el `success` del comentario — ver [publicacion-requirements-comment](publicacion-requirements-comment.md) |
+| El alta de un Requisito desde un mail nuevo | S-026 | **Implementado.** El write ocurre tras el `success` del alta, después de `creados += 1` |
+| El comentario exitoso desde una respuesta con match | S-027 | **Implementado.** El write ocurre tras el `success` del comentario, después de `comentados += 1` — ver [publicacion-requirements-comment](publicacion-requirements-comment.md) |
 
-En S-026 el lookup **funciona y está afirmado por tests**, pero su resultado todavía no tiene
-consumidor: una respuesta con match **se descarta igual**, porque no hay salida por comentario. El
-estado es coherente y desplegable — el bucket se puebla desde ya, y S-027 encuentra el estado listo
-antes de necesitarlo.
+**Registro histórico (S-026):** hasta S-027 este flujo estaba *"incompleto a propósito"* — el lookup
+funcionaba y estaba afirmado por tests, pero su resultado **no tenía consumidor**: una respuesta con
+match **se descartaba igual**, porque no había salida por comentario. Ese estado intermedio era
+coherente y desplegable —el bucket se poblaba desde ya— y S-027 encontró el estado listo antes de
+necesitarlo. Se deja anotado y no se borra: es lo que explica por qué el bucket puede tener entradas
+anteriores a que existiera la salida por comentario.
+
+**Verificación (S-028).** El flujo está verificado E2E contra un NATS real con JetStream, no sólo
+contra los módulos:
+
+| Propiedad | Suite |
+|---|---|
+| El ciclo completo encadenado: alta → write → respuesta → comentario → write → respuesta a la respuesta | `test/infra/kv/e2e-kv.test.ts` (TS-31 a TS-33) |
+| Los **tres** casos de `hilo_desconocido` —reenvío interno, entrada expirada por el TTL, hilo anterior al despliegue— no crean nada, no escriben nada, y son **indistinguibles** entre sí | `test/ingesta/tick-propiedades-kv.test.ts` (TS-16 a TS-20) |
+| El write que falla **no cancela el alta**, y el del comentario está condicionado al `success` | `test/ingesta/tick-propiedades-kv.test.ts` (TS-21 a TS-26) |
+| El bucket **no participa de la idempotencia**: el `\Seen` sigue siendo la única marca | `test/ingesta/tick-propiedades-kv.test.ts` (TS-51 a TS-53) |
+| **No hay dedup de adjuntos contra el hilo**, y es deliberado | `test/ingesta/tick-propiedades-kv.test.ts` (TS-54 a TS-56) |
+| Los pasos manuales de inspección del bucket (las claves son 64 chars de hex) | [verificacion-e2e-manual.md](../architectures/jiku-mail-connector/verificacion-e2e-manual.md), Parte 2 |
 
 ## Servicios Involucrados
 

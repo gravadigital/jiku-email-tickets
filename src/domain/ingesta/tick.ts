@@ -52,13 +52,14 @@ export interface TickCounters {
    * Los comentarios publicados sobre un Requisito existente, desde una respuesta con match en el
    * Mapa de Hilos.
    *
-   * EN S-026 QUEDA SIEMPRE EN 0 y ningun camino de codigo lo incrementa: todavia no hay salida por
-   * comentario. S-027 es quien lo empieza a incrementar.
+   * EN S-026 QUEDABA SIEMPRE EN 0 —no habia salida por comentario todavia— y DESDE S-027 SE
+   * INCREMENTA de verdad, en la rama de la respuesta con match. El rastro se deja porque explica
+   * por que el contador existio una story antes que su efecto.
    *
    * Es un contador SEPARADO y no se suma a `creados` a proposito: `creados` cuenta SOLO altas de
    * Requisito, y sumarlos borraria la distincion en la unica linea de metricas que el tick emite
-   * (ADR-006: no hay healthcheck ni exportador de metricas). Es tambien la metrica que S-027 va a
-   * mirar para verificar que empezo a comentar de verdad.
+   * (ADR-006: no hay healthcheck ni exportador de metricas). S-028 lo afirma con un test de
+   * propiedad sobre el tick: `test/ingesta/tick-propiedades-kv.test.ts` (TS-27 a TS-30).
    */
   comentados: number;
 }
