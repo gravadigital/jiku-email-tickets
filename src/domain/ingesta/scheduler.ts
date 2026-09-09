@@ -1,4 +1,7 @@
 import type { Client } from '@gravadigital/jiku';
+// Solo el TIPO del handle del bucket de hilos, que este modulo unicamente PROPAGA hasta el tick
+// (S-026). No lo abre, no lo usa y no construye ningun `Kvm` (ADR-002).
+import type { KV } from '@gravadigital/jiku/nats';
 import { schedule as cronSchedule, type ScheduledTask } from 'node-cron';
 import type { Logger } from 'pino';
 
@@ -52,7 +55,7 @@ let inFlightPromise: Promise<void> | undefined;
  * retorna sin invocar `runTick` — el disparo salteado NO se encola, se pierde: el proximo disparo
  * del cron es la unica oportunidad siguiente.
  *
- * Si `tickInFlight === false`: lo marca `true`, invoca `runTick(config, logger, client)`, y el `finally`
+ * Si `tickInFlight === false`: lo marca `true`, invoca `runTick(config, logger, client, threads)`, y el `finally`
  * lo devuelve a `false` SIEMPRE — con exito o con excepcion de `runTick` (CA-6). `runIngestaTick`
  * (S-010) ya no relanza nada por su cuenta, asi que esta funcion no necesita un `catch` adicional
  * sobre el resultado del tick: solo el `finally` sobre el indicador.
@@ -61,7 +64,13 @@ export async function triggerTick(
   config: AppConfig,
   logger: Logger,
   client: Client,
-  runTick: (config: AppConfig, logger: Logger, client: Client) => Promise<void> = runIngestaTick,
+  threads: KV,
+  runTick: (
+    config: AppConfig,
+    logger: Logger,
+    client: Client,
+    threads: KV,
+  ) => Promise<void> = runIngestaTick,
 ): Promise<void> {
   if (tickInFlight) {
     logger.warn({}, 'tick salteado: hay uno en curso');
@@ -71,7 +80,7 @@ export async function triggerTick(
   tickInFlight = true;
   const run = (async () => {
     try {
-      await runTick(config, logger, client);
+      await runTick(config, logger, client, threads);
     } catch (err) {
       // `runIngestaTick` real (S-010) ya no relanza nada por su cuenta — este catch solo importa
       // para un doble de test inyectado que lanza deliberadamente (AC-5): el guard nunca propaga
@@ -126,7 +135,13 @@ export function scheduleTick(
   config: AppConfig,
   logger: Logger,
   client: Client,
-  runTick: (config: AppConfig, logger: Logger, client: Client) => Promise<void> = runIngestaTick,
+  threads: KV,
+  runTick: (
+    config: AppConfig,
+    logger: Logger,
+    client: Client,
+    threads: KV,
+  ) => Promise<void> = runIngestaTick,
   cronScheduleFn: typeof cronSchedule = cronSchedule,
 ): ScheduledTask | undefined {
   if (!config.poll.enabled) {
@@ -134,5 +149,7 @@ export function scheduleTick(
     return undefined;
   }
 
-  return cronScheduleFn(config.poll.cron, () => triggerTick(config, logger, client, runTick));
+  return cronScheduleFn(config.poll.cron, () =>
+    triggerTick(config, logger, client, threads, runTick),
+  );
 }

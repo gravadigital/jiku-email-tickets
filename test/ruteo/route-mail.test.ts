@@ -160,17 +160,20 @@ describe('pureza y estructura', () => {
     expect('slug' in result).toBe(false);
   });
 
-  it('MotivoDescarte tiene un unico lugar de definicion con los cinco literales exactos', () => {
-    // TS-22
+  it('MotivoDescarte tiene un unico lugar de definicion con los literales exactos', () => {
+    // TS-22 (S-013), ampliado por S-026: el catalogo paso de CINCO a SEIS con `hilo_desconocido`.
+    // La afirmacion EXHAUSTIVA del catalogo vive en `test/shared/motivo-descarte.test.ts`; lo que
+    // este test sigue protegiendo es que los cinco originales estan y son estos.
     const motivos: MotivoDescarte[] = [
       'no_parseable',
       'sin_message_id',
       'es_respuesta',
       'sin_slug',
       'slug_no_mapeado',
+      'hilo_desconocido',
     ];
-    expect(motivos).toHaveLength(5);
-    expect(new Set(motivos).size).toBe(5);
+    expect(motivos).toHaveLength(6);
+    expect(new Set(motivos).size).toBe(6);
   });
 
   it('extractSenderEmail fue renombrada: headers.ts no exporta ese simbolo', () => {

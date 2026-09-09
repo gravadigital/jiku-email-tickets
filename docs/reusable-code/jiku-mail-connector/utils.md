@@ -1,5 +1,83 @@
 # Utils/Helpers - jiku-mail-connector
 
+## sha256hex
+
+**Location:** `src/infra/kv/threads.ts`
+
+**Description:** The sha256 of a string, hex-encoded — 64 chars of `[0-9a-f]` — over the value
+**exactly as given**. No `trim()`, no `toLowerCase()`, no normalization of any kind. Pure, never
+throws.
+
+It is how the Thread Map's key is built from a raw `Message-Id` (with its brackets, as `mailparser`
+delivers it), and the reason is not convenience:
+
+- **Why hash at all.** `validKeyRe` in `@nats-io/kv` (`lib/kv.js:86`) is `/^[-/=.\w]+$/` and
+  therefore **rejects `<`, `>` and `@`** — all three present in a real `Message-Id`. An invalid key
+  makes the library throw a **plain** `Error`, with no distinctive `name` or `code`, so there is no
+  structural diagnosis to recover from it: the defence is never to produce one.
+- **Why no normalization instead.** Escaping or normalizing the `Message-Id` so it fits the regex
+  would let **two distinct `Message-Id`s collapse onto the same key** and route a comment to the
+  **wrong requirement**. The accepted trade-off is that keys are not readable with `nats kv ls`.
+
+**Signature:**
+
+```ts
+function sha256hex(value: string): string
+```
+
+**Usage example:**
+
+```ts
+import { sha256hex } from '#infra/kv/threads.js';
+
+sha256hex('<abc@cliente.com>'); // '7482ad61…' (64 hex chars)
+
+// Case and whitespace are NOT normalized away — they produce different keys, on purpose.
+sha256hex('<ABC@cliente.com>') !== sha256hex('<abc@cliente.com>'); // true
+```
+
+---
+
+## parsePositiveId
+
+**Location:** `src/infra/kv/parse.ts`
+
+**Description:** Parses a **safe, strictly positive integer** from the raw text of a KV entry,
+returning `undefined` for anything that is not one. The caller logs and skips.
+
+`Number.parseInt` rather than `Number()`: `Number('4.5')` is `4.5` and `Number('')` is `0`, so the
+validation would have to catch both anyway, but `parseInt` makes the attempt explicit.
+`Number.isSafeInteger` rather than `Number.isInteger`: an id that does not survive the round trip
+through `double` is not an id, it is a corrupt value. And the comparison
+`String(parsed) === raw.trim()` is what rejects `'4.5'`, `'42abc'` and `'0x2a'` — a value that does
+not **re-serialize identically** was not an integer, it was something else that started with one.
+
+Shared by both KV buckets — the Ticket Map's `projectId` (`ticket-map.ts`) and the Thread Map's
+`requirementId` (`threads.ts`). It lives extracted precisely so there is one copy: two would diverge
+on the first change, and the one that would diverge silently is the bucket read less often.
+
+**Signature:**
+
+```ts
+function parsePositiveId(raw: string): number | undefined
+```
+
+**Usage example:**
+
+```ts
+import { parsePositiveId } from '#infra/kv/parse.js';
+
+parsePositiveId('42');      // 42
+parsePositiveId('  42  ');  // 42
+parsePositiveId('0');       // undefined
+parsePositiveId('-3');      // undefined
+parsePositiveId('4.5');     // undefined
+parsePositiveId('42abc');   // undefined
+parsePositiveId('0x2a');    // undefined
+```
+
+---
+
 ## cleanSubject
 
 **Location:** `src/domain/ingesta/subject.ts`

@@ -14,6 +14,17 @@ import type { ImapFlowCtor, ImapFlowLike } from '#infra/imap/client.js';
 import { setupTestBus, type TestBusContext } from '../bus/helpers.js';
 import { type CoreResponder, respondTo } from '../bus/responder.js';
 import { testLoggerWithCapture } from './test-logger.js';
+import { fakeThreadsKv } from './fake-threads-kv.js';
+
+/**
+ * El bucket de hilos que estas suites le pasan al tick.
+ *
+ * Ninguna de ellas es sobre el Mapa de Hilos (esas son `test/ingesta/tick-hilos.test.ts` y
+ * `test/infra/kv/threads.test.ts`, contra un KV REAL con JetStream): lo unico que necesitan es que
+ * el write que el tick hace despues de cada alta no falle y no las obligue a levantar otro
+ * contenedor. Ver la cabecera de `./fake-threads-kv.ts`.
+ */
+const THREADS_KV = fakeThreadsKv().kv;
 
 /**
  * Tarea 4 — TS-25, TS-26, TS-27: un tick completo con mails, adjuntos y un fallo de credenciales
@@ -126,7 +137,7 @@ describe('tick — un ciclo completo no filtra nada sensible por stdout (CA-17)'
         // no-op
       },
     };
-    await runTick(source, BASE_CONFIG, logger, bus.client);
+    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
 
     // 2) Una invocacion separada que simula un fallo de credenciales.
     class AuthenticationFailure extends Error {}
@@ -136,7 +147,7 @@ describe('tick — un ciclo completo no filtra nada sensible por stdout (CA-17)'
           throw new AuthenticationFailure('LOGIN failed');
         },
       }) as unknown as ImapFlowLike;
-    await runIngestaTick(BASE_CONFIG, logger, {} as unknown as Client, failingCtor);
+    await runIngestaTick(BASE_CONFIG, logger, {} as unknown as Client, THREADS_KV, failingCtor);
 
     const rawLines = capture.raw();
     expect(rawLines.length).toBeGreaterThan(0);
@@ -168,7 +179,7 @@ describe('tick — todas las lineas estan estructuradas y a stdout (CA-17)', () 
       },
     };
 
-    await runTick(source, BASE_CONFIG, logger, bus.client);
+    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
 
     for (const line of capture.raw()) {
       expect(() => JSON.parse(line)).not.toThrow();
@@ -191,7 +202,7 @@ describe('tick — nunca loguea metadatos de adjunto en este alcance (CA-18)', (
       },
     };
 
-    await runTick(source, BASE_CONFIG, logger, bus.client);
+    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
 
     for (const line of capture.lines()) {
       expect(line).not.toHaveProperty('filename');
@@ -256,7 +267,7 @@ describe('tick — contenido real de cliente nunca se filtra, en exito y en fall
     });
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client);
+      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
     } finally {
       await local.stop();
       responder = await respondTo(bus.connection, 'requirements.new', {
@@ -294,7 +305,7 @@ describe('tick — contenido real de cliente nunca se filtra, en exito y en fall
     });
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client);
+      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
     } finally {
       await local.stop();
       responder = await respondTo(bus.connection, 'requirements.new', {
@@ -451,7 +462,7 @@ describe('tick — un tick completo con alta, descartes y rechazo del bus no fil
     ]);
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client);
+      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
     } finally {
       await local.stop();
       responder = await respondTo(bus.connection, 'requirements.new', {
@@ -488,7 +499,11 @@ describe('tick — un tick completo con alta, descartes y rechazo del bus no fil
     });
 
     const forwardLine = lines.find((l) => l['messageId'] === '<s016-forward@fixtures.local>');
-    expect(forwardLine).toMatchObject({ msg: 'mail descartado', motivo: 'es_respuesta' });
+    // El reenvio de un hilo interno con slug mapeado: `routeMail()` lo devuelve `es_respuesta` y,
+    // desde S-026, el tick consulta el Mapa de Hilos y resuelve el motivo final. Con el bucket
+    // vacio ninguna referencia matchea: `hilo_desconocido`. Lo que este test afirma es la
+    // REDACCION, no el motivo — que el mail deje su linea con `messageId` sin filtrar contenido.
+    expect(forwardLine).toMatchObject({ msg: 'mail descartado', motivo: 'hilo_desconocido' });
 
     const unmappedLine = lines.find((l) => l['messageId'] === '<s016-unmapped@fixtures.local>');
     expect(unmappedLine).toMatchObject({
@@ -522,7 +537,9 @@ describe('tick — un tick completo con alta, descartes y rechazo del bus no fil
     const discardMotivos = lines
       .filter((l) => l['msg'] === 'mail descartado')
       .map((l) => l['motivo']);
-    expect(discardMotivos).toContain('es_respuesta');
+    // `hilo_desconocido` desde S-026: el reenvio con `References` poblado ya no se queda en
+    // `es_respuesta`, porque el tick consulta el Mapa de Hilos y ninguna referencia matchea.
+    expect(discardMotivos).toContain('hilo_desconocido');
     expect(discardMotivos).toContain('slug_no_mapeado');
 
     // --- Los cinco contadores reales, en la linea de metricas del tick ---
@@ -636,7 +653,7 @@ describe('tick — ningun log de un tick con adjuntos aceptado/rechazado/fallido
     };
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client);
+      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
 
       const raw = capture.raw().join('\n');
       expect(raw).not.toContain(SECRET_A);

@@ -1,4 +1,7 @@
 import type { Client } from '@gravadigital/jiku';
+// Solo el TIPO del handle. El bucket lo abre `openKvStores()` en el arranque y viaja hasta aca por
+// parametro: este archivo no construye ningun `Kvm` ni abre ninguna conexion (ADR-002).
+import type { KV } from '@gravadigital/jiku/nats';
 import type { Logger } from 'pino';
 
 import type { AppConfig } from '#config/index.js';
@@ -12,10 +15,12 @@ import { PublishError } from '#domain/publicacion/publish-errors.js';
 import { publishRequirementFromMail } from '#domain/publicacion/publish-requirement.js';
 import { routeMail } from '#domain/ruteo/route-mail.js';
 import { type ImapFlowCtor, withMailSource } from '#infra/imap/client.js';
+import { lookupThread, recordThreadEntry } from '#infra/kv/threads.js';
+import type { MotivoDescarte } from '#shared/motivo-descarte.js';
 
 /**
  * El tick: toma los mails `\Unseen` mas nuevos hasta el cap, los marca `\Seen` de a uno apenas se
- * descargan, aisla el fallo de un mail del resto del lote, y emite los cinco contadores tambien
+ * descargan, aisla el fallo de un mail del resto del lote, y emite los seis contadores tambien
  * cuando el tick falla.
  *
  * Es la composicion de `MailSource` (S-009) y `normalize()` (S-008) — ninguno de los dos conoce
@@ -24,14 +29,17 @@ import { type ImapFlowCtor, withMailSource } from '#infra/imap/client.js';
  */
 
 /**
- * Los cinco contadores que el tick emite en una unica linea, siempre — con exito o con fallo.
+ * Los SEIS contadores que el tick emite en una unica linea, siempre — con exito o con fallo.
  *
  * `creados` cuenta las altas que `publishRequirementFromMail()` (S-015) confirma con exito;
  * `fallidos` cuenta tanto un alta que esa funcion relanza como (desde S-010) un fallo de parseo
- * generico (`no_parseable`). `descartados` cuenta los cinco motivos reales (S-014): los tres que
- * decide `routeMail()` (`es_respuesta`, `sin_slug`, `slug_no_mapeado`) mas `sin_message_id` (via
+ * generico (`no_parseable`). `descartados` cuenta los motivos reales (S-014): los tres que decide
+ * `routeMail()` (`es_respuesta`, `sin_slug`, `slug_no_mapeado`), mas `sin_message_id` (via
  * `MissingMessageIdError`, distinguido por CLASE en el `catch` de `normalize()`, nunca por texto —
- * ADR-002).
+ * ADR-002), mas `hilo_desconocido` desde S-026.
+ *
+ * DESVIACION DECLARADA DE ADR-006, introducida por S-026 (REQ-005): la linea pasa de CINCO
+ * contadores a SEIS con `comentados`. La ADR quedo al dia en la misma story.
  */
 export interface TickCounters {
   ingestados: number;
@@ -39,6 +47,19 @@ export interface TickCounters {
   creados: number;
   descartados: number;
   fallidos: number;
+  /**
+   * Los comentarios publicados sobre un Requisito existente, desde una respuesta con match en el
+   * Mapa de Hilos.
+   *
+   * EN S-026 QUEDA SIEMPRE EN 0 y ningun camino de codigo lo incrementa: todavia no hay salida por
+   * comentario. S-027 es quien lo empieza a incrementar.
+   *
+   * Es un contador SEPARADO y no se suma a `creados` a proposito: `creados` cuenta SOLO altas de
+   * Requisito, y sumarlos borraria la distincion en la unica linea de metricas que el tick emite
+   * (ADR-006: no hay healthcheck ni exportador de metricas). Es tambien la metrica que S-027 va a
+   * mirar para verificar que empezo a comentar de verdad.
+   */
+  comentados: number;
 }
 
 /**
@@ -76,12 +97,19 @@ function extractMessageIdIfAny(): string | undefined {
  * mitad, o la busqueda misma falla), esta funcion NO se traga el error: el `finally` emite la
  * linea de metricas igual (Riesgo 4, CA-11) y el error se propaga hacia `runIngestaTick`, que es
  * quien lo loguea `error` sin credenciales.
+ *
+ * `threads` es el handle del bucket de HILOS, y se recibe suelto en vez del `KvStores` entero
+ * (S-026): el tick necesita ese bucket y no el de tickets, que ya le llega por otro camino
+ * —`config.ruteo.ticketMap`, la copia viva del watch— y no le corresponde tocar. Un parametro
+ * `threads: KV` nombra la dependencia real. Va ANTES de `normalize` para no romper la inyeccion
+ * posicional del doble de tests.
  */
 export async function runTick(
   mailSource: MailSource,
   config: AppConfig,
   logger: Logger,
   client: Client,
+  threads: KV,
   normalize: Normalize = normalizeMail,
 ): Promise<void> {
   const counters: TickCounters = {
@@ -90,6 +118,7 @@ export async function runTick(
     creados: 0,
     descartados: 0,
     fallidos: 0,
+    comentados: 0,
   };
   // ^ FUERA del try: es lo que permite que el finally emita la linea de metricas aunque algo de
   // abajo lance (Riesgo 4). Nunca mover esta declaracion dentro del try.
@@ -130,7 +159,49 @@ export async function runTick(
         const route = routeMail(mail, config.ruteo);
 
         if (!route.ok) {
-          // Una sola linea `warn` agrupable por los cinco motivos (CA-3): mismo literal
+          // ==== EL LOOKUP AL MAPA DE HILOS (S-026) ====
+          //
+          // Va ACA, ANTES de emitir la linea del descarte, y SOLO cuando el motivo es
+          // `es_respuesta`: los otros dos motivos (`sin_slug`, `slug_no_mapeado`) no tienen
+          // referencias que consultar y no deben pagar el round-trip. Un mail NUEVO —el caso
+          // `route.ok === true`— tampoco lo paga: nunca entra en esta rama.
+          //
+          // El resultado solo cambia el MOTIVO del descarte; no cambia el contador, no cambia el
+          // literal del mensaje, y no agrega una segunda linea de log. CA-3 de S-014 exige UNA
+          // sola linea por descarte y hay tests que lo afirman, asi que el motivo se resuelve en
+          // una variable y sigue habiendo una sola llamada a `logger.warn` en esta rama.
+          let motivo: MotivoDescarte = route.motivo;
+
+          if (route.motivo === 'es_respuesta') {
+            const hilo = await lookupThread({
+              threads,
+              referenceIds: mail.referenceIds,
+              logger,
+            });
+
+            if (!hilo.found && hilo.consultable) {
+              // Se pudo preguntar y ninguna referencia matcheo: "esta respuesta apunta a un hilo
+              // que no conozco". Cubre los TRES casos indistinguibles a proposito — el reenvio de
+              // un hilo interno con slug mapeado, una entrada expirada por el TTL de 90 dias, y un
+              // hilo anterior al despliegue de esta funcionalidad. No se crea NADA en ninguno.
+              motivo = 'hilo_desconocido';
+            }
+
+            // Los otros dos resultados dejan el motivo en `es_respuesta`, y cada uno por su razon:
+            //
+            // - NO CONSULTABLE (bucket inaccesible): "no pude averiguar a que hilo apunta". La
+            //   distincion contra `hilo_desconocido` es deliberada y el log tiene que sostenerla:
+            //   uno se arregla cargando el hilo, el otro arreglando el bucket.
+            // - CON MATCH: el hilo SI se conoce, asi que `hilo_desconocido` seria falso y ademas
+            //   ensuciaria la metrica que S-027 va a mirar para verificar que empezo a comentar.
+            //   En S-026 el mail se descarta igual porque TODAVIA NO HAY SALIDA POR COMENTARIO —
+            //   estado intermedio desplegable y deliberado.
+            //
+            // >>> ESTE ES EL PUNTO EXACTO donde S-027 reemplaza el descarte por la publicacion del
+            // >>> comentario sobre `hilo.requirementId`, e incrementa `counters.comentados`.
+          }
+
+          // Una sola linea `warn` agrupable por los seis motivos (CA-3): mismo literal
           // `'mail descartado'` que ya emite `normalize()` para `sin_message_id`. El `slug` viaja
           // SOLO cuando esta presente en el resultado (unicamente `slug_no_mapeado` lo lleva,
           // Integration Points) — nunca `slug: undefined` a mano (CA-4). NO se emite tambien la
@@ -139,7 +210,7 @@ export async function runTick(
           logger.warn(
             {
               messageId: mail.messageId,
-              motivo: route.motivo,
+              motivo,
               ...(route.slug !== undefined ? { slug: route.slug } : {}),
             },
             'mail descartado',
@@ -179,7 +250,7 @@ export async function runTick(
           // PUBLICACION (`fallidos`) de un fallo de NORMALIZACION (`descartados`/`fallidos` de
           // arriba): son ejes distintos y no deben confundirse.
           try {
-            await publishRequirementFromMail(
+            const { requirementId } = await publishRequirementFromMail(
               mail,
               route.projectId,
               config.ruteo,
@@ -194,6 +265,31 @@ export async function runTick(
             // segunda linea `'mail procesado'` aca: seria una linea de resultado duplicada para el
             // mismo mail. Ningun fallo de archivo (rechazo o fallo de subida) cambia este camino:
             // el requisito se crea igual, con sus avisos ya en la description (CA-6, CA-7).
+
+            // ==== EL WRITE AL MAPA DE HILOS (S-026) ====
+            //
+            // Va ACA: dentro del `try` de la publicacion, DESPUES de `counters.creados += 1`, y
+            // solo cuando el alta tuvo EXITO. Si el alta fallo, el `catch` de abajo cuenta
+            // `fallidos` y no se escribe nada — el bucket no debe apuntar a un requisito que no
+            // existe.
+            //
+            // El `messageId` va CRUDO, con sus brackets, tal como lo entrega `normalize()`:
+            // `recordThreadEntry()` lo hashea sin normalizarlo (ver la RAZON 1 de `threads.ts`).
+            //
+            // SIN try/catch propio, y no por descuido: `recordThreadEntry()` NO LANZA (absorbe su
+            // fallo con un `warn`), asi que envolverla seria redundante y —peor— sugeriria que
+            // puede lanzar, que es exactamente lo contrario de su contrato. El `catch` de abajo
+            // sigue viendo solo lo que veia: los `PublishError` de la publicacion.
+            //
+            // Y el fallo del write NO CANCELA EL ALTA: `counters.creados` no se revierte, no hay
+            // compensacion, y el `for` continua con el siguiente UID. El write es un efecto
+            // POSTERIOR y fuera del camino critico del alta.
+            await recordThreadEntry({
+              threads,
+              messageId: mail.messageId,
+              requirementId,
+              logger,
+            });
           } catch (cause) {
             // `publishRequirementFromMail()` ya logueo el fallo con su propio `catch` interno
             // (Tarea 3, criterio 5) — este `catch` NO vuelve a loguear el error, solo cuenta y
@@ -229,6 +325,10 @@ export async function runTick(
         creados: counters.creados,
         descartados: counters.descartados,
         fallidos: counters.fallidos,
+        // El sexto contador (S-026). Queda en 0 en toda esta story: la salida por comentario es
+        // S-027. Emitirlo desde ya —en vez de agregarlo recien cuando incremente— hace que la
+        // linea de metricas sea estable y que S-027 no cambie la FORMA del log, solo su valor.
+        comentados: counters.comentados,
       },
       'tick completado',
     );
@@ -267,6 +367,7 @@ export async function runIngestaTick(
   config: AppConfig,
   logger: Logger,
   client: Client,
+  threads: KV,
   imapFlowCtor?: ImapFlowCtor,
 ): Promise<void> {
   let tickBodyStarted = false;
@@ -274,7 +375,7 @@ export async function runIngestaTick(
   try {
     await withMailSource({ config, logger, imapFlowCtor }, (mailSource) => {
       tickBodyStarted = true;
-      return runTick(mailSource, config, logger, client);
+      return runTick(mailSource, config, logger, client, threads);
     });
   } catch (err) {
     // El error puede ser un fallo de `withMailSource` ANTES de invocar el callback (`connect()`
@@ -288,11 +389,11 @@ export async function runIngestaTick(
     // Si el callback SI llego a arrancar, el finally de runTick() ya emitio la linea de metricas
     // con los contadores parciales (CA-11): no volver a emitirla aca duplicaria la linea. Si en
     // cambio el fallo fue en withMailSource ANTES de invocar el callback, runTick nunca corrio y
-    // esta es la UNICA emision — con los cinco contadores en cero, porque nada se llego a
+    // esta es la UNICA emision — con los seis contadores en cero, porque nada se llego a
     // procesar.
     if (!tickBodyStarted) {
       logger.info(
-        { ingestados: 0, parseados: 0, creados: 0, descartados: 0, fallidos: 0 },
+        { ingestados: 0, parseados: 0, creados: 0, descartados: 0, fallidos: 0, comentados: 0 },
         'tick completado',
       );
     }

@@ -960,3 +960,48 @@ class KvBucketMissingError extends AppError {
 - **It has its own branch in `reportStartupFailure()`.** Reporting it through the bus branch would say
   *"the connector could not connect to the bus"* when the connection worked perfectly, sending the
   operator to Zitadel, the network and the credential mounts when the fix is a `nats kv add`.
+
+---
+
+## ThreadLookupResult
+
+**Location:** `src/infra/kv/threads.ts`
+
+**Description:** The outcome of a Thread Map lookup, as a discriminated union of **three** states.
+
+**Interface:**
+
+```ts
+export type ThreadLookupResult =
+  /** The thread was found: the only shape that carries a requirementId. */
+  | { readonly found: true; readonly requirementId: number }
+  /** Queried successfully, no reference matched. Degrades to `hilo_desconocido`. */
+  | { readonly found: false; readonly consultable: true }
+  /** Could NOT query (bucket unreachable). Degrades to `es_respuesta`. */
+  | { readonly found: false; readonly consultable: false };
+```
+
+**Usage example:**
+
+```ts
+const hilo = await lookupThread({ threads, referenceIds: mail.referenceIds, logger });
+
+if (hilo.found) {
+  // hilo.requirementId is narrowed to number here — S-027 comments on it
+} else if (hilo.consultable) {
+  motivo = 'hilo_desconocido';  // queried, nothing matched
+} else {
+  motivo = 'es_respuesta';      // could not query
+}
+```
+
+**Notes:**
+
+- **Why three states and not `number | undefined`.** Two states would collapse "it isn't there" with
+  "I couldn't ask", which is the exact distinction the discard motive depends on. The two failures
+  have different fixes and different owners: *"load the thread"* versus *"fix the bucket"*.
+- **All three are typed return values; none is an exception.** Throwing would force the tick to wrap
+  every call in a `try/catch`, reintroducing the decision in the wrong place.
+- **It follows the service's idiom for closed outcomes** — a discriminated union, the same shape as
+  `RouteResult` in `#shared/motivo-descarte.js`. The discriminants are checkable by the typechecker,
+  which is what makes an unhandled state a compile error rather than a silent fallthrough.

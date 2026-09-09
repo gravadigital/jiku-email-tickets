@@ -12,6 +12,17 @@ import { runTick } from '#domain/ingesta/tick.js';
 import { setupTestBus, type TestBusContext } from '../bus/helpers.js';
 import { type CoreResponder, respondTo } from '../bus/responder.js';
 import { testLoggerWithCapture } from './test-logger.js';
+import { fakeThreadsKv } from './fake-threads-kv.js';
+
+/**
+ * El bucket de hilos que estas suites le pasan al tick.
+ *
+ * Ninguna de ellas es sobre el Mapa de Hilos (esas son `test/ingesta/tick-hilos.test.ts` y
+ * `test/infra/kv/threads.test.ts`, contra un KV REAL con JetStream): lo unico que necesitan es que
+ * el write que el tick hace despues de cada alta no falle y no las obligue a levantar otro
+ * contenedor. Ver la cabecera de `./fake-threads-kv.ts`.
+ */
+const THREADS_KV = fakeThreadsKv().kv;
 
 /**
  * S-022: las propiedades del sistema completo sobre el modulo de adjuntos, disparadas SIEMPRE
@@ -177,7 +188,7 @@ describe('runTick — orden particion -> dedup -> tope invariante, sobre el sist
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
 
@@ -215,7 +226,7 @@ describe('runTick — orden particion -> dedup -> tope invariante, sobre el sist
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
       expect(uploadResponder.count()).toBe(1);
@@ -268,7 +279,7 @@ describe('runTick — el tope no se recalcula tras un fallo de PUT, sobre el sis
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
 
@@ -337,7 +348,7 @@ describe('runTick — rechazo local + failure de core + PUT fallido combinados n
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
 
@@ -387,7 +398,7 @@ describe('runTick — un mail con todos los adjuntos fallidos es publicado, no f
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0, descartados: 0 });
 
@@ -449,7 +460,7 @@ describe('runTick — dos mails identicos con los mismos adjuntos producen descr
     ]);
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client);
+      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
 
       expect(tickLine(capture)).toMatchObject({ creados: 2, fallidos: 0 });
 
@@ -549,7 +560,7 @@ describe('runTick — la linea de metricas del tick sigue con los cinco contador
     ]);
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client);
+      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
 
       const tick = tickLine(capture);
       expect(tick).toMatchObject({
@@ -562,8 +573,9 @@ describe('runTick — la linea de metricas del tick sigue con los cinco contador
 
       const PINO_STRUCTURAL_FIELDS = new Set(['level', 'time', 'msg', 'env', 'service']);
       const counterKeys = Object.keys(tick ?? {}).filter((key) => !PINO_STRUCTURAL_FIELDS.has(key));
+      // SEIS claves desde S-026: `comentados` entra al catalogo aunque quede en 0 (CA-11).
       expect(counterKeys.sort()).toEqual(
-        ['ingestados', 'parseados', 'creados', 'descartados', 'fallidos'].sort(),
+        ['ingestados', 'parseados', 'creados', 'descartados', 'fallidos', 'comentados'].sort(),
       );
     } finally {
       await uploadResponder.stop();
@@ -628,7 +640,7 @@ describe('runTick — el escenario de extremo a extremo con adjunto, sin instanc
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
 
       // El responder de files.request-upload recibio EXACTAMENTE una solicitud, antes de la de
       // requirements.new (garantizado por estructura: procesarAdjuntosDelMail() corre antes de

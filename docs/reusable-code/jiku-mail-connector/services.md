@@ -1265,3 +1265,131 @@ function openKvStores(opts: {
   plain `Error` that `validateBucket()` throws (which would mean reading message text).
 - **`logger` comes by parameter**, not via `getLogger()` — same as `connection.ts` — so tests inject a
   capture logger without touching the process singleton.
+
+---
+
+## recordThreadEntry()
+
+**Location:** `src/infra/kv/threads.ts`
+
+**Description:** Writes the Thread Map entry `sha256(raw Message-Id) → requirementId` over the
+handle `openKvStores()` already opened and verified. Called from the tick's `for`, inside the
+publication's `try`, **after** `counters.creados += 1` and **only** when the create succeeded.
+
+**Signature:**
+
+```ts
+interface RecordThreadEntryOptions {
+  readonly threads: KV;        // the handle openKvStores() opened; no new connection
+  readonly messageId: string;  // RAW, with its brackets, as normalize() delivers it
+  readonly requirementId: number;
+  readonly logger: Logger;
+}
+
+function recordThreadEntry(options: RecordThreadEntryOptions): Promise<void>
+```
+
+**Usage example:**
+
+```ts
+import { recordThreadEntry } from '#infra/kv/threads.js';
+
+const { requirementId } = await publishRequirementFromMail(/* … */);
+counters.creados += 1;
+
+// No try/catch: this never throws. Wrapping it would suggest otherwise.
+await recordThreadEntry({ threads, messageId: mail.messageId, requirementId, logger });
+```
+
+**Notes:**
+
+- **It never throws, and that is the contract.** A rejected `put()` is absorbed with a **single**
+  `warn` carrying the flat context `{ messageId, messageIdHash, requirementId }`, and the function
+  resolves normally. The requirement already exists in Jiku and there is no compensating command
+  (invariant 9), so the write is a **posterior** effect, outside the create's critical path:
+  `counters.creados` is **not** reverted and the `for` moves on to the next UID. **Do not wrap the
+  call in a `try/catch`** — it is redundant and misrepresents the contract.
+- **The accepted consequence of a failed write** is that the thread will not route later: a reply to
+  that mail will be discarded as `hilo_desconocido`, which is the safe failure.
+- **The value is the integer as text** (`String(requirementId)`), same criterion as the slugs
+  bucket, so `nats kv get` shows something readable and `parsePositiveId()` reads it back. **Not
+  JSON**: `entry.json<T>()` **throws** on an unparseable payload, and one bad key cannot be a failure
+  mode here.
+- **The `put()` takes no options object.** The TTL belongs to the **bucket** and the operator sets it
+  (`nats kv add MAIL_THREADS --ttl=90d`); a source scan asserts no file under `src/infra/kv/` passes
+  a `ttl:`.
+- **The log field is `messageIdHash`, never `key`.** `REDACT_PATHS` covers `'key'` and `'*.key'` (it
+  protects the machine user's private RSA key), so a field named `key` would come out `[REDACTED]`
+  without failing and without warning.
+- **It writes only.** No `create()`, no `Kvm`, no new connection — its only bus import is the **type**
+  `KV` from `@gravadigital/jiku/nats`.
+
+---
+
+## lookupThread()
+
+**Location:** `src/infra/kv/threads.ts`
+
+**Description:** Resolves which requirement a reply's thread belongs to, by walking the mail's
+`referenceIds` **in the order received** and querying `get(sha256hex(refId))` on each until the
+first valid hit. Called from the tick's discard branch, only when
+`route.motivo === 'es_respuesta'`.
+
+**Signature:**
+
+```ts
+type ThreadLookupResult =
+  | { readonly found: true; readonly requirementId: number }
+  | { readonly found: false; readonly consultable: true }    // queried, no match
+  | { readonly found: false; readonly consultable: false };  // could not query
+
+interface LookupThreadOptions {
+  readonly threads: KV;
+  readonly referenceIds: readonly string[];  // already ordered and deduped by normalize()
+  readonly logger: Logger;
+}
+
+function lookupThread(options: LookupThreadOptions): Promise<ThreadLookupResult>
+```
+
+**Usage example:**
+
+```ts
+import { lookupThread } from '#infra/kv/threads.js';
+
+let motivo: MotivoDescarte = route.motivo;
+
+if (route.motivo === 'es_respuesta') {
+  const hilo = await lookupThread({ threads, referenceIds: mail.referenceIds, logger });
+  if (!hilo.found && hilo.consultable) motivo = 'hilo_desconocido';
+  // found === true  → the thread IS known; hilo.requirementId is the target
+  // consultable === false → could not query; the older motive still applies
+}
+
+logger.warn({ messageId: mail.messageId, motivo }, 'mail descartado');
+```
+
+**Notes:**
+
+- **Three states, not two.** `number | undefined` would collapse "it isn't there" with "I couldn't
+  ask", and that is precisely the distinction the caller needs: *"this reply points at a thread I
+  don't know"* (`hilo_desconocido`) versus *"I couldn't find out which thread it points at"*
+  (`es_respuesta`). One is fixed by loading the thread, the other by fixing the bucket.
+- **It never throws.** All three outcomes are typed return values.
+- **It stops at the first valid hit.** Later references are not queried at all.
+- **NEVER `Promise.all` over the references.** It erases two things at once: the **cutoff** (N round
+  trips where the design pays 1) and the **ordering**, which is what makes the `In-Reply-To`
+  reference win. The loop is sequential on purpose, in line with ADR-001.
+- **The order is not recomputed here.** `normalize()` (via `mergeReferenceIds()`) already delivers
+  the deduplicated union of `In-Reply-To` and `References`, in order of appearance, with
+  `In-Reply-To` first. This function iterates the array as received: no sorting, no deduping, no
+  filtering.
+- **A malformed value is not a hit, and iteration continues.** It is skipped with a `warn` naming the
+  `messageIdHash` — a bad value on one key cannot hide the real thread on the next. A rejected
+  `get()`, by contrast, **stops**: an unreachable bucket does not become reachable on the next
+  reference.
+- **An empty `referenceIds` costs zero round-trips.** A new mail never pays for a read.
+- **`get()` puntual, no `watch()`, no in-memory copy.** This is high-cardinality state that changes on
+  every mail; a copy would be an unbounded, stale map. The contrast with `ticket-map.ts` is
+  deliberate — that bucket holds dozens of human-administered entries, this one holds one per mail.
+  A source scan asserts the absence of both `watch(` and any module-level `Map`.
