@@ -115,10 +115,11 @@ describe('README deployment section', () => {
     expect(deployment).toMatch(/escritura/i);
   });
 
-  // TS-47. ACTUALIZADO EN S-012: decia "seventeen". Eran diez hasta S-006; S-007 sumo las cuatro de
-  // la casilla y las tres del poll, y S-012 las cinco del ruteo. Un operador que despliega de cero
-  // tiene que poder hacerlo leyendo esta seccion, sin abrir el codigo.
-  it('documents the twenty-two configuration variables the orchestrator injects', () => {
+  // TS-47. ACTUALIZADO VARIAS VECES, y la cuenta es parte del rastro: eran diez hasta S-006; S-007
+  // sumo las cuatro de la casilla y las tres del poll; S-012 las cinco del ruteo; S-024 las cuatro
+  // del KV; y S-025 SACO las dos del Mapa de Tickets, que se mudo al bucket. Un operador que
+  // despliega de cero tiene que poder hacerlo leyendo esta seccion, sin abrir el codigo.
+  it('documents the twenty-four configuration variables the orchestrator injects', () => {
     for (const variable of [
       'JIKU_CREDS',
       'JIKU_KEY_FILE',
@@ -137,23 +138,35 @@ describe('README deployment section', () => {
       'POLL_CRON',
       'POLL_ENABLED',
       'POLL_MAX_PER_TICK',
-      'TICKET_MAP',
-      'TICKET_MAP_FILE',
       'SUBADDRESS_PREFIX',
       'PLACEHOLDER_TITLE',
       'PLACEHOLDER_BODY',
+      'KV_TICKETS_BUCKET',
+      'KV_THREADS_BUCKET',
+      'KV_THREADS_TTL_DAYS',
+      'KV_WATCH_RETRY_MS',
     ]) {
       expect(deployment, `${variable} must be documented`).toContain(variable);
     }
+
+    // Y las dos que S-025 elimino NO siguen documentadas como si existieran: un operador que las
+    // encuentre en el README las va a declarar, y no van a hacer nada.
+    for (const gone of ['TICKET_MAP=', 'TICKET_MAP_FILE=']) {
+      expect(deployment, `${gone} must be gone from the docs`).not.toContain(gone);
+    }
   });
 
-  // TS-48. Las dos fuentes son EXCLUYENTES y el archivo se monta como los otros dos, read-only. Es
-  // el error que un operador comete: declarar las dos y quedarse editando la que no tiene efecto.
-  it('explains the two exclusive map sources and how the file is mounted', () => {
-    expect(deployment).toContain('TICKET_MAP');
-    expect(deployment).toContain('TICKET_MAP_FILE');
-    expect(deployment).toMatch(/excluyente|una de las dos|exactamente una/i);
-    // El tercer montaje read-only, igual que la key y el creds.
+  // TS-48, INVERTIDO EN S-025. Afirmaba que el README explicaba las DOS FUENTES EXCLUYENTES del
+  // Mapa de Tickets y el tercer montaje read-only del archivo. S-025 elimino las dos fuentes y el
+  // montaje: el mapa vive en un bucket KV. Lo que el operador necesita ahora es el comando que lo
+  // carga y saber que el cambio es EN CALIENTE — que es justo lo contrario de lo que decia antes.
+  it('explains the KV bucket that holds the map, and that it loads without a redeploy', () => {
+    // El comando exacto, porque es lo que el operador ejecuta.
+    expect(deployment).toContain('nats kv put');
+    expect(deployment).toContain('nats kv add');
+    // Y la propiedad que REQ-005 compra: sin redeploy.
+    expect(deployment).toMatch(/sin redeploy|no necesita redeploy|en caliente/i);
+    // Los dos montajes read-only que SI quedan (la key y el creds) siguen documentados.
     expect(deployment).toContain(':ro');
   });
 
@@ -250,9 +263,10 @@ describe('.env.example', () => {
     expect(example).not.toMatch(/^\s*IMAP_(FOLDER|MAILBOX|INBOX)=/m);
   });
 
-  // TS-44. Las cinco del ruteo. Las tres opcionales nombran su default literal; las dos del mapa no
-  // pueden marcarse "REQUERIDA" a secas, porque lo requerido es UNA DE LAS DOS.
-  it('declares the five routing variables, each with its requirement or its default', () => {
+  // TS-44, ACOTADO EN S-025: eran cinco y quedan TRES. Las dos del Mapa de Tickets ya no se
+  // declaran en el `.env` porque el mapa se mudo al bucket KV. Las tres que quedan son opcionales y
+  // cada una tiene que nombrar su default literal.
+  it('declares the three routing variables, each with its default', () => {
     for (const [name, fallback] of [
       ['SUBADDRESS_PREFIX', 'tickets'],
       ['PLACEHOLDER_TITLE', 'Ticket recibido por mail'],
@@ -265,22 +279,27 @@ describe('.env.example', () => {
       expect(line, `${name} must name ${fallback}`).toContain(fallback);
     }
 
-    for (const name of ['TICKET_MAP', 'TICKET_MAP_FILE'] as const) {
-      const line = example.split('\n').find((l) => l.trimStart().startsWith(`${name}=`));
+    // Y las dos del mapa NO vuelven a declararse: declararlas no haria nada, y un `.env.example`
+    // que las ofrece manda al operador a configurar algo que el conector ya no lee.
+    for (const gone of ['TICKET_MAP', 'TICKET_MAP_FILE'] as const) {
+      const line = example.split('\n').find((l) => l.trimStart().startsWith(`${gone}=`));
 
-      expect(line, `${name} must be declared`).toBeDefined();
+      expect(line, `${gone} must NOT be declared any more`).toBeUndefined();
     }
   });
 
-  // TS-45. La regla que un operador puede equivocar de verdad: declarar las DOS fuentes no arranca.
-  // Sin esto, quien declaro las dos edita la que no tiene efecto y no entiende por que nada cambia.
-  it('documents the two exclusive sources and that declaring both does not start', () => {
-    expect(example).toContain('TICKET_MAP');
-    expect(example).toContain('TICKET_MAP_FILE');
-    expect(example).toMatch(/una de las dos|excluyente|exactamente una/i);
-    expect(example).toMatch(/las dos.*no arranca|no arranca.*las dos/is);
-    // Y que el mapa vacio SI es valido: es la diferencia entre una decision y un olvido.
-    expect(example).toMatch(/vacio|vacío/i);
+  // TS-45, INVERTIDO EN S-025. Afirmaba que el `.env.example` documentaba las dos fuentes
+  // excluyentes y que declarar las dos no arranca. Esa regla ya no existe.
+  //
+  // La que un operador puede equivocar AHORA es otra: buscar TICKET_MAP en el `.env.example`, no
+  // encontrarla, y no saber donde se configura el mapa. Por eso el archivo tiene que decir
+  // explicitamente adonde se mudo y con que comando se carga — no simplemente omitirla.
+  it('says where the ticket map moved to, instead of silently dropping it', () => {
+    expect(example).toMatch(/TICKET_MAP/);
+    expect(example).toMatch(/KV|bucket/);
+    expect(example).toContain('nats kv put');
+    // Y el nombre de la variable que SI configura algo del mapa hoy.
+    expect(example).toContain('KV_TICKETS_BUCKET');
   });
 
   it('carries no real value: every declaration is an empty assignment', () => {
@@ -335,12 +354,23 @@ describe('the inverted test cases', () => {
     }
   });
 
-  // TS-49. Las de S-012: el mapa pasa a ser requerido y las claves de ticket ya se declaran.
-  it('records the S-012 inversions in the same two files', async () => {
+  // TS-49. Las de S-012 (el mapa pasa a ser requerido y sus claves se declaran) y las de S-025, que
+  // las vuelve a invertir al mudar el mapa al KV y sacar las dos claves del schema.
+  //
+  // Lo que se exige es que la inversion quede REGISTRADA, no una cadena literal concreta: el texto
+  // de S-012 ya no existe tal cual porque S-025 lo reescribio para contar las dos vueltas
+  // ("INVERTIDO DOS VECES, nunca borrado"). Pedir el literal viejo obligaria a conservar una
+  // redaccion que quedo incompleta, que es lo contrario de lo que este caso quiere.
+  it('records the S-012 and S-025 inversions in the same two files', async () => {
     for (const file of ['config/schema.test.ts', 'config/env.test.ts'] as const) {
       const source = await readFile(new URL(file, `file://${TEST_ROOT}`), 'utf8');
 
-      expect(source, `${file} must explain the S-012 inversion`).toContain('INVERTIDO EN S-012');
+      expect(source, `${file} must record that a case was INVERTED, not deleted`).toMatch(
+        /INVERTID[OA]/,
+      );
+      // Y las dos stories que lo invirtieron quedan nombradas, para que el rastro diga CUANDO.
+      expect(source, `${file} must name S-012`).toContain('S-012');
+      expect(source, `${file} must name S-025`).toContain('S-025');
     }
   });
 

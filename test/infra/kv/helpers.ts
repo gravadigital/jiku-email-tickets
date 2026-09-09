@@ -2,7 +2,7 @@ import { Client } from '@gravadigital/jiku';
 // El cliente NATS y el KV salen del subpath del SDK, nunca de `@nats-io/*` ni de `nats`: no son
 // dependencias de este proyecto (ADR-002 / S-023) y el subpath garantiza una sola copia de
 // `nats-core` en el arbol. Es la misma regla que sigue `test/bus/helpers.ts`.
-import { Kvm, connect, type NatsConnection } from '@gravadigital/jiku/nats';
+import { Kvm, connect, type KV, type NatsConnection } from '@gravadigital/jiku/nats';
 import { GenericContainer, Wait } from 'testcontainers';
 
 import { TEST_INSTANCE, TEST_USER_ID } from '../../bus/helpers.js';
@@ -40,6 +40,14 @@ export interface JetStreamNats {
   readonly client: Client;
   /** Crea buckets ANTES de que corra el codigo bajo test. Es el unico lugar que llama a `create()`. */
   readonly seedBucket: (name: string, ttlDays?: number) => Promise<void>;
+  /**
+   * Abre un bucket ya sembrado y devuelve su handle, para que un test pueda sembrarle entradas y
+   * pasarselo al codigo bajo test.
+   *
+   * Es `open()` y NO `create()`: representa lo mismo que hace el codigo de produccion, y por eso
+   * no rompe la propiedad de que el unico `create()` del repo vive en `seedBucket`.
+   */
+  readonly openBucket: (name: string) => Promise<KV>;
   readonly stop: () => Promise<void>;
 }
 
@@ -96,6 +104,11 @@ export async function startJetStreamNats(): Promise<JetStreamNats> {
       const kvm = new Kvm(connection);
       // El `ttl` de las opciones va en MILISEGUNDOS, igual que el que reporta `status()`.
       await kvm.create(name, ttlDays === undefined ? {} : { ttl: ttlDays * MS_PER_DAY });
+    },
+
+    openBucket: async (name: string): Promise<KV> => {
+      const kvm = new Kvm(connection);
+      return kvm.open(name);
     },
 
     stop: async (): Promise<void> => {

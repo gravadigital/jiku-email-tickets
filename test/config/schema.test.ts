@@ -29,11 +29,11 @@ import {
 const schema = z.object(envSchema);
 
 /**
- * Entorno minimo valido: las ocho requeridas.
+ * Entorno minimo valido: las SIETE requeridas.
  *
  * Eran cuatro hasta S-006. S-007 sumo las tres credenciales de la casilla IMAP, que pasaron a ser
- * requeridas con la ingesta en alcance. S-012 sumo el Mapa de Tickets: con el ruteo en alcance
- * pasa a ser requerido (supersede el criterio 40 de REQ-002).
+ * requeridas con la ingesta en alcance. S-012 sumo el Mapa de Tickets, y **S-025 lo saco**: su
+ * fuente pasa a ser el bucket KV de slugs, asi que ninguna variable del mapa se declara mas.
  */
 const VALID_ENV = {
   JIKU_CREDS: '/run/secrets/sentinel.creds',
@@ -43,7 +43,6 @@ const VALID_ENV = {
   IMAP_HOST: 'imap.gmail.com',
   IMAP_USER: 'tickets@ejemplo.com',
   IMAP_PASSWORD: 'app-password-de-prueba',
-  TICKET_MAP: '{"alfa":42,"beta":7}',
 };
 
 describe('envSchema constants', () => {
@@ -144,31 +143,32 @@ describe('envSchema', () => {
     expect(result.data?.JIKU_VERIFY_PROJECT_ID).toBeUndefined();
   });
 
-  // INVERTIDO EN S-012, no borrado. La primera mitad la INVIRTIO S-007 (hasta S-006 afirmaba que
-  // NINGUNA clave empezaba con 'IMAP_'); la segunda la invierte S-012. Hasta S-011 este caso
-  // afirmaba que las del Mapa de Tickets seguian ausentes porque FG-3 no estaba en alcance: con el
-  // ruteo en alcance el mapa pasa a ser requerido, y un test borrado no dejaria rastro de que la
-  // regla cambio a proposito.
-  // (TS-25, TS-36, TS-42)
-  it('declares the four IMAP and three POLL variables, the five routing ones, and the four attachment policy ones', () => {
+  // INVERTIDO DOS VECES, nunca borrado, y el historial es el punto. La primera mitad la INVIRTIO
+  // S-007 (hasta S-006 afirmaba que NINGUNA clave empezaba con 'IMAP_'); la segunda la invirtio
+  // S-012 (hasta S-011 afirmaba que las del Mapa de Tickets estaban ausentes). **S-025 la vuelve a
+  // invertir**: el mapa se muda al KV y sus dos claves desaparecen del schema. Un test borrado no
+  // dejaria rastro de que la regla cambio a proposito.
+  // (TS-25, TS-36, TS-42; TS-27 de S-025)
+  it('declares the four IMAP and three POLL variables, the three routing ones, and the four attachment policy ones', () => {
     const declared = Object.keys(envSchema);
 
-    // Treinta desde S-024: las veintiseis de S-017 mas las cuatro del KV.
-    expect(declared).toHaveLength(30);
+    // Veintiocho desde S-025: las treinta de S-024 menos las dos del Mapa de Tickets.
+    expect(declared).toHaveLength(28);
     for (const name of ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASSWORD']) {
       expect(declared, name).toContain(name);
     }
     for (const name of ['POLL_CRON', 'POLL_ENABLED', 'POLL_MAX_PER_TICK']) {
       expect(declared, name).toContain(name);
     }
-    for (const name of [
-      'TICKET_MAP',
-      'TICKET_MAP_FILE',
-      'SUBADDRESS_PREFIX',
-      'PLACEHOLDER_TITLE',
-      'PLACEHOLDER_BODY',
-    ]) {
+    for (const name of ['SUBADDRESS_PREFIX', 'PLACEHOLDER_TITLE', 'PLACEHOLDER_BODY']) {
       expect(declared, name).toContain(name);
+    }
+
+    // TS-27 de S-025: las dos claves del Mapa de Tickets NO EXISTEN. Va en el mismo caso que la
+    // cuenta y no en uno aparte a proposito: la cuenta y la ausencia se rompen juntas si alguien
+    // repone una de las dos.
+    for (const name of ['TICKET_MAP', 'TICKET_MAP_FILE']) {
+      expect(declared, name).not.toContain(name);
     }
     for (const name of [
       'ATTACHMENT_ALLOWED_EXTENSIONS',
@@ -412,103 +412,22 @@ describe('envSchema IMAP requirement independence', () => {
 });
 
 /**
- * El Mapa de Tickets (S-012).
+ * El Mapa de Tickets ya NO se configura por variable de entorno (S-025).
  *
- * La carga vive en el `.transform()` de cada clave y no en un refinement sobre el objeto: es lo que
- * hace que sus fallos entren como un issue mas en la lista unica que arma `parseWithDictionary()`
- * de `@t3-oss/env-core`. Estos casos ejercitan el schema desnudo; la regla cross-field de las dos
- * fuentes se prueba desde `loadEnv()` en `env.test.ts`, que es donde vive.
+ * Hasta S-024 este archivo tenia un `describe('envSchema TICKET_MAP')` con dieciocho casos: el
+ * parseo del JSON, la normalizacion a minusculas, el mapa vacio, los projectId invalidos, los slugs
+ * duplicados, y la limitacion declarada de la clave exactamente repetida. **Se eliminaron enteros,
+ * y no es perdida de cobertura**: no probaban una propiedad del sistema, probaban un MECANISMO que
+ * dejo de existir. Su equivalente vive ahora en `test/infra/kv/ticket-map.test.ts`, contra el
+ * bucket real.
+ *
+ * En particular, la deteccion propia de slugs duplicados NO se reubico: el almacen KV no admite
+ * claves duplicadas —dos `put` sobre la misma clave son una actualizacion, no dos entradas— asi que
+ * ese modo de falla dejo de ser posible. No habia nada que trasladar.
+ *
+ * Lo que SI se conserva de aquel bloque, en el nuevo archivo: la normalizacion a minusculas en las
+ * dos puntas, el mapa vacio como estado valido, y que el `projectId` no se valida contra Jiku.
  */
-describe('envSchema TICKET_MAP', () => {
-  /** El Map resuelto de un entorno valido, ya normalizado. */
-  function mapOf(raw: string): ReadonlyMap<string, number> {
-    return schema.parse({ ...VALID_ENV, TICKET_MAP: raw }).TICKET_MAP as ReadonlyMap<string, number>;
-  }
-
-  function failsOn(raw: string): void {
-    const result = schema.safeParse({ ...VALID_ENV, TICKET_MAP: raw });
-
-    expect(result.success, raw).toBe(false);
-    expect(result.error?.issues.map((i) => i.path[0]), raw).toContain('TICKET_MAP');
-  }
-
-  // TS-16
-  it('normalizes the slugs to lowercase while loading', () => {
-    const map = mapOf('{"Alfa":42,"BETA":7}');
-
-    expect([...map.entries()]).toEqual([
-      ['alfa', 42],
-      ['beta', 7],
-    ]);
-    expect(map.get('alfa')).toBe(42);
-  });
-
-  // TS-18. La AUSENCIA no arranca (se prueba en env.test.ts, es cross-field); el mapa VACIO si.
-  // Es la diferencia entre una decision del operador y un olvido de configuracion.
-  it('accepts an empty map as a valid state', () => {
-    const map = mapOf('{}');
-
-    expect(map.size).toBe(0);
-  });
-
-  // TS-5
-  it('rejects content that is not parseable JSON', () => {
-    failsOn('{alfa: 42');
-  });
-
-  // TS-6, TS-7
-  it('rejects JSON that is not an object of pairs', () => {
-    failsOn('[1,2,3]');
-    failsOn('"alfa"');
-    failsOn('42');
-  });
-
-  // TS-8, TS-9
-  it('rejects a projectId that is not a positive integer', () => {
-    failsOn('{"alfa":2.5}');
-    failsOn('{"alfa":0}');
-    failsOn('{"alfa":-3}');
-  });
-
-  // TS-10. No se coerce: un projectId como string es un mapa mal escrito, no un valor a rescatar.
-  it('does not coerce a projectId given as a string', () => {
-    failsOn('{"alfa":"42"}');
-  });
-
-  // TS-11. La clave se recorta antes de evaluarla, asi que un slug de solo espacios es vacio.
-  it('rejects an empty slug', () => {
-    failsOn('{"":42}');
-    failsOn('{"   ":42}');
-  });
-
-  // TS-12
-  it('rejects slugs that collapse into the same key once trimmed', () => {
-    failsOn('{"alfa":42,"alfa ":7}');
-  });
-
-  // TS-13. El caso que JSON.parse NO resuelve solo: son dos claves distintas hasta que se
-  // normalizan, y es el error que un operador comete de verdad.
-  it('rejects slugs that only differ in casing', () => {
-    failsOn('{"Alfa":42,"alfa":7}');
-  });
-
-  // TS-20. DOCUMENTA la limitacion, no la finge cumplida: con la clave EXACTAMENTE repetida el
-  // parser ya resolvio el duplicado antes de que el conector vea nada, y gana la ultima. Lo que si
-  // se garantiza es que el resultado nunca es un ruteo arbitrario silencioso: aca el valor es
-  // deterministico, y el caso real (claves que difieren en casing) no arranca (TS-13).
-  it('cannot detect an exactly repeated key, because JSON.parse already deduplicated it', () => {
-    const map = mapOf('{"alfa":42,"alfa":7}');
-
-    expect(map.get('alfa')).toBe(7);
-    expect(map.size).toBe(1);
-  });
-
-  // TS-21. ADR-004: el conector no verifica contra Jiku que el proyecto exista. El sintoma aparece
-  // por mail, como `project_not_found`.
-  it('accepts a projectId that does not exist in Jiku, without consulting anything', () => {
-    expect(mapOf('{"alfa":999999999}').get('alfa')).toBe(999_999_999);
-  });
-});
 
 describe('envSchema routing defaults', () => {
   // TS-24

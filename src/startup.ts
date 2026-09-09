@@ -2,12 +2,13 @@ import type { Client } from '@gravadigital/jiku';
 import type { Logger } from 'pino';
 
 import { ConfigValidationError } from '#config/errors.js';
-import { type AppConfig, loadAppConfig } from '#config/index.js';
+import { type AppConfig, loadAppConfig, withTicketMap } from '#config/index.js';
 import { connectToBus } from '#infra/bus/connection.js';
 import { BusConnectError, KeyLoadError } from '#infra/bus/errors.js';
 import { buildServiceUser } from '#infra/bus/identity.js';
 import { KvBucketMissingError } from '#infra/kv/errors.js';
 import { type KvStores, openKvStores } from '#infra/kv/stores.js';
+import { startTicketMapWatch, type TicketMapWatch } from '#infra/kv/ticket-map.js';
 import { getLogger, initLogger } from '#shared/logger.js';
 import { SERVICE_NAME } from '#shared/service-info.js';
 
@@ -24,23 +25,48 @@ import { SERVICE_NAME } from '#shared/service-info.js';
  */
 
 export interface Startup {
+  /**
+   * La configuracion FINAL, ya compuesta con el Mapa de Tickets vivo del KV (S-025).
+   *
+   * `config.ruteo.ticketMap` es el MISMO objeto `Map` que el watch muta en caliente, no una copia:
+   * el tick lo propaga a `routeMail()` tal cual, y un slug agregado con `nats kv put` aparece sin
+   * reiniciar el proceso.
+   */
   readonly config: AppConfig;
   readonly logger: Logger;
   readonly client: Client;
-  /** Los dos buckets del KV, ya abiertos y verificados. Los consumen S-025 y S-026. */
+  /**
+   * Los dos buckets del KV, ya abiertos y verificados. El de slugs lo sigue `ticketMapWatch`; el de
+   * hilos lo consume S-026, y por eso este campo se conserva entero.
+   */
   readonly kv: KvStores;
+  /**
+   * El watch del Mapa de Tickets (S-025), con su `stop()` para el apagado ordenado.
+   *
+   * Se expone ademas del `config` porque el `stop()` es lo que baja el loop de background y cancela
+   * el reintento pendiente: sin el, el apagado dependeria de que el orden de cierre del bus mate el
+   * iterador.
+   */
+  readonly ticketMapWatch: TicketMapWatch;
 }
 
 /**
- * Carga la configuracion, construye el logger, la identidad, conecta al bus y abre los dos buckets
- * del KV.
+ * Carga la configuracion, construye el logger, la identidad, conecta al bus, abre los dos buckets
+ * del KV y da de alta el watch del Mapa de Tickets.
  *
- * Devuelve los cuatro para que el llamador decida que hacer despues: el worker queda vivo, el modo
- * de verificacion publica y cierra. Los dos entry points heredan la verificacion de los buckets por
- * usar esta funcion, y eso es correcto: arrancar contra un despliegue sin buckets tiene que fallar
- * en los dos.
+ * Devuelve todo para que el llamador decida que hacer despues: el worker queda vivo, el modo de
+ * verificacion publica y cierra. Los dos entry points heredan la verificacion de los buckets y el
+ * alta del watch por usar esta funcion, y eso es correcto: arrancar contra un despliegue sin
+ * buckets tiene que fallar en los dos.
+ *
+ * El `config` que devuelve es el FINAL: el que sale de `loadAppConfig()` es parcial —le falta el
+ * Mapa de Tickets, que no puede existir hasta que haya conexion— y se completa en el paso 5.6.
  */
 export async function runStartup(): Promise<Startup> {
+  // PARCIAL: su `ruteo.ticketMap` es un Map vacio de relleno. El FINAL se compone en el paso 5.6,
+  // con el mapa vivo del watch — ver `withTicketMap()` en src/config/index.ts. Todo lo que corre
+  // entre aca y el 5.6 (el logger, la identidad, la conexion, los buckets) usa campos que ya estan
+  // completos y ninguno mira el mapa, asi que el parcial les alcanza.
   const config = await loadAppConfig();
 
   // El logger se construye ACA, apenas la configuracion valido y antes que cualquier otra cosa. No
@@ -110,7 +136,32 @@ export async function runStartup(): Promise<Startup> {
   // `reportStartupFailure()` tiene su propia rama para el.
   const kv = await openKvStores({ client, config, logger });
 
-  return { config, logger, client, kv };
+  // Paso 5.6 del flujo: el `watch()` del Mapa de Tickets sobre el handle que el 5.5 dejo abierto.
+  //
+  // Va DESPUES del 5.5 porque necesita ese handle, y el mismo razonamiento del comentario de arriba
+  // —"un bucket faltante tiene que impedir el arranque, no descubrirse en el primer mail"— se
+  // extiende acá con una razon propia y mas dura: `startTicketMapWatch()` ESPERA la carga inicial
+  // antes de devolver, y por eso el primer tick nunca corre con el mapa a medio llenar. Si corriera,
+  // descartaria como `slug_no_mapeado` mails que rutean bien — y esos mails ya quedaron `\Seen`, o
+  // sea que SE PIERDEN. No es una degradacion recuperable.
+  //
+  // NO se mueve dentro de `openKvStores()`: son dos responsabilidades distintas (abrir/verificar vs.
+  // seguir), y `openKvStores()` tiene tests de propiedad sobre su superficie que mezclarlas romperia.
+  //
+  // Y `reportStartupFailure()` NO gana ninguna rama por esto: la caida del watch en caliente no es
+  // un fallo de arranque —es un `warn` con reintento—, y si el ALTA fallara, el error que sale es el
+  // `KvBucketMissingError` que S-024 ya traduce, cuya rama ya existe.
+  const ticketMapWatch = await startTicketMapWatch({ tickets: kv.tickets, config, logger });
+
+  // El config FINAL: `ruteo.ticketMap` NACE apuntando al Map vivo del watch, y nadie lo reasigna
+  // despues. Es lo que hace que el tick vea en caliente los slugs que el operador agrega.
+  return {
+    config: withTicketMap(config, ticketMapWatch.ticketMap),
+    logger,
+    client,
+    kv,
+    ticketMapWatch,
+  };
 }
 
 /**

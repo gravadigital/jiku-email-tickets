@@ -93,9 +93,9 @@ describe('EXPECTATIONS', () => {
     'POLL_CRON',
     'POLL_ENABLED',
     'POLL_MAX_PER_TICK',
-    // Las cinco del ruteo (S-012).
-    'TICKET_MAP',
-    'TICKET_MAP_FILE',
+    // Las tres del ruteo que quedan (S-012; S-025 elimino las dos del Mapa de Tickets junto con
+    // sus claves del schema — la correspondencia es BIDIRECCIONAL, asi que dejar una entrada sin
+    // clave rompe la suite igual que al revés).
     'SUBADDRESS_PREFIX',
     'PLACEHOLDER_TITLE',
     'PLACEHOLDER_BODY',
@@ -208,24 +208,12 @@ describe('toConfigValidationError with the IMAP and poll variables', () => {
 });
 
 describe('toConfigValidationError with the routing variables', () => {
-  // TS-34. TICKET_MAP es la unica variable del servicio cuya entrada tiene que explicar una REGLA y
-  // no solo un formato: los dos issues cross-field de las dos fuentes aterrizan en su path, y es lo
-  // unico que el operador va a leer cuando se equivoque.
-  it('explains the two-source rule from the TICKET_MAP entry', () => {
-    const err = toConfigValidationError([issue('TICKET_MAP')]);
-
-    expect(err.variables).toEqual(['TICKET_MAP']);
-    expect(err.message).not.toContain('no paso la validacion declarada en el schema');
-    expect(err.message).toContain(EXPECTATIONS.TICKET_MAP);
-    expect(err.message).toContain('TICKET_MAP_FILE');
-  });
-
-  it('describes the file source from its own entry', () => {
-    const err = toConfigValidationError([issue('TICKET_MAP_FILE')]);
-
-    expect(err.message).not.toContain('no paso la validacion declarada en el schema');
-    expect(err.message).toContain(EXPECTATIONS.TICKET_MAP_FILE);
-  });
+  // ELIMINADOS EN S-025: los dos casos de la regla de las dos fuentes del Mapa de Tickets (TS-34 de
+  // S-012). Su entrada era la UNICA de la tabla que describia una REGLA y no un formato, porque los
+  // dos issues cross-field aterrizaban en su path. Con la regla y las claves fuera, no hay ninguna
+  // entrada que explicar: no quedo ninguna regla cross-field en el schema.
+  //
+  // Lo que SI se conserva, mas abajo: que ningun valor recibido se filtre al mensaje.
 
   it('names the literal default of the two routing variables whose default it can quote', () => {
     for (const [name, fallback] of [
@@ -245,16 +233,20 @@ describe('toConfigValidationError with the routing variables', () => {
     expect(EXPECTATIONS.PLACEHOLDER_TITLE).toContain('DEFAULT_PLACEHOLDER_TITLE');
   });
 
-  // TS-35. El mapa es la topologia comercial del despliegue: los projectId de todos los clientes
-  // habilitados. Ni un slug ni un projectId puede llegar al reporte por ningun camino.
-  it('never leaks a slug or a projectId into the message or the details', () => {
+  // TS-35 — REESCRITO en S-025 con otra clave, no borrado. La propiedad que afirma es de S-002 y
+  // sigue viva: **ningun valor RECIBIDO llega al reporte por ningun camino**; el mensaje describe
+  // que se esperaba y nada mas. Antes se probaba con el `TICKET_MAP` porque era el peor caso —el
+  // mapa es la topologia comercial del despliegue, los projectId de todos los clientes—, y esa
+  // clave ya no existe. Se prueba con `IMAP_PASSWORD`, que es el peor caso que QUEDA: la unica
+  // variable del servicio cuyo VALOR es un secreto.
+  it('never leaks a received value into the message or the details', () => {
     const err = toConfigValidationError([
       issue('IMAP_HOST'),
-      issue('TICKET_MAP', 'received {"cliente-confidencial":98765}'),
+      issue('IMAP_PASSWORD', 'received app-password-super-secreta-98765'),
     ]);
 
-    expect(err.variables).toEqual(['IMAP_HOST', 'TICKET_MAP']);
-    for (const value of ['cliente-confidencial', '98765']) {
+    expect(err.variables).toEqual(['IMAP_HOST', 'IMAP_PASSWORD']);
+    for (const value of ['app-password-super-secreta', '98765']) {
       expect(err.message, value).not.toContain(value);
       expect(JSON.stringify(err.details), value).not.toContain(value);
     }

@@ -28,10 +28,21 @@ export interface PollConfig {
  * La configuracion del ruteo, entera. Mismo criterio que `imap` y `poll`: el lookup del proyecto
  * (S-013) y el alta del requisito (S-015) reciben cada uno lo que les toca sin recomponerlo.
  *
- * El `ticketMap` llega YA normalizado y validado desde el schema: `loadAppConfig()` no transforma
- * nada, solo compone. Su tipo es `ReadonlyMap` y no `Map`, y ahi esta toda la garantia: el Map real
- * que el schema construye es mutable, y `Object.freeze` no lo congelaria de todas formas. Lo que
- * impide que un consumidor haga `.set()` sin darse cuenta es el tipo del contrato, no el runtime.
+ * # EL `ticketMap` CAMBIO DE DUENO, NO DE TIPO (S-025)
+ *
+ * Sigue siendo un `ReadonlyMap<string, number>` con las claves ya normalizadas a minusculas, y
+ * `routeMail()` sigue haciendo el mismo `Map.get()` sin transformar nada. Lo que cambio es de donde
+ * VIENE: hasta S-024 lo construia el schema desde `TICKET_MAP`/`TICKET_MAP_FILE`; desde S-025 es la
+ * copia en memoria VIVA que `startTicketMapWatch()` mantiene sobre el bucket KV de slugs.
+ *
+ * **Ese Map es EL MISMO OBJETO durante toda la vida del proceso**: el watch lo muta con
+ * `set`/`delete` y nunca lo reemplaza, que es lo que permite que este campo sea una referencia fija
+ * y vea las actualizaciones en caliente sin que nadie reasigne nada. Un `new Map(...)` defensivo, un
+ * spread o un `structuredClone` en el camino romperian esa vivacidad SIN FALLAR EN COMPILACION: el
+ * conector rutearia bien los slugs iniciales y nunca veria uno nuevo.
+ *
+ * El tipo es `ReadonlyMap` y no `Map` por lo mismo que antes: no impide que el DUENO lo mute —el
+ * modulo del watch—, solo impide que lo muten los consumidores, que es exactamente lo que se quiere.
  */
 export interface RuteoConfig {
   ticketMap: ReadonlyMap<string, number>;
@@ -61,8 +72,8 @@ export interface AdjuntosConfig {
  * `Pick`, y con campos sueltos cada firma nueva enumeraria los cuatro.
  *
  * `threadsTtlDays` es el valor ESPERADO, no el que se fija: el conector compara y avisa, nunca
- * escribe limites del stream (CA-8 de S-024). `watchRetryMs` se declara y NO se consume todavia —
- * lo usa S-025.
+ * escribe limites del stream (CA-8 de S-024). `watchRetryMs` lo consume `startTicketMapWatch()`
+ * (S-025): es el intervalo del reintento del watch caido.
  */
 export interface KvConfig {
   ticketsBucket: string;
@@ -186,16 +197,17 @@ export async function loadAppConfig(): Promise<AppConfig> {
       maxPerTick: env.POLL_MAX_PER_TICK,
     },
 
-    // Los cuatro valores salen ENTEROS del env validado, sin `??` ni fallbacks: el schema ya aplico
-    // los defaults y ya construyo el Map normalizado.
+    // Los tres valores restantes salen ENTEROS del env validado, sin `??` ni fallbacks: el schema
+    // ya aplico los defaults.
     ruteo: {
-      // Exactamente una de las dos esta definida — la regla de las dos fuentes en `env.ts` lo
-      // garantiza, y por eso el `??` no necesita un tercer termino. El `new Map()` final es
-      // inalcanzable en runtime y esta solo para el tipo: sin el, TypeScript ve `... | undefined`
-      // porque las dos claves son opcionales a nivel de schema (su obligatoriedad es cross-field y
-      // el tipo no la puede expresar). NO se re-valida la regla aca: una segunda comprobacion se
-      // desincroniza de la primera, y el compositor no valida nada por diseno.
-      ticketMap: env.TICKET_MAP ?? env.TICKET_MAP_FILE ?? new Map<string, number>(),
+      // EL MAPA NO VIENE DEL ENTORNO (S-025). `loadAppConfig()` corre en el paso 1 del arranque,
+      // mucho antes de que exista una conexion al bus, asi que NO PUEDE tener el mapa del KV: la
+      // copia viva la produce `startTicketMapWatch()` en el paso 5.6, y `runStartup()` construye el
+      // `AppConfig` FINAL con ella (ver `withTicketMap()` abajo).
+      //
+      // Este `Map` vacio es el valor del config PARCIAL que sale de aca. No es un default
+      // "razonable" del mapa y no hay ninguno: el mapa ya no es configuracion del proceso.
+      ticketMap: new Map<string, number>(),
       subaddressPrefix: env.SUBADDRESS_PREFIX,
       placeholderTitle: env.PLACEHOLDER_TITLE,
       placeholderBody: env.PLACEHOLDER_BODY,
@@ -220,4 +232,33 @@ export async function loadAppConfig(): Promise<AppConfig> {
       watchRetryMs: env.KV_WATCH_RETRY_MS,
     },
   };
+}
+
+/**
+ * Compone el `AppConfig` FINAL con el Mapa de Tickets vivo del KV.
+ *
+ * Es la mitad que le falta a `loadAppConfig()`: el mapa no puede existir todavia cuando la
+ * configuracion se valida (paso 1), porque viene de un bucket que se abre sobre una conexion que
+ * todavia no existe (paso 5.5). `runStartup()` llama a esta funcion en el paso 5.6, con el `Map`
+ * que `startTicketMapWatch()` acaba de poblar.
+ *
+ * # POR QUE SE CONSTRUYE Y NO SE ASIGNA
+ *
+ * La alternativa era mutar `config.ruteo.ticketMap` despues de armar el config. Se descarto: el
+ * `AppConfig` es un valor que el resto del servicio trata como inmutable una vez armado, y una
+ * asignacion tardia hace que un `readonly` mal puesto o un clon intermedio rompan la vivacidad del
+ * mapa **sin fallar en compilacion**. Construirlo hace que `config.ruteo.ticketMap` NAZCA apuntando
+ * al `Map` vivo y que nadie lo reasigne nunca.
+ *
+ * # LA REGLA DURA
+ *
+ * El `ticketMap` se propaga **POR REFERENCIA**. Ningun `new Map(ticketMap)`, ningun spread, ninguna
+ * copia defensiva: la copia quedaria congelada en el estado del arranque y el conector no veria
+ * nunca un slug agregado en caliente — el valor central de S-025 fallando en silencio.
+ */
+export function withTicketMap(
+  config: AppConfig,
+  ticketMap: ReadonlyMap<string, number>,
+): AppConfig {
+  return { ...config, ruteo: { ...config.ruteo, ticketMap } };
 }

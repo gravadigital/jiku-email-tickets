@@ -1,7 +1,3 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { LoadedConfig } from '@gravadigital/jiku/node';
@@ -402,30 +398,22 @@ describe('loadAppConfig IMAP and poll blocks', () => {
 });
 
 describe('loadAppConfig routing block', () => {
-  const dirs: string[] = [];
-
-  function tempFile(content: string): string {
-    const dir = mkdtempSync(join(tmpdir(), 'jiku-ticket-map-'));
-    dirs.push(dir);
-    const path = join(dir, 'mapa.json');
-    writeFileSync(path, content, 'utf8');
-    return path;
-  }
-
-  afterEach(() => {
-    while (dirs.length > 0) {
-      const dir = dirs.pop();
-      if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  // S-025 se llevo el andamiaje de archivos temporales que existia SOLO para `TICKET_MAP_FILE`:
+  // sin esa variable no hay ningun archivo que este bloque tenga que escribir ni limpiar.
 
   // TS-28. Llega ENTERO y anidado, con el mismo criterio con que ya llegan `imap` y `poll`: el
   // consumidor recibe su configuracion completa y no cuatro campos sueltos que tenga que recomponer.
-  it('exposes the whole routing block, with the map already normalized', async () => {
+  //
+  // REESCRITO EN S-025: la propiedad que este caso defiende —el bloque llega COMPLETO— sigue viva y
+  // sigue afirmada. Lo que ya no puede afirmar es el CONTENIDO del `ticketMap`, porque
+  // `loadAppConfig()` dejo de construirlo: sale vacio de aca y lo llena el watch del KV en el paso
+  // 5.6 del arranque. Su contenido se afirma ahora en `test/infra/kv/ticket-map.test.ts`, contra el
+  // bucket real.
+  it('exposes the whole routing block, with an empty map to be filled by the watch', async () => {
     loadConfigMock.mockResolvedValue(sdkResult());
     const { loadAppConfig } = await import('#config/index.js');
 
-    await withEnv({ ...VALID_ENV, TICKET_MAP: '{"Alfa":42,"BETA":7}' }, async () => {
+    await withEnv({ ...VALID_ENV }, async () => {
       const config = await loadAppConfig();
 
       expect(Object.keys(config.ruteo).sort()).toEqual([
@@ -434,27 +422,14 @@ describe('loadAppConfig routing block', () => {
         'subaddressPrefix',
         'ticketMap',
       ]);
+      // Sigue siendo un Map y sigue siendo el tipo que `routeMail()` consume sin transformar.
       expect(config.ruteo.ticketMap).toBeInstanceOf(Map);
-      expect(config.ruteo.ticketMap.get('alfa')).toBe(42);
-      expect(config.ruteo.ticketMap.get('beta')).toBe(7);
+      // Vacio, y eso es correcto: el Mapa de Tickets no puede existir antes de que haya conexion.
+      expect(config.ruteo.ticketMap.size).toBe(0);
       expect(config.ruteo.subaddressPrefix).toBe('tickets');
       expect(config.ruteo.placeholderTitle).toBe('Ticket recibido por mail');
       expect(config.ruteo.placeholderBody).toBe('(mail sin contenido)');
     });
-  });
-
-  it('takes the map from the file source when that is the declared one', async () => {
-    loadConfigMock.mockResolvedValue(sdkResult());
-    const { loadAppConfig } = await import('#config/index.js');
-
-    await withEnv(
-      { ...VALID_ENV, TICKET_MAP: undefined, TICKET_MAP_FILE: tempFile('{"Alfa":42}') },
-      async () => {
-        const config = await loadAppConfig();
-
-        expect(config.ruteo.ticketMap.get('alfa')).toBe(42);
-      },
-    );
   });
 
   it('carries the three configured routing values through unchanged', async () => {
@@ -485,45 +460,15 @@ describe('loadAppConfig routing block', () => {
     loadConfigMock.mockResolvedValue(sdkResult());
     const { loadAppConfig } = await import('#config/index.js');
 
-    await withEnv({ ...VALID_ENV, JIKU_CREDS: undefined, TICKET_MAP: 'roto' }, async () => {
+    // S-025: la lista agregada se arma ahora con dos variables que SIGUEN existiendo. La propiedad
+    // afirmada no cambio —se valida todo y recien despues se toca el SDK—, solo el ejemplo.
+    await withEnv({ ...VALID_ENV, JIKU_CREDS: undefined, POLL_MAX_PER_TICK: '0' }, async () => {
       await expect(loadAppConfig()).rejects.toMatchObject({
-        variables: ['JIKU_CREDS', 'TICKET_MAP'],
+        variables: ['JIKU_CREDS', 'POLL_MAX_PER_TICK'],
       });
     });
 
     expect(loadConfigMock).not.toHaveBeenCalled();
   });
 
-  // TS-31. CA-11: sin recarga en caliente. El archivo se lee UNA vez al arrancar; cambiarlo en disco
-  // con el proceso vivo no toca el Map en memoria, y hace falta un redeploy.
-  it('does not reload the map when the file changes after startup', async () => {
-    loadConfigMock.mockResolvedValue(sdkResult());
-    const { loadAppConfig } = await import('#config/index.js');
-    const path = tempFile('{"alfa":42}');
-
-    await withEnv({ ...VALID_ENV, TICKET_MAP: undefined, TICKET_MAP_FILE: path }, async () => {
-      const config = await loadAppConfig();
-
-      expect(config.ruteo.ticketMap.get('alfa')).toBe(42);
-
-      writeFileSync(path, '{"alfa":999,"nuevo":7}', 'utf8');
-
-      // El Map en memoria es el mismo: ni el valor cambio ni entro la entrada nueva.
-      expect(config.ruteo.ticketMap.get('alfa')).toBe(42);
-      expect(config.ruteo.ticketMap.has('nuevo')).toBe(false);
-      expect(config.ruteo.ticketMap.size).toBe(1);
-    });
-  });
-
-  // Un mapa vacio declarado compone igual: el bloque llega entero, con el Map vacio (CA-8).
-  it('composes an empty map into the block without failing', async () => {
-    loadConfigMock.mockResolvedValue(sdkResult());
-    const { loadAppConfig } = await import('#config/index.js');
-
-    await withEnv({ ...VALID_ENV, TICKET_MAP: '{}' }, async () => {
-      const config = await loadAppConfig();
-
-      expect(config.ruteo.ticketMap.size).toBe(0);
-    });
-  });
 });

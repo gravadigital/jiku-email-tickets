@@ -5,7 +5,7 @@ type: event
 status: Active
 created: 2026-08-27
 last_updated: 2026-09-08
-stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024]
+stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024, S-025]
 ---
 
 # Arranque y Conexión al Bus
@@ -19,8 +19,10 @@ prefijo y los placeholders. S-016 implementada: el documento estaba completo des
 reescribe ningún paso de contenido — y S-016 cierra el estado formal: `Status` pasa de `Draft` a
 `Active` y se suman las stories del feature group que lo cerró. S-024 implementada: el Paso 5.5
 —abrir y verificar los dos buckets del KV sobre la conexión ya establecida— entra entre conectar al
-bus y schedular el tick, con sus filas en la tabla de errores)
-**Stories:** S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024
+bus y schedular el tick, con sus filas en la tabla de errores. S-025 implementada: el Paso 5.6 carga
+el Mapa de Tickets desde el bucket y lo sigue con `watch()`; el Paso 1 deja de validarlo y pierde su
+única regla cross-field)
+**Stories:** S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024, S-025
 
 ## Descripción
 
@@ -81,6 +83,9 @@ sequenceDiagram
                     else existe
                         MC-->>MC: compara el TTL del de hilos (warn si difiere, arranca igual)
                         MC-->>MC: buckets del KV abiertos y verificados
+                        MC->>BUS: status() + watch() del bucket de slugs
+                        BUS-->>MC: carga inicial (0..N entradas) y despues las novedades
+                        MC-->>MC: Mapa de Tickets en memoria; el watch queda corriendo
                     end
                 end
             end
@@ -143,32 +148,33 @@ filesystem y CA-2 exige fallar sin intentar nada antes.
 | `POLL_CRON` | No | `*/5 * * * *` |
 | `POLL_ENABLED` | No | `true` |
 | `POLL_MAX_PER_TICK` | No | `50` |
-| `TICKET_MAP` | **Condicional** (una de las dos) | — |
-| `TICKET_MAP_FILE` | **Condicional** (una de las dos) | — |
 | `SUBADDRESS_PREFIX` | No | `tickets` |
 | `PLACEHOLDER_TITLE` | No | `Ticket recibido por mail` |
 | `PLACEHOLDER_BODY` | No | `(mail sin contenido)` |
+| `KV_TICKETS_BUCKET` | No | `TICKETS` |
+| `KV_THREADS_BUCKET` | No | `MAIL_THREADS` |
+| `KV_THREADS_TTL_DAYS` | No | `90` |
+| `KV_WATCH_RETRY_MS` | No | `30000` |
 
 Las de **IMAP ya se declaran y son requeridas** (S-007): con la ingesta en alcance dejaron de ser
-opcionales, y esto **supera el criterio 5 de REQ-001**. Con S-012 **ya no queda nada afuera**: las
-cinco del ruteo se validan en este mismo paso, y el Mapa de Tickets pasó a ser **requerido**
-(supersede el criterio 40 de REQ-002).
+opcionales, y esto **supera el criterio 5 de REQ-001**. S-024 sumó las cuatro del KV.
 
-**La validación cruzada de las dos fuentes del mapa.** `TICKET_MAP` (inline) y `TICKET_MAP_FILE`
-(archivo montado) son **excluyentes**: exactamente una tiene que estar declarada. Ninguna → no
-arranca; las dos → tampoco, porque elegir una en silencio dejaría a U-02 editando la que no tiene
-efecto. Es la única regla **cross-field** de todo el schema, y por eso no vive en una clave: vive en
-el `createFinalSchema` de `src/config/env.ts`.
+**El Mapa de Tickets ya no se valida acá, y su regla cross-field desapareció (S-025).** Hasta S-024
+este paso validaba `TICKET_MAP` / `TICKET_MAP_FILE` —dos fuentes **excluyentes**, la única regla
+cross-field de todo el schema— y **leía el archivo del mapa desde adentro de la validación**, con lo
+que el schema tocaba el filesystem. Nada de eso existe más: el mapa vive en un bucket KV y se carga
+en el **Paso 5.6**, sobre la conexión al bus. Este paso volvió a ser una validación de variables
+sueltas, sin ninguna regla entre claves y sin tocar el disco.
 
-**La lectura del archivo ocurre DENTRO de la validación del schema**, en el `.transform()` de
-`TICKET_MAP_FILE`, y no después de `loadEnvFromProcess()`. La razón es la lista única: si la carga
-ocurriera después, un despliegue sin `IMAP_HOST` y con el archivo del mapa roto informaría **dos
-veces, en dos formatos distintos** — que es exactamente lo que este paso existe para evitar. La
-consecuencia aceptada es que la validación del schema deja de ser pura y toca el **filesystem**: es
-la misma clase de excepción que `POLL_CRON` ya hace llamando a `cron.validate()` en el arranque, y
-por la misma razón. La lectura es **sincrónica** (`readFileSync`) porque el schema de `createEnv` no
-admite refinements asincrónicos, y ocurre **una sola vez al arrancar**, antes de que exista ningún
-trabajo concurrente.
+Las tres consecuencias de esa eliminación:
+
+1. **`createFinalSchema` desapareció de `src/config/env.ts`.** Existía **sólo** para hospedar esa
+   regla; sin ella, `createEnv` vuelve a validar por su camino normal (ver el hallazgo de abajo, que
+   sigue siendo la razón por la que la lista sale completa).
+2. **La validación del schema volvió a ser pura**: ya no hay `readFileSync` en el camino, ni la
+   excepción de "el schema toca el filesystem" que había que justificar.
+3. **El fail-fast del mapa no se perdió, se mudó**: un bucket inexistente impide el arranque en el
+   Paso 5.5, con un error que nombra el bucket. Lo que cambió es *cuándo* falla y *qué* nombra.
 
 `POLL_CRON` se valida con **`cron.validate()` de `node-cron`, en el arranque** — no al schedular.
 Sin esa validación temprana, un cron mal formado explotaría recién en `cron.schedule()` (Paso 8, ya
@@ -182,41 +188,34 @@ sobre `z.enum(['true','false'])`, y un valor que no sea uno de los dos **no arra
 La configuración del bus se lee con `loadConfig()` del SDK, invocado **dentro de `src/config/`** para
 no duplicar sus defaults ni romper el punto de lectura único.
 
-> **Implementado en S-012.** El paso quedó como lo describe la acción, con **un hallazgo que vale la
-> pena dejar registrado** porque es contraintuitivo y le ahorra el descubrimiento a la próxima story
-> que toque el módulo.
+> **Implementado en S-012, y ACOTADO en S-025.** El hallazgo de abajo sigue vigente y es la razón
+> por la que la lista de errores sale completa; lo que S-025 eliminó es el caso que lo hacía difícil.
 >
 > **`createEnv` no valida un `z.object()`, y eso decide dónde puede vivir cada validación.** La
 > librería recorre el schema como un **diccionario plano de shapes** (`parseWithDictionary()`),
 > validando cada clave por separado y **acumulando** todos los issues antes de invocar
 > `onValidationError` una sola vez. Eso es lo que hace que un `IMAP_HOST` ausente y un
-> `TICKET_MAP_FILE` roto salgan juntos: sale gratis, por construcción, siempre que la validación
-> viva **en una clave**.
+> `POLL_MAX_PER_TICK` inválido salgan juntos: sale gratis, por construcción, siempre que la
+> validación viva **en una clave**. Desde S-025 **todas** viven en una clave, así que se obtiene
+> gratis siempre.
 >
-> **La trampa está en la regla cross-field.** El diseño de REQ-003 decía "un `superRefine` sobre el
-> objeto parseado" para la regla de las dos fuentes. Escrito de la forma obvia —
-> `z.object(shape).superRefine(...)` dentro de `createFinalSchema`— **rompe la lista única en
-> silencio**: Zod **no corre el refinement si alguna clave del objeto ya falló**, así que en el caso
-> que más importa (falta una variable del bus **y** el mapa no está declarado) el issue del mapa
-> **nunca aparece**, y el operador arregla una cosa para descubrir la otra en la corrida siguiente.
-> `.check()` se comporta igual. Verificado empíricamente contra `@t3-oss/env-core@0.13.11` y
-> `zod@4.4.3`, no inferido de la documentación.
+> **La trampa que ya no aplica, y que conviene dejar escrita para que nadie la reintroduzca.** Hasta
+> S-024 había una regla genuinamente **cross-field** (las dos fuentes del mapa). Escrita de la forma
+> obvia —`z.object(shape).superRefine(...)`— **rompe la lista única en silencio**: Zod **no corre el
+> refinement si alguna clave del objeto ya falló**, así que en el caso que más importa (falta una
+> variable del bus **y** el mapa no está declarado) el issue del mapa **nunca aparece**, y el
+> operador arregla una cosa para descubrir la otra en la corrida siguiente. `.check()` se comporta
+> igual. Verificado empíricamente contra `@t3-oss/env-core@0.13.11` y `zod@4.4.3`.
 >
-> **La forma que sí cumple es un híbrido.** Las seis formas de mapa mal formado viven en las claves,
-> como `.transform()` con `ctx.addIssue()`, y se agregan solas. **Sólo** la regla de las dos fuentes
-> —que es genuinamente cross-field— vive en `createFinalSchema`, implementada como un **Standard
-> Schema propio** que corre el `safeParse()` del objeto **y además** la regla, y **concatena las dos
-> listas de issues siempre**, sin cortar. Hay un test que lo protege
-> (`test/config/env.test.ts` → *reports the absent map together with a missing bus variable*): falla
-> con la implementación ingenua y pasa con esta, que es la única forma de saber que el test protege
-> lo que dice proteger.
+> Aquello se resolvió con un `createFinalSchema` que corría el objeto y la regla por separado y
+> concatenaba las dos listas sin cortar. **S-025 lo eliminó entero**, porque al mudarse el mapa al
+> KV el schema se quedó sin ninguna regla cross-field que hospedar.
 >
-> **Un detalle de tipos que sorprende:** con `createFinalSchema` declarado, la librería **deja de
-> usar `parseWithDictionary()`** y delega la validación entera en ese schema — así que hay que
-> reponer ahí lo que aquella función hacía (acumular con la clave como primer segmento del `path`).
-> `z.object()` ya hace las dos cosas; alcanza con no cortar después.
+> **Si alguna vez hace falta agregar una regla entre claves, este es el problema que va a aparecer**,
+> y la solución conocida es esa: un Standard Schema propio que no corte. No se conserva el código
+> "por las dudas" —código sin usuario se pudre— pero sí el diagnóstico, que es la parte cara.
 
-**Ref:** S-002, S-007, S-012; ADR-002, ADR-004; convención `env-config`
+**Ref:** S-002, S-007, S-012, S-025; ADR-002, ADR-004; convención `env-config`
 
 ---
 
@@ -484,6 +483,69 @@ el del Mapa de Tickets (`KV_TICKETS_BUCKET`, por default `TICKETS`) y el del Map
 
 ---
 
+### Paso 5.6: Cargar el Mapa de Tickets y seguirlo con `watch()`
+
+**Origen:** `jiku-mail-connector`
+**Destino:** Bus NATS (JetStream)
+**Tipo:** Operación del bus
+
+**Operación:** `startTicketMapWatch()` sobre el handle del bucket de slugs que abrió el Paso 5.5:
+espera la **carga inicial completa** y deja corriendo un `watch()` que mantiene la copia en memoria
+actualizada por el resto de la vida del proceso.
+
+**Ref:** S-025; ADR-004; REQ-005
+
+> **Implementado en S-025.** Es el paso que hace que agregar un proyecto **no necesite un redeploy**:
+> un `nats kv put` sobre el bucket aparece en el ruteo en segundos.
+>
+> **El arranque ESPERA la carga inicial completa**, y no es una preferencia: schedular el primer tick
+> con el mapa a medio llenar haría que los mails de un slug que sí está cargado se descarten como
+> `slug_no_mapeado`. Un descarte es definitivo —el mail queda `\Seen`— así que la ventana no se
+> puede tolerar.
+>
+> **Cinco hallazgos verificados empíricamente** contra `nats:2.11-alpine` con `-js` y
+> `@nats-io/kv@3.4.0`. Cada uno invalida una implementación que parece obviamente correcta, así que
+> valen más escritos que redescubiertos:
+>
+> **1. Un bucket VACÍO no emite NUNCA ningún entry, y esperar uno cuelga el arranque para siempre.**
+> Es la trampa central. `watch()` marca el fin de la carga inicial con `isUpdate`, pero con cero
+> entradas **el callback no se invoca jamás**. Una espera escrita como *"resolver cuando llegue el
+> primer entry con `isUpdate: true`"* **no resuelve nunca** contra un bucket vacío: el proceso queda
+> vivo, sin loguear, sin schedular el tick y sin morirse — **sin ningún síntoma**. Y un bucket vacío
+> es el estado del **primer arranque de todo despliegue nuevo**. La solución es consultar
+> `status().values` **antes** de arrancar el watch: con `0`, la carga inicial está completa por
+> definición.
+>
+> **2. El ÚLTIMO entry de la carga inicial ya trae `isUpdate: true`.** Con tres entradas se emite
+> `false, false, true`. Por eso el orden es **aplicar primero, resolver después**: un
+> `if (entry.isUpdate) resolver()` colocado antes de aplicar se saltearía la última entrada.
+>
+> **3. Cuando el watch se cae, el `for await` TERMINA NORMALMENTE — no lanza.** La librería empuja un
+> centinela que termina el iterador limpiamente, así que un `try { for await } catch { reintentar }`
+> **no detecta la caída más común**: el loop sale por la puerta de adelante y nadie reintenta. La
+> detección va **después** del loop, en el camino normal.
+>
+> **4. Un `delete` llega como `operation: 'DEL'`, con el valor VACÍO.** Aplicar todo como `set()`
+> deja un slug borrado por el operador ruteando para siempre; y parsear el valor antes de mirar la
+> operación produce un `NaN`.
+>
+> **5. `entry.json()` LANZA** con un valor cargado a mano que no sea JSON válido. Un dato malo no
+> debe matar el watch entero, así que el parseo es propio y tolerante: la entrada inválida se
+> **ignora con un `warn` que nombra la clave** y las demás siguen funcionando.
+>
+> **Si el watch se cae, el mapa NO se vacía.** Se conserva la última copia buena y se reintenta cada
+> `KV_WATCH_RETRY_MS`; lo que se pierde son las actualizaciones, no el ruteo. Vaciarlo dejaría de
+> rutear mails que se podían rutear perfectamente, convirtiendo una caída del bus en pérdida de
+> tickets.
+>
+> **El `Map` es el MISMO objeto durante toda la vida del proceso.** El watch lo muta con
+> `set`/`delete` y **nunca lo reemplaza**, que es lo que permite que `config.ruteo.ticketMap` sea una
+> referencia fija y vea las actualizaciones. Un `new Map(...)` defensivo, un spread o un
+> `structuredClone` en el camino romperían la vivacidad **sin fallar en compilación**: el conector
+> rutearía bien los slugs iniciales y no vería ninguno nuevo, nunca.
+
+---
+
 ### Paso 6: Jiku crea la fila del conector en `users` (efecto lateral)
 
 **Origen:** Bus NATS (auth-callout)
@@ -583,6 +645,9 @@ cancelarlo nunca**) → `await closeBus()` → `process.exit(0)`.
 | 5.5 | Nombre de bucket inválido en la configuración | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: nombre_de_bucket_invalido`. Se detecta **antes** de cualquier I/O, así que el diagnóstico es positivo y no por descarte | **No arranca**, exit ≠ 0 |
 | 5.5 | Cualquier otro fallo del KV | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: desconocido`, la clase del error y la cadena de causas, **sin mapearse a otra causa** | **No arranca**, exit ≠ 0 |
 | 5.5 | El TTL del bucket de hilos **difiere** del configurado | — | Log `warn` con `bucket`, `expectedTtlDays` y `actualTtlMs` | **Arranca igual.** Un TTL distinto no rompe el ruteo: sólo cambia la ventana, y una entrada expirada degrada a `hilo_desconocido`, que es una falla segura. El conector **no** lo fija |
+| 5.6 | El `watch()` del Mapa de Tickets no se puede dar de alta | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con el bucket y la operación | **No arranca**, exit ≠ 0. Sin el mapa no se puede rutear nada |
+| 5.6 | Una entrada del bucket tiene un valor inválido (no es un entero positivo) | — | Log `warn` que **nombra la clave** | **Arranca igual** y la entrada se **ignora**. Un dato malo cargado a mano no debe dejar sin ruteo a los demás proyectos, y con el mapa en el KV ya no hay un "momento de carga" en el que fallar |
+| 5.6 | El `watch()` se cae con el proceso vivo | — | Log `warn` con el bucket y el intervalo de reintento | **El proceso NO muere.** El mapa **conserva la última copia buena** y el ruteo sigue; se reintenta cada `KV_WATCH_RETRY_MS`. Lo que se pierde son las **actualizaciones**, no el mapa |
 | 6 | Se pierde el evento del auth-callout | — | — | El conector queda sin fila en `users` hasta su próxima autenticación. Reconectar lo resuelve. **Dependencia declarada del producto, no un bug del conector** |
 | 7 | Falla el refresh del token | — | Log `error` con `diagnosis: refresh_del_token_fallo`, la clase del SDK y la cadena de causas | **El proceso NO muere** (NFR-R04). El token vigente sigue sirviendo |
 

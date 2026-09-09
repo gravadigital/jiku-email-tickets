@@ -84,7 +84,12 @@ const VALID_ENV = {
  * BAJARON DE OCHO A SIETE al volverse OPCIONAL `JIKU_VERIFY_PROJECT_ID`: la lee un solo consumidor
  * (`src/verify.ts`), y el worker no la toca, asi que exigirsela a todo despliegue obligaba a
  * declarar un proyecto de prueba para correr un proceso que no lo usa. El fail-fast no se perdio,
- * se mudo a `requireVerifyProjectId()` en ese script. Es la primera vez que esta lista ENCOGE.
+ * se mudo a `requireVerifyProjectId()` en ese script. Fue la primera vez que esta lista ENCOGIO.
+ *
+ * Y BAJARON DE SIETE A SEIS en S-025, la segunda vez: `TICKET_MAP` ya no se declara en ningun lado
+ * porque el Mapa de Tickets se mudo a un bucket KV del bus. El fail-fast tampoco se perdio —se mudo
+ * al arranque, que falla nombrando el bucket si no existe (S-024)—, pero ya no es un fallo de
+ * VALIDACION DE ENTORNO, que es lo que esta lista enumera.
  */
 const REQUIRED_VARIABLES = [
   'JIKU_CREDS',
@@ -93,7 +98,6 @@ const REQUIRED_VARIABLES = [
   'IMAP_HOST',
   'IMAP_USER',
   'IMAP_PASSWORD',
-  'TICKET_MAP',
 ];
 
 interface RunResult {
@@ -298,7 +302,7 @@ describe('the production image', () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('la configuracion es invalida');
-    // Los CUATRO nombres, no el primero que encontro: quien despliega tiene que poder arreglar
+    // Los SEIS nombres, no el primero que encontro: quien despliega tiene que poder arreglar
     // todo de una vez en lugar de descubrirlos de a uno por reinicio.
     for (const name of REQUIRED_VARIABLES) {
       expect(result.stderr).toContain(name);
