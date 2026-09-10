@@ -5,6 +5,7 @@ import type { AdjuntosConfig } from '#config/index.js';
 import { procesarAdjuntos } from '#domain/adjuntos/procesar.js';
 import type { AdjuntoAceptado, AdjuntoRechazado } from '#domain/adjuntos/types.js';
 import type { MailAttachment } from '#domain/ingesta/types.js';
+import { lookupAttachmentByChecksum as lookupAttachmentByChecksumReal } from '#domain/publicacion/lookup-attachment.js';
 import { requestFileUpload as requestFileUploadReal } from '#domain/publicacion/upload-file.js';
 import { uploadFileContent as uploadFileContentReal } from '#domain/publicacion/upload-byte.js';
 
@@ -52,6 +53,23 @@ export interface ProcesamientoAdjuntosResultado {
   readonly placeholders: string[];
 }
 
+/**
+ * El contexto del hilo, cuando el mail ES una respuesta con match (S-029).
+ *
+ * OBJETO Y NO UN `requirementId?: number` SUELTO, y es la decision que hace CA-5 ESTRUCTURAL en
+ * vez de una convencion que alguien puede violar sin que nada falle: un objeto se pasa COMPLETO O
+ * NO SE PASA. `{ requirementId: undefined }` NO ES REPRESENTABLE — y si lo fuera, compilaria,
+ * pasaria los tipos, y produciria una consulta con `entityId: undefined` que `core` rechazaria con
+ * `invalid_fields` en CADA adjunto de CADA respuesta.
+ *
+ * Sin campos opcionales, y sin que crezca: si una story futura necesita mas contexto del hilo, que
+ * lo agregue como campo REQUERIDO o en otro tipo.
+ */
+export interface ContextoHilo {
+  /** El `requirementId` que devolvio `lookupThread()`. Es el `entityId` de la consulta de reuso. */
+  readonly requirementId: number;
+}
+
 export interface ProcesarAdjuntosDelMailDeps {
   /** El cliente conectado. El mismo que ya usa `publishRequirementFromMail()`. */
   readonly client: Client;
@@ -66,6 +84,13 @@ export interface ProcesarAdjuntosDelMailDeps {
   readonly requestFileUpload?: typeof requestFileUploadReal;
   /** Igual que `requestFileUpload`, para `uploadFileContent()` (S-019). */
   readonly uploadFileContent?: typeof uploadFileContentReal;
+  /**
+   * Igual que las dos de arriba, y por la misma razon: el default es la implementacion real y los
+   * tests inyectan un doble. Pero aca hay una razon EXTRA — la implementacion real NUNCA LANZA
+   * (S-029, CA-11), asi que el UNICO modo de ejercitar el `try/catch` de programacion del `for`
+   * con un fallo de la consulta es inyectar un doble que lance deliberadamente.
+   */
+  readonly lookupAttachmentByChecksum?: typeof lookupAttachmentByChecksumReal;
 }
 
 /**
@@ -103,12 +128,65 @@ function placeholderPara(adjunto: Pick<AdjuntoAceptado, 'mimeType'>, fileId: num
 async function procesarUnoAceptado(
   adjunto: AdjuntoAceptado,
   config: Pick<AdjuntosConfig, 'putTimeoutMs'>,
-  { client, logger, requestFileUpload = requestFileUploadReal, uploadFileContent = uploadFileContentReal }: ProcesarAdjuntosDelMailDeps,
+  {
+    client,
+    logger,
+    requestFileUpload = requestFileUploadReal,
+    uploadFileContent = uploadFileContentReal,
+    lookupAttachmentByChecksum = lookupAttachmentByChecksumReal,
+  }: ProcesarAdjuntosDelMailDeps,
+  hilo?: ContextoHilo,
 ): Promise<
   | { readonly resultado: 'subido'; readonly fileId: number; readonly placeholder: string }
   | { readonly resultado: 'rechazado'; readonly aviso: string }
   | { readonly resultado: 'fallido'; readonly aviso: string }
 > {
+  // ==== LA CONSULTA DE REUSO (S-029) ====
+  //
+  // SIN CONTEXTO DE HILO NO SE CONSTRUYE NADA, y eso es TODO el mecanismo de CA-5: la rama del
+  // alta invoca `procesarAdjuntosDelMail()` sin el cuarto argumento, asi que `hilo` es `undefined`
+  // y este bloque no existe para ella. NO HAY un `if (esRespuesta)` ni un flag de configuracion —
+  // el "no consultar" del alta es ESTRUCTURAL, no una evaluacion.
+  //
+  // VA ACA, DENTRO de `procesarUnoAceptado()` y por lo tanto DENTRO del `for`, y esa posicion es
+  // lo que hace verdaderos CUATRO criterios SIN UNA LINEA DE CODIGO NUEVO:
+  //
+  // - CA-4: `deduplicar()` ya colapso las repeticiones. Una consulta por checksum SOBREVIVIENTE.
+  // - CA-7: `aplicarTope()` ya recorto a 10. Los excedentes NO PAGAN CONSULTA.
+  // - CA-9: el `for` solo itera `aceptados`. Un rechazado por la politica local NO CONSULTA.
+  // - CA-18: el `for` ya es serie. La consulta hereda la serie, sin `Promise.all`.
+  //
+  // Y va ANTES del permiso porque el reuso EXISTE para no pedirlo.
+  if (hilo !== undefined) {
+    const reuso = await lookupAttachmentByChecksum(
+      { adjunto, requirementId: hilo.requirementId },
+      { client, logger },
+    );
+
+    if (reuso.tipo === 'reusado') {
+      // CORTA EL CICLO: no hay `files.request-upload` y no hay `PUT`. Ni una fila nueva en
+      // `files`, ni un objeto nuevo en el storage.
+      //
+      // EL RESULTADO TIENE LA MISMA FORMA QUE UN SUBIDO, Y ESO ES DELIBERADO: el reuso entra en
+      // `fileIds` y en `placeholders` por EL MISMO CANAL, sin ninguna rama nueva en el acumulador
+      // del `for`. Y el placeholder lo emite `placeholderPara()`, LA MISMA funcion que usa el
+      // camino del subido — por eso un reuso de un `image/*` deja `![attach:N]` y uno de un PDF
+      // deja `[attach:N]`, sin que nadie lo repita.
+      //
+      // `lookupAttachmentByChecksum()` YA LOGUEO su resultado: aca no se emite una segunda linea
+      // (ADR-006: una sola linea de resultado por evento).
+      return {
+        resultado: 'subido',
+        fileId: reuso.fileId,
+        placeholder: placeholderPara(adjunto, reuso.fileId),
+      };
+    }
+
+    // `reuso.tipo === 'sin_match'`: SE CAE AL CICLO ACTUAL COMPLETO, sin rama propia. Y esto
+    // cubre DOS situaciones que el llamador NO PUEDE DISTINGUIR a proposito: "pregunte y no hay"
+    // (CA-2) y "no pude preguntar" (CA-6). No tiene nada distinto que hacer con cada una.
+  }
+
   // Permiso de subida. `requestFileUpload()` ya logueo internamente su propio rechazo (`warn` +
   // `code`) o fallo (`error`) -- esta funcion NO vuelve a loguearlos (evita la linea duplicada).
   const permiso = await requestFileUpload(
@@ -166,7 +244,15 @@ export async function procesarAdjuntosDelMail(
   attachments: readonly MailAttachment[],
   config: Pick<AdjuntosConfig, 'allowedExtensions' | 'allowedMimeTypes' | 'maxSizeBytes' | 'putTimeoutMs'>,
   deps: ProcesarAdjuntosDelMailDeps,
+  /**
+   * El contexto del hilo, SOLO cuando el mail es una respuesta con match (S-029). Va AL FINAL y es
+   * OPCIONAL para que las llamadas de tres argumentos —la rama del alta del tick— sigan
+   * compilando sin tocarse: su ausencia ES el mecanismo de CA-5.
+   */
+  hilo?: ContextoHilo,
 ): Promise<ProcesamientoAdjuntosResultado> {
+  // `procesarAdjuntos()` corre ANTES de cualquier consulta, y ese orden es lo que hace CA-4 (el
+  // dedup se aplica primero) y CA-7 (el tope no paga consulta) verdaderos SIN CODIGO NUEVO.
   const { aceptados, rechazados } = procesarAdjuntos(attachments, config);
 
   const fileIds: number[] = [];
@@ -185,7 +271,7 @@ export async function procesarAdjuntosDelMail(
   // fallido: el `for` solo itera sobre `aceptados`, que ya excluye los excedentes (CA-5).
   for (const adjunto of aceptados) {
     try {
-      const resultado = await procesarUnoAceptado(adjunto, config, deps);
+      const resultado = await procesarUnoAceptado(adjunto, config, deps, hilo);
 
       if (resultado.resultado === 'subido') {
         fileIds.push(resultado.fileId);

@@ -63,7 +63,8 @@ worker en node
   [mapa-de-hilos-en-kv](../../flows/mapa-de-hilos-en-kv.md).
 - **publicacion** — Los TRES comandos de escritura al bus via el SDK: `files.request-upload`,
   `requirements.new` y —desde S-027— `requirements.{id}.comment`. El `PUT` del byte del adjunto a la
-  URL prefirmada que devuelve `core`.
+  URL prefirmada que devuelve `core`. Y —desde S-029— **UNA consulta de lectura**:
+  `attachments.list`.
   **Estado (S-005 a S-022):** `requirements.new` esta **implementado** de punta a punta —schema Zod
   del contrato, publicacion con `client.command()` y la traduccion de las 9 ramas de diagnostico del
   SDK al sistema que rechazo (S-005)— con **dos disparadores** desde S-015: el modo de verificacion
@@ -84,6 +85,33 @@ worker en node
   un comentario interno no lo veria el cliente— con sus adjuntos por la misma politica, y REUSANDO
   la traduccion de errores sin agregarle ramas. Documentado en
   [publicacion-requirements-comment](../../flows/publicacion-requirements-comment.md).
+
+  **S-029 abre el PLANO DE CONSULTAS, y es el primer cambio de este servicio que deroga una regla
+  de una ADR.** El modulo hace ahora **una consulta de lectura**, `attachments.list`, desde un unico
+  archivo (`src/domain/publicacion/lookup-attachment.ts`, `lookupAttachmentByChecksum()`): cuando una
+  respuesta matchea el Mapa de Hilos, cada adjunto aceptado pregunta si su `checksum` ya esta
+  vinculado al Requisito del hilo **por el propio conector** —filtrando por los cuatro nombres
+  `entityType`/`entityId`/`checksum`/`uploadedBy`— y un match devuelve el `fileId` existente y
+  **corta el ciclo de subida** (ni permiso, ni `PUT`). Resuelve el caso que motiva REQ-006: Gmail
+  arrastra los adjuntos del original en la respuesta, y hasta S-028 se subian de nuevo.
+
+  **El alcance de la derogacion, que importa mas que el cambio:** ADR-003 declara *"El conector MUST
+  NOT publicar en el plano de consultas (`jiku-queries.*`) ni suscribirse a subjects de otros
+  servicios"*. S-029 deroga **la primera mitad, y solo para `attachments.list`**; la segunda —no
+  suscribirse a subjects de otros— **queda INTACTA**, porque `client.list()` es un request/reply
+  sobre el inbox propio y esta story no agrega ninguna suscripcion. Se pudo hacer porque `core`
+  expuso `checksum` como **filtrable e incluible** en el recurso, precisamente para que un consumidor
+  deduplique contra los vinculos existentes en **una** consulta y no en N+1 —que era el costo que la
+  regla evitaba—. **La reescritura del texto de ADR-003, del flujo y del PRD es de S-030**, no de
+  S-029: hasta entonces el caso `'touches the query plane only through attachments.list, only in the
+  lookup module'` de `test/publicacion/source-properties.test.ts` es la version **ejecutable** de la
+  regla, y mantiene prohibidos en **todo** `src/` el resto del plano de lectura
+  (`client.query(`, `client.get(`, `client.iterate(`, `client.all(`, `client.count(`) y el literal
+  `jiku-queries`. Cualquier fallo de la consulta —los seis codigos del contrato incluidos— **degrada
+  al comportamiento anterior**: se sube el archivo como siempre, con un `warn` y su `diagnosis`, y
+  `diagnosePublishFailure()` se reusa **sin una sola rama nueva**. **Cero cambios de infraestructura
+  y ninguna capacidad nueva en el bus:** el rol `internal-app` ya autorizaba `pub` sobre
+  `jiku-queries.v1.>`.
 
 ## Notas adicionales
 

@@ -48,3 +48,23 @@ contenido sintético (un PDF y un PNG mínimo válido, generados para este prop�
 - `html-only-quoted-reply.eml` — sólo HTML, y el HTML convertido contiene el separador español
   `escribió:` en su propia línea. Prueba que el recorte del citado (CA-14) se aplica **después**
   de convertir el HTML, en el mismo punto para las dos ramas (TS-36).
+
+## `reply-with-dragged-attachment.eml` (S-029)
+
+Una RESPUESTA que arrastra el adjunto del original, que es literalmente el caso que motiva
+REQ-006: Gmail copia los adjuntos del mail original en la respuesta, y hasta S-029 el conector los
+subia de nuevo.
+
+Lo que trae, y por que cada cosa:
+
+- **`Message-Id` propio** (`<reply-dragged-001@fixtures.local>`): es el de LA RESPUESTA, y es el
+  que el write del Mapa de Hilos tiene que escribir al cerrar el ciclo — no el de la referencia.
+- **`References` / `In-Reply-To`** con el `Message-Id` del original
+  (`<original-dragged-001@fixtures.local>`): es lo que hace que `routeMail()` devuelva la variante
+  con `intencion` y que `lookupThread()` tenga algo que buscar.
+- **`captura.png` con bytes REALES** (un PNG de 1x1 en base64): `deduplicar()` calcula un
+  `checksum` de verdad sobre ellos, y es ese checksum el que la consulta de reuso manda a
+  `attachments.list`. El test NO escribe el hash a mano: lo calcula del mismo byte del fixture, o
+  se desincronizaria en silencio y pasaria en verde afirmando lo contrario de lo que cree.
+- **`To: tickets+alfa@grava.io`**: el slug mapeado, para que el ruteo llegue a la rama de la
+  respuesta y no a un descarte por `sin_slug`.

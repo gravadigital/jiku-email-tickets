@@ -241,6 +241,9 @@ await responder.stop();
 - It exposes a **message counter**, which is what proves "no retry" (exactly 1 per publication) and
   "the local rejection never reached the wire" (exactly 0 for `JikuInvalidRequest`). Without the
   counter a silent retry would go unnoticed: the function's observable result would be identical.
+  **Since S-029 the same counter is what proves the ABSENCE of a query** — `count() === 0` is the
+  only way to assert that the new-mail branch never queried, that the cap's excedentes paid no
+  query, and that a locally rejected attachment did not query.
 - It accepts a **sequence** of replies, which is what makes the repeatability test direct (two runs
   answering `id: 1` and `id: 2`) without re-subscribing mid-test. Once exhausted it repeats the last
   one, so a test that publishes more gets a coherent answer instead of a timeout that would be
@@ -255,6 +258,70 @@ await responder.stop();
   sleeps, which the convention forbids for waiting on a condition.
 - Always `stop()` it: with `fileParallelism: false` and a shared bus, a live subscription from an
   earlier test is exactly the cross-contamination that sequential execution exists to avoid.
+
+---
+
+## respondToQuery
+
+**Location:** `test/bus/responder.ts`
+
+**Description:** The `core` double **for the read plane** (S-029). `respondTo()` hardcodes
+`*.*.jiku-commands.v1.${command}` and **cannot answer a query at all** — without this helper not one
+test of the reuse query is writable.
+
+**Signature:**
+
+```ts
+function respondToQuery(
+  nc: NatsConnection,
+  method: string, // the FULL operation name, resource included: 'attachments.list'
+  replies: ResponderReply | ResponderReply[] | typeof MUTE,
+): Promise<CoreResponder>;
+```
+
+**Usage:**
+
+```ts
+const responderQuery = await respondToQuery(bus.connection, 'attachments.list', {
+  status: 'success',
+  data: { items: [{ id: 77, fileId: 1000, checksum }], page: { limit: 1, returned: 1 } },
+});
+
+// ... run the tick / call the lookup ...
+
+// The payload observed on the bus carries `page: { limit: 1 }`, NOT a top-level `limit`.
+expect(responderQuery.payloads()[0]).toMatchObject({ page: { limit: 1 } });
+expect(responderQuery.count()).toBe(1);
+await responderQuery.stop();
+```
+
+**Notes:**
+
+- **Why a separate function and not a `plane: 'queries' | 'commands'` parameter on `respondTo()`.**
+  The SDK declares the two planes as **separate subject tokens on purpose**
+  (`SERVICE_QUERIES = "jiku-queries"`, `SERVICE_COMMANDS = "jiku-commands"`), with this reason
+  verbatim in its `.d.ts`: *"They are separate subject tokens on purpose, not nested under one
+  prefix: two queue groups over overlapping subjects would deliver each message to BOTH
+  subscriptions, and a plain `request()` returns the first reply and discards the second silently."*
+  A parameterised helper would invite a test to subscribe to both with a wider wildcard — exactly
+  the overlap that separation avoids. **Two planes, two functions.**
+- **What IS shared is the attention loop,** extracted into the private `attachResponder(nc,
+  subjectPattern, replies)`, which both public helpers now delegate to. That loop is where the reply
+  sequence and the message counter live, and duplicating it would let the two halves diverge — the
+  one left behind being the one nobody looks at. `respondTo()`'s **signature did not change**: the
+  whole existing suite calls it unmodified.
+- **Same wildcard discipline:** `*.*.jiku-queries.v1.${method}` — wildcards on `instance` and
+  `userId`, literal `jiku-queries` and `v1`. Never rebuild the full subject; that is the mistake
+  that passes green with both halves broken.
+- **Identical interface to `respondTo()`** — `subjects()`, `payloads()`, `count()`, `stop()` — so
+  tests of the two planes read the same, and `ResponderReply`/`SuccessReply`/`FailureReply`/`MUTE`
+  are **reused**, not redeclared: a `list` answers the *same* envelope as a command, with the
+  collection (`{ items, page }`) in `data`.
+- **The `method` is the full operation name with the resource included** (`attachments.list`),
+  because that is how the SDK assembles it: `client.list('attachments', ...)` derives
+  `attachments.list` and puts it as the subject's last token.
+- Same `await nc.flush()` before returning and same `drain()` in `stop()`. Same reason to always
+  `stop()` it.
 
 ---
 

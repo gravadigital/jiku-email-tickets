@@ -1135,12 +1135,19 @@ interface ProcesarAdjuntosDelMailDeps {
   readonly logger: Logger;
   readonly requestFileUpload?: typeof requestFileUploadReal; // test-only override
   readonly uploadFileContent?: typeof uploadFileContentReal; // test-only override
+  readonly lookupAttachmentByChecksum?: typeof lookupAttachmentByChecksumReal; // test-only (S-029)
+}
+
+/** S-029. No optional field: it is passed WHOLE or not passed at all. */
+interface ContextoHilo {
+  readonly requirementId: number;
 }
 
 function procesarAdjuntosDelMail(
   attachments: readonly MailAttachment[],
   config: Pick<AdjuntosConfig, 'allowedExtensions' | 'allowedMimeTypes' | 'maxSizeBytes' | 'putTimeoutMs'>,
   deps: ProcesarAdjuntosDelMailDeps,
+  hilo?: ContextoHilo, // S-029: present ONLY on a reply with a Thread Map match
 ): Promise<ProcesamientoAdjuntosResultado>;
 ```
 
@@ -1199,6 +1206,131 @@ await publishRequirementFromMail(
 - Does **not** import `componerDescripcion()` — returns the raw pieces (`avisosDeRechazo`,
   `avisosDeFallo`, `placeholders`, `fileIds`); the caller composes the final description with the
   `cuerpoBase` it already has, keeping this function focused on one attachment's life cycle only.
+- **The optional fourth argument, `hilo?: ContextoHilo` (S-029), and why its ABSENCE is the
+  mechanism.** When present, each accepted attachment asks `lookupAttachmentByChecksum()` **before**
+  `requestFileUpload()`, and a `reusado` short-circuits the cycle: no permit, no `PUT`, and the
+  result carries **the same shape as an upload** so the reused `fileId` and its placeholder enter
+  `fileIds`/`placeholders` through the same channel, with no new branch in the accumulator. When
+  absent — which is how the **new-mail branch** of `tick.ts` invokes it, with three arguments — the
+  query block does not exist for that call at all: **there is no `if (esRespuesta)` and no
+  configuration flag** to get wrong. It is an object rather than a bare `requirementId?: number`
+  precisely so that `{ requirementId: undefined }` is not representable; if it were, it would
+  compile, type-check, and produce a query with `entityId: undefined` that `core` would reject with
+  `invalid_fields` on **every** attachment of **every** reply.
+- **The query lives INSIDE `procesarUnoAceptado()`, therefore inside the existing `for`,** and that
+  position is what makes four S-029 criteria true **without a line of new code**: `deduplicar()`
+  already collapsed the repeats (one query per **surviving** checksum), `aplicarTope()` already
+  trimmed to ten (the excedentes pay **no** query), the `for` only ever iterates `aceptados` (a
+  locally rejected attachment never queries), and the `for` is already serial (the query inherits
+  the series, with no `Promise.all`). **No checksum cache, no module variable, no state between
+  invocations** (ADR-001).
+
+---
+
+## lookupAttachmentByChecksum()
+
+**Location:** `src/domain/publicacion/lookup-attachment.ts`
+
+**Description:** S-029's reuse query, and the **first and only read the connector performs**. Asks
+`attachments.list` whether one accepted attachment's `checksum` is **already linked to the thread's
+Requirement by the connector itself**, and returns the existing `fileId` so `procesarUnoAceptado()`
+can skip the upload cycle entirely — no `files.request-upload`, no `PUT`, no new row in `files` and
+no new object in storage.
+
+It is the fourth contract file of `publicacion` — next to `upload-file.ts`
+(`files.request-upload`), `publish-requirement.ts` (`requirements.new`) and `publish-comment.ts`
+(`requirements.{id}.comment`) — but the **first of the read plane**, and therefore the piece that
+**partially derogates** an ADR-003 Implementation Rule. See `overview.md` for the exact scope; the
+rewrite of the ADR's own text belongs to **S-030**.
+
+**Signature:**
+
+```ts
+/** TWO variants and NO error variant. That is the contract, not an omission. */
+type LookupAttachmentResultado =
+  | { readonly tipo: 'reusado'; readonly fileId: number }
+  | { readonly tipo: 'sin_match' };
+
+function lookupAttachmentByChecksum(
+  options: {
+    /** NOTE: no `content`. The byte never reaches this function. */
+    readonly adjunto: Pick<AdjuntoAceptado, 'filename' | 'mimeType' | 'checksum'>;
+    readonly requirementId: number;
+  },
+  deps: { client: Client; logger: Logger },
+): Promise<LookupAttachmentResultado>;
+```
+
+**Usage:**
+
+```ts
+const reuso = await lookupAttachmentByChecksum(
+  { adjunto, requirementId: hilo.requirementId },
+  { client, logger },
+);
+
+if (reuso.tipo === 'reusado') {
+  // reuso.fileId — the existing link. Skip the permit and the PUT entirely.
+  return { resultado: 'subido', fileId: reuso.fileId, placeholder: placeholderPara(adjunto, reuso.fileId) };
+}
+
+// reuso.tipo === 'sin_match' — fall through to the full upload cycle, exactly as before.
+```
+
+**Notes:**
+
+- **NEVER THROWS, for any input and any bus failure.** It lives inside an attachment loop that
+  cannot be interrupted, so it exhausts its failures internally. Re-throwing would make the
+  orchestrator's programming `try/catch` count as **fallido** an attachment that uploaded fine — a
+  lying notice to the client.
+- **The return type has no error variant, and the degradation has no variant of its own.** A failed
+  query returns `sin_match`, the **same** shape as "I asked and there is nothing". The caller cannot
+  tell them apart, and that is deliberate: it has nothing different to do with each.
+- **The four filters are all mandatory, each for a different reason, and none may be "simplified":**
+  - `entityType: 'requirement'` + `entityId` narrow the query **to the thread's Requirement**. These
+    are what prevent cross-project reuse — **not** `uploadedBy`: the connector uploads *everything*
+    under the same identity, so without `entityId` the match would be **global** and one client's
+    file could be reused in another client's Requirement.
+  - `checksum` is the question itself: "is this byte already linked here?".
+  - `uploadedBy: client.userId` guarantees the reused `fileId` is **always linkable**, with no risk
+    of `file_not_owned` — which would discard the **entire** comment write.
+- `include: ['checksum']` is sent **even though `checksum` also travels in the `filter`**, and it is
+  not redundant: `include` decides **what comes back**, `filter` decides **which rows**. It makes the
+  returned row **self-verifying** in a test rather than trusting that the filter was applied.
+- **`limit: 1`, no pagination, no `count`, no `cursor`, no `sort`.** Any match will do: every
+  candidate is byte-identical and every one belongs to the caller. **Note for tests:** the SDK's
+  `listPayload()` folds `limit`/`cursor` into `page`, so the payload observed on the bus carries
+  `page: { limit: 1 }` — asserting a top-level `limit` would fail against a correct implementation.
+- **TWO arguments to `client.list()`, never three.** The third (`RequestOptions`) is where the
+  timeout would accidentally get lowered, and ADR-006 forbids it: the effective timeout stays the
+  client's, the same one the three commands use.
+- **The subject is built by the SDK.** The module passes `'attachments'` as the resource; the SDK
+  derives `attachments.list` and the full
+  `{instance}.{userId}.jiku-queries.v1.attachments.list`. The string `jiku-queries` **does not
+  appear in `src/`**, and a property test enforces it.
+- **`items: []` is a `success`, not an error** — a `list` never answers a `*_not_found`. Four
+  situations produce it and all arrive indistinguishably on purpose: the file was never in this
+  Requirement; another actor uploaded it (`uploadedBy`); it is in a different Requirement
+  (`entityId`); or its link was deleted / its file is not retained — the resource's **two permanent
+  exclusions**, which **cannot be overridden from the payload**. The connector cannot reuse a
+  deleted link **even by mistake**.
+- **Reuses `diagnosePublishFailure()` and `codeOf()` without adding a single branch.** The
+  contract's six error codes plus the generic `JikuError` that `client.list()` throws when the reply
+  is not a collection all degrade to `sin_match`. `query_timeout` is a code new to this connector
+  and lands, correctly, in `core_rechazo_desconocido`: the code catalogue belongs to `core` and
+  grows, so an unknown code is a **normal** outcome, not a residual case.
+- **Logs `warn` on a failure, never `error`** — the mail's outcome is still correct (the attachment
+  arrives, the comment is published); only an optimisation stopped working. Context is **flat, one
+  level deep**, because the log redaction has no deep wildcard and a nested context would leave a
+  secret in the clear without failing or warning. `code` is spread **conditionally**, omitted when
+  `codeOf()` returns `undefined` (no reply from `core`).
+- **The `checksum` IS logged** — it is a hash, not the byte, and it is the datum that joins this log
+  to `core`'s. What is never logged: the attachment's byte, the mail body, the comment text. And **no
+  field is ever named `key`**: `REDACT_PATHS` would redact it silently.
+- **Never recomputes the hash (and could not):** it receives
+  `Pick<AdjuntoAceptado, 'filename' | 'mimeType' | 'checksum'>` and **not** `content`, so it does not
+  even hold the byte. `deduplicar()` is the single place where anything is hashed; a second source of
+  truth for the hash is exactly what this signature prevents.
 
 ---
 

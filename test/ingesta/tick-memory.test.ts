@@ -147,3 +147,76 @@ describe('src/domain/publicacion/procesar-adjuntos-mail.ts memory properties (S-
     expect(orchestratorCode).not.toMatch(/Promise\.allSettled\s*\(/);
   });
 });
+
+/**
+ * S-029, CA-18: la consulta de reuso no cambia el pico de memoria del worker, que sigue siendo de
+ * UN MAIL A LA VEZ.
+ *
+ * Son tres propiedades distintas y las tres se verifican por inspeccion de codigo, por la misma
+ * razon que las de arriba: un test de comportamiento solo puede probar los caminos que ejercita, y
+ * lo que hay que afirmar es la AUSENCIA de un acumulador — un caché de checksums que alguien
+ * agregue "para no repreguntar" seria estado entre invocaciones, y ADR-001 lo prohibe
+ * explicitamente (el dedup intra-mail ya colapso las repeticiones, y no hay dedup entre mails
+ * distintos por diseno).
+ */
+describe('src/domain/publicacion/lookup-attachment.ts memory properties (S-029, CA-18)', () => {
+  const lookupPath = fileURLToPath(
+    new URL('../../src/domain/publicacion/lookup-attachment.ts', import.meta.url),
+  );
+  const rawLookupSource = readFileSync(lookupPath, 'utf8');
+  const lookupCode = stripComments(rawLookupSource);
+
+  const orchestratorPath = fileURLToPath(
+    new URL('../../src/domain/publicacion/procesar-adjuntos-mail.ts', import.meta.url),
+  );
+  const orchestratorCode = stripComments(readFileSync(orchestratorPath, 'utf8'));
+
+  it('sanity: el archivo se pudo leer y tiene contenido real', () => {
+    expect(rawLookupSource.length).toBeGreaterThan(500);
+    expect(lookupCode).toContain('export async function lookupAttachmentByChecksum');
+    expect(lookupCode).toContain('client.list(');
+  });
+
+  it('la fila de la respuesta NO se retiene entre adjuntos: sin array, sin push, sin Map', () => {
+    // Se lee el primer item, se saca el `fileId`, y la coleccion se descarta al salir de la
+    // funcion. Un array o un `Map` declarado aca seria exactamente el acumulador que no puede
+    // existir.
+    expect(lookupCode).not.toMatch(/\.push\s*\(/);
+    expect(lookupCode).not.toMatch(/new\s+Map\s*\(/);
+    expect(lookupCode).not.toMatch(/new\s+Set\s*\(/);
+    // Y no declara ningun array literal como variable de trabajo.
+    expect(lookupCode).not.toMatch(/(?:const|let)\s+\w+\s*(?::[^=]*)?=\s*\[\s*\]/);
+  });
+
+  it('no hay cache de checksums ni estado entre invocaciones, en ninguno de los dos archivos', () => {
+    // NINGUNA variable de modulo mutable: las unicas constantes de nivel de modulo del lookup son
+    // `RESOURCE` y `ENTITY_TYPE`, dos strings del contrato. Un `let` o un `Map` a nivel de modulo
+    // sobreviviria entre mails y entre ticks, que es precisamente lo que ADR-001 prohibe.
+    for (const [nombre, code] of [
+      ['lookup-attachment.ts', lookupCode],
+      ['procesar-adjuntos-mail.ts', orchestratorCode],
+    ] as const) {
+      // Un `let` al inicio de linea es una variable de modulo; los `let` de cuerpo de funcion
+      // estan indentados. Es el mismo criterio de escaneo que usa el resto de esta suite.
+      expect(code, `${nombre} must declare no module-level mutable state`).not.toMatch(
+        /^let\s+/m,
+      );
+      for (const forbidden of ['cache', 'Cache', 'memo', 'seen', 'vistos']) {
+        expect(code, `${nombre} must not keep a ${forbidden}`).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it('la consulta va en serie dentro del for que ya existia: ningun Promise.all', () => {
+    // CA-18: paralelizar romperia el orden "par por archivo" de `fileIds` que S-022 afirma con su
+    // propio test de propiedad.
+    for (const [nombre, code] of [
+      ['lookup-attachment.ts', lookupCode],
+      ['procesar-adjuntos-mail.ts', orchestratorCode],
+    ] as const) {
+      expect(code, `${nombre} must stay serial`).not.toMatch(/Promise\.all\s*\(/);
+      expect(code, `${nombre} must stay serial`).not.toMatch(/Promise\.allSettled\s*\(/);
+      expect(code, `${nombre} must stay serial`).not.toMatch(/Promise\.race\s*\(/);
+    }
+  });
+});
