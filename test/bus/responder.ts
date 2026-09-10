@@ -18,6 +18,10 @@ import type { NatsConnection, Subscription } from '@gravadigital/jiku/nats';
  * literales. Un responder que reconstruyera el subject y se equivocara IGUAL que el codigo de
  * produccion pasaria en verde con las dos mitades rotas — el test afirmaria la reconstruccion del
  * test en vez de la del SDK.
+ *
+ * DESDE S-029 HAY DOS PLANOS, y por lo tanto dos funciones: `respondTo()` para el plano de
+ * ESCRITURA y `respondToQuery()` para el de LECTURA. Lo que comparten es el bucle de atencion,
+ * extraido en `attachResponder()`.
  */
 
 /** Un envelope de exito, con lo que `core` devolveria en `data`. */
@@ -37,6 +41,9 @@ export interface FailureReply {
 /**
  * El envelope que el responder emite. Es la forma exacta del `Reply` del SDK, y en un fallio viaja
  * en el BODY (los headers `Nats-Service-Error` se agregan al lado, nunca en reemplazo).
+ *
+ * IDENTICO PARA LOS DOS PLANOS: un `list` contesta el mismo envelope que un comando, con la
+ * coleccion (`{ items, page }`) en `data`. Por eso este tipo NO se duplica para las consultas.
  */
 export type ResponderReply = SuccessReply | FailureReply;
 
@@ -60,6 +67,11 @@ export interface CoreResponder {
    * Es lo que prueba "no hay reintento" (exactamente 1 por publicacion) y "el error local no llego
    * a la red" (exactamente 0 en `JikuInvalidRequest`). Sin este contador, un reintento silencioso
    * pasaria desapercibido: el resultado observable de la funcion seria el mismo.
+   *
+   * Y DESDE S-029 es lo que prueba la AUSENCIA de una consulta: `count() === 0` es la unica forma
+   * de afirmar que el alta no consulto (CA-5), que el tope no pago consulta por los excedentes
+   * (CA-7) y que un rechazado por la politica local no consulto (CA-9). Sin el, el resultado
+   * observable de la funcion seria el mismo con y sin consulta.
    */
   count(): number;
   /** Da de baja la suscripcion. */
@@ -67,21 +79,19 @@ export interface CoreResponder {
 }
 
 /**
- * Suscribe un responder al comando y contesta con lo que se le indique.
+ * El bucle de atencion, compartido por los dos planos.
  *
- * `replies` acepta UNA respuesta o UNA SECUENCIA. La secuencia es lo que hace directo el test de
- * repetibilidad (dos corridas con `id: 1` e `id: 2`) sin re-suscribir a mitad del test. Agotada la
- * secuencia, se repite la ultima — asi un test que publica de mas obtiene una respuesta coherente
- * en vez de un timeout que se diagnosticaria como otra cosa.
+ * Recibe el subject YA ARMADO por el llamador: es cada `respondTo*()` quien conoce el token de su
+ * plano, y esta funcion no decide de planos. Se extrajo en S-029 porque aca vive la logica de la
+ * secuencia de respuestas y del contador, y duplicarla haria que las dos mitades divergieran — la
+ * que quedaria vieja es la que nadie mira.
  */
-export async function respondTo(
+async function attachResponder(
   nc: NatsConnection,
-  command: string,
+  subjectPattern: string,
   replies: ResponderReply | ResponderReply[] | typeof MUTE,
 ): Promise<CoreResponder> {
-  // COMODIN en instance y userId. Ver el comentario de arriba: reconstruir el subject es el error
-  // que hace pasar el test con las dos mitades rotas.
-  const subscription: Subscription = nc.subscribe(`*.*.jiku-commands.v1.${command}`);
+  const subscription: Subscription = nc.subscribe(subjectPattern);
 
   const subjects: string[] = [];
   const payloads: unknown[] = [];
@@ -133,4 +143,50 @@ export async function respondTo(
       await subscription.drain();
     },
   };
+}
+
+/**
+ * Suscribe un responder al comando y contesta con lo que se le indique.
+ *
+ * `replies` acepta UNA respuesta o UNA SECUENCIA. La secuencia es lo que hace directo el test de
+ * repetibilidad (dos corridas con `id: 1` e `id: 2`) sin re-suscribir a mitad del test. Agotada la
+ * secuencia, se repite la ultima — asi un test que publica de mas obtiene una respuesta coherente
+ * en vez de un timeout que se diagnosticaria como otra cosa.
+ */
+export async function respondTo(
+  nc: NatsConnection,
+  command: string,
+  replies: ResponderReply | ResponderReply[] | typeof MUTE,
+): Promise<CoreResponder> {
+  // COMODIN en instance y userId. Ver el comentario de arriba: reconstruir el subject es el error
+  // que hace pasar el test con las dos mitades rotas.
+  return attachResponder(nc, `*.*.jiku-commands.v1.${command}`, replies);
+}
+
+/**
+ * El doble de `core` PARA EL PLANO DE LECTURA (S-029).
+ *
+ * POR QUE ES UNA FUNCION SEPARADA Y NO UN PARAMETRO `plane` DE `respondTo()`: el SDK declara los
+ * dos planos como tokens de subject SEPARADOS A PROPOSITO, y su `.d.ts` da la razon —"two queue
+ * groups over overlapping subjects would deliver each message to BOTH subscriptions, and a plain
+ * `request()` returns the first reply and discards the second silently". Un helper parametrizado
+ * invitaria a un test a suscribirse a los dos con un comodin mas ancho, que es exactamente la
+ * superposicion que esa separacion evita. Dos planos, dos funciones.
+ *
+ * Lo que SI se comparte es el bucle de atencion (`attachResponder()`): es donde vive la logica de
+ * la secuencia de respuestas y del contador.
+ *
+ * El `method` es el nombre COMPLETO de la operacion, con el recurso incluido —`attachments.list`—
+ * porque es asi como el SDK lo arma: `client.list('attachments', ...)` deriva `attachments.list` y
+ * lo pone como ultimo token del subject.
+ */
+export async function respondToQuery(
+  nc: NatsConnection,
+  method: string,
+  replies: ResponderReply | ResponderReply[] | typeof MUTE,
+): Promise<CoreResponder> {
+  // COMODIN en `instance` y `userId`, y los tokens `jiku-queries` y `v1` LITERALES. Reconstruir el
+  // subject completo es el error que hace pasar el test con las dos mitades rotas: el test
+  // afirmaria su propia reconstruccion en vez de la del SDK.
+  return attachResponder(nc, `*.*.jiku-queries.v1.${method}`, replies);
 }

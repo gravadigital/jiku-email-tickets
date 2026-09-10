@@ -21,8 +21,12 @@ splits `core`'s business `failure` from any other publication failure before it 
 resolves ADR-003's byte plane with native `fetch` — the only `publicacion/` file with no bus
 dependency at all) and S-020 (`componerDescripcion()`, the pure four-block deterministic
 composition of `description` — body, rejection notices, upload-failure notices, placeholders,
-always in that order). The service is a `worker` in Node.js with no HTTP surface and no
-database, so several categories do not apply and stay empty until a story creates them.
+always in that order) and S-029 (`lookupAttachmentByChecksum()`, the **first read** the connector
+ever makes — `attachments.list` filtered by the four names that make a reuse safe — plus
+`respondToQuery()`, the query-plane `core` double, and the optional fourth `ContextoHilo` argument
+that makes "the new mail never queries" structural rather than a conditional). The service is a
+`worker` in Node.js with no HTTP surface and no database, so several categories do not apply and
+stay empty until a story creates them.
 
 ## Components
 
@@ -79,7 +83,7 @@ N/A (no HTTP surface - ADR-001)
 
 ## Services/Repositories
 
-**Total: 32**
+**Total: 33**
 
 - **loadAppConfig()** (`src/config/index.ts`) - Resolves the single, validated configuration of the
   process: the Zod-validated environment composed with the bus settings the SDK's `loadConfig()`
@@ -177,9 +181,25 @@ N/A (no HTTP surface - ADR-001)
   `tope_excedido` excedente when a `PUT` fails. Wraps each attachment's full processing in its own
   `try/catch` to isolate an unexpected programming error without aborting the mail's remaining
   attachments. Never throws for a business outcome — always returns `{ fileIds, avisosDeRechazo,
-  avisosDeFallo, placeholders }`. `requestFileUpload`/`uploadFileContent` are injectable via `deps`
-  (default: the real implementations), same pattern as `Normalize` in `tick.ts`, so a test double can
-  force the unexpected-exception path.
+  avisosDeFallo, placeholders }`. `requestFileUpload`/`uploadFileContent`/`lookupAttachmentByChecksum` are
+  injectable via `deps` (default: the real implementations), same pattern as `Normalize` in
+  `tick.ts`, so a test double can force the unexpected-exception path. **Since S-029 it takes an
+  optional fourth argument**, `hilo?: ContextoHilo` (`{ requirementId }`): when present, each
+  accepted attachment asks `lookupAttachmentByChecksum()` **before** requesting the upload permit,
+  and a match short-circuits the whole upload cycle. **Its absence is the mechanism** by which the
+  new-mail branch never queries (CA-5) — an object is passed whole or not at all, so
+  `{ requirementId: undefined }` is not representable, and there is no `if (esRespuesta)` and no
+  flag to get wrong.
+- **lookupAttachmentByChecksum()** (`src/domain/publicacion/lookup-attachment.ts`) - S-029's reuse
+  query, and the **first and only read** the connector performs — `attachments.list` over
+  `jiku-queries`, which **partially derogates** an ADR-003 Implementation Rule (see
+  `overview.md`; the ADR text rewrite belongs to S-030). Asks whether one accepted attachment's
+  `checksum` is **already linked to the thread's Requirement by the connector itself**, and returns
+  the existing `fileId` so the upload cycle can be skipped entirely. Returns a two-variant
+  discriminated union — `{ tipo: 'reusado', fileId }` / `{ tipo: 'sin_match' }` — with **no error
+  variant at all** and **never throws**: it lives inside an attachment loop that cannot be
+  interrupted, so every failure degrades to `sin_match` and the attachment simply uploads as it did
+  before. Reuses `diagnosePublishFailure()`/`codeOf()` **without adding a single branch**.
 
 - **openKvStores()** (`src/infra/kv/stores.ts`) - Opens the two NATS KV buckets over the process's
   **single** connection (`new Kvm(client.connection)`, never a new one) and **verifies they exist**
@@ -236,7 +256,7 @@ See full details in [services.md](./services.md)
 
 ## Test Helpers
 
-**Total: 11**
+**Total: 12**
 
 - **setupTestBus** (`test/bus/helpers.ts`) - Opens a NATS connection against the suite's shared
   container and builds a bus `Client` with `Client.fromConnection()`, returning a context with
@@ -278,8 +298,16 @@ See full details in [services.md](./services.md)
   in `test` and `builder` and a defect in `production`.
 - **respondTo** (`test/bus/responder.ts`) - The `core` double: subscribes to a command **on the real
   bus** with a **wildcard** subject and answers a prefabricated envelope. Exposes the observed subjects
-  and payloads, a **message counter** (which is what proves "no retry"), a mute mode for provoking
-  `JikuTimeout`, and `stop()`. Never rebuild the subject by hand — see its notes.
+  and payloads, a **message counter** (which is what proves "no retry", and since S-029 also proves
+  the **absence** of a query), a mute mode for provoking `JikuTimeout`, and `stop()`. Never rebuild
+  the subject by hand — see its notes.
+- **respondToQuery** (`test/bus/responder.ts`) - The `core` double **for the read plane** (S-029):
+  same interface as `respondTo()`, same shared attention loop (`attachResponder()`), but subscribed
+  to `*.*.jiku-queries.v1.${method}`. **A separate function and not a `plane` parameter**, because
+  the SDK keeps the two planes as separate subject tokens on purpose — two queue groups over
+  overlapping subjects would deliver each message to *both* subscriptions and a plain `request()`
+  would silently discard the second reply. Without it no test of the reuse query is writable at
+  all.
 - **testLoggerWithCapture** (`test/ingesta/test-logger.ts`) - A minimal valid `AppConfig` plus a real
   `createLogger()` wired to `createLogCapture()`, for tests that call `normalize(raw, logger)` and
   assert on what was logged.

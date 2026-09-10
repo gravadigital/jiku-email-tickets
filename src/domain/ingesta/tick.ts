@@ -258,18 +258,36 @@ export async function runTick(
             // ---- CON MATCH: el hilo se conoce y la respuesta se publica como Comentario ----
             //
             // El procesamiento de adjuntos es EL MISMO que el del alta y con la MISMA politica
-            // (doble lista blanca, tope de tamaño, tope de 10, dedup INTRA-MAIL, placeholders al
-            // final, continue-on-failure). No hay dedup contra el hilo, y es deliberado: serian N+1
-            // consultas por respuesta y obligaria a tocar el plano de consultas, que ADR-003
-            // prohibe. El costo aceptado es que Gmail, que arrastra los adjuntos del original en la
-            // respuesta, los suba de nuevo.
+            // local (doble lista blanca, tope de tamaño, tope de 10, dedup INTRA-MAIL,
+            // placeholders al final, continue-on-failure), MAS UNA COSA que el alta no tiene: la
+            // consulta de reuso contra el hilo (S-029).
+            //
+            // HASTA S-027 ESTE COMENTARIO DECIA LO CONTRARIO —"no hay dedup contra el hilo, y es
+            // deliberado: serian N+1 consultas y obligaria a tocar el plano de consultas, que
+            // ADR-003 prohibe"— y el rastro se deja porque explica por que el reuso llego una
+            // story despues. Lo que cambio: `core` expuso `checksum` como FILTRABLE e INCLUIBLE en
+            // `attachments.list`, asi que la pregunta se contesta en UNA consulta por adjunto y no
+            // en N+1. La mitad de la regla de ADR-003 que prohibia el plano de consultas quedo
+            // derogada para este unico caso; la que prohibe suscribirse a subjects de otros SIGUE
+            // INTACTA. La reescritura del texto de la ADR es de S-030.
             //
             // SIN try/catch propio: `procesarAdjuntosDelMail()` nunca lanza para un resultado de
-            // negocio, igual que en la rama del alta.
-            const adjuntos = await procesarAdjuntosDelMail(mail.attachments, config.adjuntos, {
-              client,
-              logger,
-            });
+            // negocio, igual que en la rama del alta — y la consulta tampoco (CA-11).
+            const adjuntos = await procesarAdjuntosDelMail(
+              mail.attachments,
+              config.adjuntos,
+              { client, logger },
+              // ==== EL CUARTO ARGUMENTO (S-029), Y ES TODO EL CAMBIO EN EL TICK ====
+              //
+              // El `requirementId` que `lookupThread()` acaba de devolver gana un SEGUNDO
+              // CONSUMIDOR: ya era el `{id}` del comando del comentario, y ahora es tambien el
+              // `entityId` de la consulta de reuso. El Mapa de Hilos no cambia en nada — se lee
+              // igual que antes.
+              //
+              // La rama del alta (`if (route.ok)`) NO SE TOCA: sigue invocando con TRES
+              // argumentos, y esa ausencia ES el mecanismo de CA-5.
+              { requirementId: hilo.requirementId },
+            );
 
             // La composicion es la MISMA que la del alta, con las mismas funciones compartidas: el
             // cuerpo del comentario se arma igual que la description de un requisito, con sus

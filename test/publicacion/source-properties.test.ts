@@ -24,6 +24,11 @@ const UPLOAD_FILE = `${PUBLICACION}upload-file.ts`;
 // S-027: el tercer punto de publicacion, el del Comentario.
 const PUBLISH_COMMENT = `${PUBLICACION}publish-comment.ts`;
 const UPLOAD_BYTE = `${PUBLICACION}upload-byte.ts`;
+// S-029: el UNICO archivo de `src/` autorizado a tocar el plano de LECTURA.
+const LOOKUP_ATTACHMENT = `${PUBLICACION}lookup-attachment.ts`;
+const PROCESAR_ADJUNTOS = `${PUBLICACION}procesar-adjuntos-mail.ts`;
+const PUBLISH_ERRORS = `${PUBLICACION}publish-errors.ts`;
+const ADJUNTOS = `domain${sep}adjuntos${sep}`;
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
@@ -66,19 +71,182 @@ describe('src/ publication source properties', () => {
     expect(PUBLICACION_FILES.length).toBeGreaterThanOrEqual(4);
   });
 
-  // TS-30
-  it('never publishes on the query plane', () => {
-    // ADR-003: el conector MUST NOT publicar en `jiku-queries.*` ni suscribirse a subjects de otros
-    // servicios. El plano de lectura no se usa NUNCA — ni siquiera para verificar la fila en
-    // `users`, que es lo que hace que CA-16 sea un paso manual del operador y no codigo (G-03).
+  // TS-30 (ACOTADO POR S-029), TS-31, TS-32, TS-33
+  it('touches the query plane only through attachments.list, only in the lookup module', () => {
+    // ==== QUE CAMBIO, EXACTAMENTE ====
+    //
+    // ADR-003 decia: "El conector MUST NOT publicar en el plano de consultas (`jiku-queries.*`) ni
+    // suscribirse a subjects de otros servicios". S-029 DEROGA LA PRIMERA MITAD, y hay que ser
+    // preciso sobre el alcance porque este test es el UNICO lugar del repo donde esa frontera queda
+    // EJECUTABLE:
+    //
+    //   - DEROGADO: publicar en `jiku-queries.*`, para UN recurso (`attachments.list`), desde UN
+    //     archivo (`lookup-attachment.ts`). Y por una razon concreta: `core` expuso `checksum` como
+    //     FILTRABLE e INCLUIBLE precisamente para que un consumidor pueda deduplicar contra los
+    //     vinculos existentes en UNA consulta. La nota del contrato de `core` lo dice literalmente.
+    //   - INTACTO: suscribirse a subjects de otros servicios. Esta story NO agrega ninguna
+    //     suscripcion — `client.list()` es un request/reply sobre el inbox propio.
+    //
+    // LA REESCRITURA DEL TEXTO DE ADR-003 ES DE S-030, no de esta story. Hasta entonces, este test
+    // es la version ejecutable de la regla y el codigo tiene razon sobre el documento.
+    //
+    // POR QUE ESTE CASO NO SE BORRO: borrarlo dejaria el plano de lectura abierto de par en par.
+    // `client.all()` pagina el universo entero de un filtro y lo sostiene en memoria;
+    // `client.query()` saltea el chequeo de forma que hace `list()`. Ninguno de los dos tiene lugar
+    // en un worker cuyo pico de memoria es un mail a la vez (ADR-001). La derogacion es de UNA
+    // regla, no de la ADR.
     for (const file of FILES) {
-      for (const forbidden of ['client.query(', 'client.list(', 'client.get(', 'client.iterate(', 'jiku-queries']) {
+      // Lo prohibido en TODOS los archivos, incluido el nuevo. `all` y `count` NO ESTABAN en la
+      // lista original —no existia el plano de lectura, asi que nadie los penso— y son justo los
+      // dos que paginarian el universo.
+      for (const forbidden of [
+        'client.query(',
+        'client.get(',
+        'client.iterate(',
+        'client.iteratePages(',
+        'client.all(',
+        'client.count(',
+      ]) {
         expect(
           file.code,
           `${file.relativePath} must not touch the query plane (${forbidden})`,
         ).not.toContain(forbidden);
       }
+
+      // ADR-002: el subject lo arma el SDK. `jiku-queries` no aparece en `src/`, igual que hoy no
+      // aparece `jiku-commands.v1` (CA-15).
+      expect(
+        file.code,
+        `${file.relativePath} must not spell out a query subject`,
+      ).not.toContain('jiku-queries');
+
+      // `client.list(` SOLO en el modulo del lookup.
+      if (file.relativePath !== LOOKUP_ATTACHMENT) {
+        expect(
+          file.code,
+          `${file.relativePath} must not call client.list() — only ${LOOKUP_ATTACHMENT} may`,
+        ).not.toContain('client.list(');
+      }
     }
+
+    // Y LA ASERCION POSITIVA, que es la que evita el falso negativo: si alguien borrara el modulo o
+    // le cambiara el nombre al archivo, el bucle de arriba pasaria en verde SIN VER NADA. Es el
+    // mismo criterio que el caso de los tres comandos usa para `publish-comment.ts`.
+    const lookup = FILES.find((file) => file.relativePath === LOOKUP_ATTACHMENT);
+    expect(lookup, `${LOOKUP_ATTACHMENT} must exist: it is the only authorised query`).toBeDefined();
+    expect(lookup?.code).toContain('client.list(');
+  });
+
+  // TS-34
+  it('never recomputes the checksum in the lookup module', () => {
+    // CA-17: `deduplicar()` es el UNICO lugar donde se hashea. El modulo recibe el
+    // `AdjuntoAceptado` que ya lo trae, y NO recibe `content` — asi que ni tiene el byte para
+    // hashear. Recibirlo invitaria a recalcularlo y crearia una segunda fuente de verdad del hash.
+    const lookup = FILES.find((file) => file.relativePath === LOOKUP_ATTACHMENT);
+    expect(lookup, `${LOOKUP_ATTACHMENT} must exist`).toBeDefined();
+
+    for (const forbidden of ['createHash', 'node:crypto', '.digest(']) {
+      expect(
+        lookup?.code,
+        `${LOOKUP_ATTACHMENT} must not hash anything (${forbidden})`,
+      ).not.toContain(forbidden);
+    }
+
+    // Y la contracara: su firma NO menciona `content`. El `Pick<>` declara exactamente lo que
+    // consume, y el byte no esta ahi.
+    expect(lookup?.code, `${LOOKUP_ATTACHMENT} must not receive the byte`).not.toMatch(
+      /\bcontent\b/,
+    );
+  });
+
+  // TS-35
+  it('never parallelises the attachment loop', () => {
+    // CA-18 y ADR-001: la consulta va DENTRO del `for` que ya es serie. Paralelizar romperia el
+    // "par por archivo" del orden de `fileIds` que S-022 afirma con su propio test de propiedad.
+    for (const relativePath of [LOOKUP_ATTACHMENT, PROCESAR_ADJUNTOS]) {
+      const file = FILES.find((f) => f.relativePath === relativePath);
+      expect(file, `${relativePath} must exist`).toBeDefined();
+
+      for (const forbidden of ['Promise.all', 'Promise.allSettled', 'Promise.race']) {
+        expect(
+          file?.code,
+          `${relativePath} must process attachments serially (${forbidden})`,
+        ).not.toContain(forbidden);
+      }
+    }
+  });
+
+  // TS-36
+  it('gives the lookup result no error variant', () => {
+    // CA-11: el `for` de `procesarAdjuntosDelMail()` no puede interrumpirse, asi que la funcion
+    // agota sus fallos INTERNAMENTE. Una variante de error en el tipo de retorno seria la puerta
+    // por la que alguien "no se traga el error" y rompe la degradacion — produciendo un aviso
+    // mentiroso: un adjunto que se subio bien, contado como fallido.
+    const lookup = FILES.find((file) => file.relativePath === LOOKUP_ATTACHMENT);
+    expect(lookup, `${LOOKUP_ATTACHMENT} must exist`).toBeDefined();
+
+    const variantes = [...(lookup?.code.matchAll(/tipo:\s*'([a-z_]+)'/g) ?? [])].map(
+      (match) => match[1] as string,
+    );
+
+    expect([...new Set(variantes)].sort()).toEqual(['reusado', 'sin_match']);
+  });
+
+  // TS-37
+  it('adds no branch to diagnosePublishFailure', () => {
+    // CA-6: la traduccion de errores se REUSA SIN MODIFICAR. `query_timeout` es un codigo nuevo
+    // para este conector y cae, correctamente, en `core_rechazo_desconocido` — que es el
+    // comportamiento por diseno para un catalogo que `core` posee y hace crecer.
+    const errores = FILES.find((file) => file.relativePath === PUBLISH_ERRORS);
+    expect(errores, `${PUBLISH_ERRORS} must exist`).toBeDefined();
+
+    const diagnosticos = [...(errores?.code.matchAll(/\|\s*'([a-z_]+)'/g) ?? [])].map(
+      (match) => match[1] as string,
+    );
+
+    expect(new Set(diagnosticos).size).toBe(9);
+
+    for (const forbidden of ['query_timeout', 'invalid_cursor', 'attachments', 'reuso']) {
+      expect(
+        errores?.code,
+        `diagnosePublishFailure must not learn about ${forbidden}`,
+      ).not.toContain(forbidden);
+    }
+  });
+
+  // TS-38
+  it('leaves the local attachment policy untouched', () => {
+    // CA-4: `dedup.ts`, `particionar.ts` y `tope.ts` se conservan tal cual. El `checksum` que la
+    // consulta necesita ya lo produce `deduplicar()`, y las tres siguen siendo funciones PURAS: si
+    // alguna aprendiera del `requirementId` o del `client`, dejaria de serlo y el pipeline local
+    // pasaria a depender del bus.
+    for (const nombre of ['dedup.ts', 'particionar.ts', 'tope.ts']) {
+      const file = FILES.find((f) => f.relativePath === `${ADJUNTOS}${nombre}`);
+      expect(file, `${ADJUNTOS}${nombre} must exist`).toBeDefined();
+
+      for (const forbidden of ['lookup-attachment', 'requirementId', 'entityId', 'client.']) {
+        expect(
+          file?.code,
+          `${ADJUNTOS}${nombre} must stay pure (${forbidden})`,
+        ).not.toContain(forbidden);
+      }
+    }
+  });
+
+  // TS-40
+  it('invokes client.list with two arguments, never lowering the timeout', () => {
+    // ADR-006 prohibe bajar el timeout por el tercer argumento de una llamada del SDK. El
+    // `RequestOptions` es exactamente donde se haria por accidente, asi que la consulta usa el
+    // `timeoutMs` del cliente — el mismo de los tres comandos.
+    const lookup = FILES.find((file) => file.relativePath === LOOKUP_ATTACHMENT);
+    expect(lookup, `${LOOKUP_ATTACHMENT} must exist`).toBeDefined();
+
+    expect(lookup?.code, `${LOOKUP_ATTACHMENT} must not lower the timeout`).not.toMatch(
+      /timeoutMs/,
+    );
+    expect(lookup?.code, `${LOOKUP_ATTACHMENT} must not pass RequestOptions`).not.toMatch(
+      /RequestOptions/,
+    );
   });
 
   it('publishes only the three commands ADR-003 allows', () => {

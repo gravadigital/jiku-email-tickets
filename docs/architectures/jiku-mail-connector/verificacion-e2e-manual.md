@@ -300,6 +300,125 @@ respuesta a la respuesta; y el bucket de hilos **inspeccionable** cruzando el `m
 
 ---
 
+# Parte 3: el reuso de adjuntos contra el hilo (S-029)
+
+**Por qué esta parte existe, y no es opcional.** La suite de integración corre contra un NATS de
+Testcontainers con `core` doblado por un responder del propio test, y `Client.fromConnection()`
+**saltea el handshake de auth**. Eso significa que la suite **no prueba nada** sobre: el
+auth-callout, el rol `internal-app` autorizando `pub` sobre `jiku-queries.v1.>`, el **whitelist
+real** del recurso `attachments` en la instancia, ni la existencia de una fila real en
+`attachments`. Los cuatro sólo fallan contra un despliegue de verdad, y los cuatro tienen que estar
+bien para que el reuso funcione. **Este procedimiento es el único instrumento que los verifica.**
+
+Y como ADR-006 declara que **el log es la única salida del servicio** —no hay healthcheck, ni
+métricas exportadas, ni nadie mirando— la verificación es, entera, una lectura de log.
+
+## Precondición de esta parte
+
+Un requisito creado por el conector que **ya tenga un adjunto vinculado por el conector mismo**.
+La forma más simple de conseguirlo es hacer la [Parte 1](#parte-1-el-camino-del-adjunto-s-022-ca-14)
+primero: deja exactamente eso. Anotar de su log:
+
+- el `requirementId` del alta (ej. `700`),
+- el `checksum` del adjunto subido (aparece en la línea de `files.request-upload`),
+- el `fileId` que devolvió `core`.
+
+## Rama 1: el reuso (el caso que motiva REQ-006)
+
+**Qué mandar:** responder al hilo de ese requisito desde el mismo cliente, **con Gmail**, dejando que
+arrastre el adjunto del original (es el comportamiento por default de Gmail al responder: copia los
+adjuntos del mail citado). El archivo tiene que ser **byte a byte el mismo**.
+
+**Qué confirma el log** — dos líneas y una **ausencia**:
+
+```jsonc
+// 1. La consulta encontró el vínculo y devolvió el fileId existente:
+{ "level": "info", "checksum": "<el mismo checksum de la Parte 1>", "requirementId": 700,
+  "fileId": 1000, "resultado": "reusado", "msg": "adjunto reusado del hilo" }
+
+// 2. El comentario se publicó con ESE fileId, indistinguible de uno nuevo:
+{ "level": "info", "requirementId": 700, "commentId": 9001, "msg": "comentario publicado" }
+```
+
+**Y LA AUSENCIA, que es la mitad más importante de la verificación:** para ese adjunto **no hay
+ninguna línea de `files.request-upload`** y **ninguna del `PUT`**. Si aparecen, el reuso no ocurrió
+—buscar entonces el `warn` de la Rama 3, o un `resultado: 'sin_match'` inesperado—.
+
+En Opus: el comentario muestra el adjunto normalmente, y **no** hay un archivo duplicado en el
+requisito.
+
+## Rama 2: sin match (el comportamiento de siempre)
+
+**Qué mandar:** responder al **mismo** hilo con un archivo **nuevo**, que el conector nunca subió a
+ese requisito.
+
+**Qué confirma el log** — la línea del `sin_match` seguida del **ciclo de subida completo**:
+
+```jsonc
+{ "level": "info", "checksum": "<el checksum del archivo nuevo>", "requirementId": 700,
+  "resultado": "sin_match", "msg": "sin reuso: el adjunto no esta vinculado al requisito del hilo" }
+// ... y a continuación, para ESE adjunto, la línea de `files.request-upload` y la del `PUT`.
+```
+
+Notar que esta línea **no lleva `fileId`**: no hay ninguno que reportar. Es la degradación normal, y
+es también lo que se ve cuando el vínculo del original **se borró** o su archivo **no está
+retenido**: las dos exclusiones permanentes del predicado fijo del recurso llegan como una colección
+vacía, indistinguibles de "nunca estuvo". El conector no puede reusar un vínculo borrado **ni
+equivocándose**.
+
+## Rama 3: la degradación, y por qué se verifica por AUSENCIA
+
+Provocar un fallo de la consulta a mano es difícil (habría que tirar abajo el plano de lectura). Lo
+que **sí** se verifica —y es lo que de verdad importa— es que **el filtro esté alineado con el
+whitelist real del recurso**. Si no lo estuviera, el síntoma sería inconfundible: **cada** adjunto de
+**cada** respuesta dejaría este `warn`:
+
+```jsonc
+{ "level": "warn", "checksum": "...", "requirementId": 700,
+  "diagnosis": "core_rechazo_por_forma", "sdkErrorClass": "JikuFailure",
+  "code": "invalid_fields", "resultado": "consulta_fallida",
+  "msg": "fallo la consulta de reuso de adjuntos" }
+```
+
+**La AUSENCIA de ese `warn` en una corrida normal es la confirmación de que el filtro está bien
+armado.** Es mucho log y cero pérdida: la degradación convierte el fallo en el comportamiento
+anterior, así que ni un adjunto ni un ticket se pierden — sólo se paga el duplicado que ya existía.
+
+Los otros diagnósticos que pueden aparecer en este `warn`, y qué arregla cada uno:
+
+| `diagnosis` | `code` | Qué pasó y qué se arregla |
+|---|---|---|
+| `core_rechazo_por_forma` | `invalid_fields` | **Bug del conector:** el filtro se desalineó del whitelist. Se arregla en el código |
+| `core_rechazo_por_rol` | `caller_not_authorized` / `unknown_caller` | La fila del machine user ausente en `users`. **Se corrige sola al reconectar** |
+| `core_rechazo_desconocido` | `query_timeout` / `internal_error` | Del lado de `core`. `query_timeout` es un código nuevo para este conector y cae acá **correctamente** |
+| `nada_respondio` | *(sin `code`)* | Nadie contestó la consulta: el plano de lectura no está atendiendo |
+| `bus_sin_endpoint` | *(sin `code`)* | No hay endpoint para `attachments.list` en esta instancia |
+| `desconocido` | *(sin `code`)* | Un `success` ilegible: la respuesta no era una colección |
+
+## Cross-check mecánico del whitelist, contra la instancia
+
+Para confirmar los cuatro `filterable` y el `includable` **sin adivinar**, el SDK expone
+`client.describe()` (*"lists the reads core serves"*) y `client.contract()` (*"Fetches one
+resource's whitelists"*). Correrlos **a mano, como paso del operador** —por ejemplo desde un REPL de
+Node con el cliente ya conectado— y confirmar que el recurso `attachments` declara:
+
+- `filterable` incluyendo `entityType`, `entityId`, `checksum` y `uploadedBy` (los cuatro del filtro),
+- `includable` incluyendo `checksum`,
+- `entityType` con `requirement` entre sus valores de enum.
+
+> **Deliberadamente NO se agrega una llamada a `describe()` en el arranque del servicio.** Sería un
+> **segundo** consumo del plano de lectura, y S-029 autoriza exactamente uno: `attachments.list`
+> desde `lookup-attachment.ts`. Es un paso manual del operador, no código.
+
+## Resultado esperado de la Parte 3
+
+El arrastre de Gmail **reusando** el `fileId` existente, sin permiso y sin `PUT`; un archivo nuevo
+siguiendo el ciclo completo con su línea de `sin_match`; **ninguna** línea de
+`diagnosis: core_rechazo_por_forma` en una corrida normal; y el whitelist del recurso confirmado
+contra la instancia con `contract()`.
+
+---
+
 # Contraste de capabilities del PRD (S-022, CA-15 · revisado por S-028, CA-15)
 
 Las **30 capabilities** del PRD (`docs/prd/requirements.md`, C-01 a C-30) contrastadas contra el estado

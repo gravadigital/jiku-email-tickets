@@ -50,6 +50,9 @@ describe('test/fixtures/mails/*.eml', () => {
       'attachment-without-filename.eml',
       'sensitive-body.eml',
       'html-only-quoted-reply.eml',
+      // S-029: la respuesta que ARRASTRA el adjunto del original — el caso que motiva REQ-006, y el
+      // unico fixture con `References` poblado Y un adjunto con bytes reales al mismo tiempo.
+      'reply-with-dragged-attachment.eml',
     ].sort();
 
     expect(fixtureFiles()).toEqual(expected);
