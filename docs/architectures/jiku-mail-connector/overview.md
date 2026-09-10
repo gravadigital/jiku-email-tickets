@@ -61,10 +61,12 @@ worker en node
   registra los cuatro hallazgos verificados del KV (entre ellos que `open()` **no** verifica
   existencia, y que el TTL viene en milisegundos), y de punta a punta en
   [mapa-de-hilos-en-kv](../../flows/mapa-de-hilos-en-kv.md).
-- **publicacion** — Los TRES comandos de escritura al bus via el SDK: `files.request-upload`,
-  `requirements.new` y —desde S-027— `requirements.{id}.comment`. El `PUT` del byte del adjunto a la
-  URL prefirmada que devuelve `core`. Y —desde S-029— **UNA consulta de lectura**:
-  `attachments.list`.
+- **publicacion** — Los dos planos del bus que el conector toca, y desde S-029 son **dos**:
+  **escritura** —los TRES comandos via el SDK: `files.request-upload`, `requirements.new` y —desde
+  S-027— `requirements.{id}.comment`, mas el `PUT` del byte del adjunto a la URL prefirmada que
+  devuelve `core`— y **lectura**: **su primer y unico consumo del plano de consultas**, la consulta
+  `attachments.list` que reusa un adjunto ya vinculado al Requisito del hilo en vez de subirlo de
+  nuevo. Ningun otro recurso ni operacion de lectura queda habilitado, y ADR-003 lo enumera asi.
   **Estado (S-005 a S-022):** `requirements.new` esta **implementado** de punta a punta —schema Zod
   del contrato, publicacion con `client.command()` y la traduccion de las 9 ramas de diagnostico del
   SDK al sistema que rechazo (S-005)— con **dos disparadores** desde S-015: el modo de verificacion
@@ -95,17 +97,20 @@ worker en node
   **corta el ciclo de subida** (ni permiso, ni `PUT`). Resuelve el caso que motiva REQ-006: Gmail
   arrastra los adjuntos del original en la respuesta, y hasta S-028 se subian de nuevo.
 
-  **El alcance de la derogacion, que importa mas que el cambio:** ADR-003 declara *"El conector MUST
-  NOT publicar en el plano de consultas (`jiku-queries.*`) ni suscribirse a subjects de otros
+  **El alcance de la derogacion, que importa mas que el cambio:** ADR-003 **declaraba** *"El conector
+  MUST NOT publicar en el plano de consultas (`jiku-queries.*`) ni suscribirse a subjects de otros
   servicios"*. S-029 deroga **la primera mitad, y solo para `attachments.list`**; la segunda —no
   suscribirse a subjects de otros— **queda INTACTA**, porque `client.list()` es un request/reply
   sobre el inbox propio y esta story no agrega ninguna suscripcion. Se pudo hacer porque `core`
   expuso `checksum` como **filtrable e incluible** en el recurso, precisamente para que un consumidor
   deduplique contra los vinculos existentes en **una** consulta y no en N+1 —que era el costo que la
-  regla evitaba—. **La reescritura del texto de ADR-003, del flujo y del PRD es de S-030**, no de
-  S-029: hasta entonces el caso `'touches the query plane only through attachments.list, only in the
-  lookup module'` de `test/publicacion/source-properties.test.ts` es la version **ejecutable** de la
-  regla, y mantiene prohibidos en **todo** `src/` el resto del plano de lectura
+  regla evitaba—. **El texto de ADR-003, del flujo y del PRD ya esta reescrito** (S-030): la
+  Implementation Rule quedo partida en dos —la prohibicion de suscribirse, intacta; la de consultar,
+  reescrita enumerando `attachments.list` con sus cuatro filtros— y §Decision ya no afirma que el
+  conector no usa el plano de lectura. El caso `'touches the query plane only through
+  attachments.list, only in the lookup module'` de `test/publicacion/source-properties.test.ts` sigue
+  siendo la version **ejecutable** de la regla, y mantiene prohibidos en **todo** `src/` el resto del
+  plano de lectura
   (`client.query(`, `client.get(`, `client.iterate(`, `client.all(`, `client.count(`) y el literal
   `jiku-queries`. Cualquier fallo de la consulta —los seis codigos del contrato incluidos— **degrada
   al comportamiento anterior**: se sube el archivo como siempre, con un `warn` y su `diagnosis`, y

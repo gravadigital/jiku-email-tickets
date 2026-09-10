@@ -394,14 +394,20 @@ el error que este diseño evita.
 
 ### Cobertura
 
-Las 30 capabilities de `requirements.md` (C-01 a C-30) están asignadas a exactamente un feature
-group, sin solapamientos y sin huérfanas:
+Las 31 capabilities de `requirements.md` (C-01 a C-30, más C-21b) están asignadas a exactamente un
+feature group, sin solapamientos y sin huérfanas:
 
 | Feature Group | Capabilities | Cantidad |
 |---|---|---|
 | FG-1 | C-14, C-15, C-17, C-19, C-27, C-28, C-29 | 7 |
 | FG-2 | C-01 a C-08, C-30 | 9 |
 | FG-3 | C-09 a C-13, C-16, C-18 | 7 |
-| FG-4 | C-20 a C-26 | 7 |
+| FG-4 | C-20 a C-26, **C-21b** *(REQ-006)* | 8 |
+
+> **Por qué `C-21b` y no `C-31`.** La numeración de las capabilities es **posicional dentro de su
+> feature group** —C-20 a C-26 son el ciclo del adjunto en orden— y un `C-31` al final de la lista
+> pondría el dedup contra el hilo lejos del dedup intra-mail que complementa. `C-21b` lo deja donde
+> se ejecuta: inmediatamente después de C-21 y antes de C-22, que es exactamente su lugar en el
+> pipeline.
 
 **Total estimado: 21-28 stories**, con los cuatro grupos dentro del rango de 3-8 stories.

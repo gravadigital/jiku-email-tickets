@@ -4,8 +4,8 @@ title: Ruteo y alta del requisito
 type: event
 status: Active
 created: 2026-08-31
-last_updated: 2026-09-09
-stories: [S-012, S-013, S-014, S-015, S-016, S-022, S-026, S-027, S-028]
+last_updated: 2026-09-10
+stories: [S-012, S-013, S-014, S-015, S-016, S-022, S-026, S-027, S-028, S-030]
 ---
 
 # Ruteo y Alta del Requisito
@@ -17,8 +17,10 @@ stories: [S-012, S-013, S-014, S-015, S-016, S-022, S-026, S-027, S-028]
 después del `success` del alta; el Paso 3 gana el lookup que resuelve el motivo final de una
 respuesta, con `hilo_desconocido` como motivo nuevo y `es_respuesta` cambiando de significado.
 S-027: la respuesta con match deja de descartarse y se publica como Comentario — ver
-[publicacion-requirements-comment](publicacion-requirements-comment.md))
-**Stories:** S-012, S-013, S-014, S-015, S-016, S-022, S-026, S-027, S-028
+[publicacion-requirements-comment](publicacion-requirements-comment.md).
+REQ-006 / S-030: la rama de la respuesta precisa que su procesamiento de adjuntos ya no es idéntico
+al del alta — pasa el contexto del hilo)
+**Stories:** S-012, S-013, S-014, S-015, S-016, S-022, S-026, S-027, S-028, S-030
 
 > **El diagrama incluye la rama del comentario desde S-028.** La nota de alcance de S-026 decía que
 > el Mermaid **no se tocaba** porque la salida por comentario era de S-027 y *"escribir hoy un flujo
@@ -212,7 +214,7 @@ el resultado resuelve el motivo:
 |---|---|
 | Sin match, consultable | `hilo_desconocido` |
 | No consultable (bucket inaccesible) | `es_respuesta` |
-| Con match | **No se descarta.** Desde S-027 se publica como Comentario del Requisito y cuenta en `comentados` |
+| Con match | **No se descarta.** Desde S-027 se publica como Comentario del Requisito y cuenta en `comentados`. Su procesamiento de adjuntos **ya no es idéntico al del alta**: desde S-029 la respuesta **pasa el contexto del hilo** (el `requirementId`) y por eso puede reusar un adjunto ya vinculado, mientras el alta no lo pasa y siempre sube — detalle en [publicacion-requirements-comment](publicacion-requirements-comment.md), Paso 3 |
 
 **`es_respuesta` cambió de significado dos veces.** Primero pasó de cubrir *"toda respuesta"* a cubrir *"no pude
 averiguar a qué hilo apunta"*. La distinción contra `hilo_desconocido` —*"esta respuesta apunta a un
