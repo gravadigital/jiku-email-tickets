@@ -4,8 +4,8 @@ title: Publicación de requirements.{id}.comment
 type: feature
 status: Implemented
 created: 2026-09-09
-last_updated: 2026-09-09
-stories: [S-027]
+last_updated: 2026-09-10
+stories: [S-027, S-029, S-030]
 ---
 
 # Publicación de `requirements.{id}.comment`
@@ -13,10 +13,10 @@ stories: [S-027]
 **Tipo:** Feature
 **Status:** Implemented
 **Creado:** 2026-09-09
-**Última actualización:** 2026-09-09 (S-027 implementada: la respuesta de un cliente al hilo de su
-ticket deja de descartarse y se publica como un Comentario **público** del Requisito, con sus
-adjuntos vinculados)
-**Stories:** S-027
+**Última actualización:** 2026-09-10 (REQ-006 / S-029 + S-030: el Paso 3 deja de documentar el
+duplicado como costo aceptado — el adjunto que Gmail arrastra del mail original **se reusa** contra
+el hilo por una consulta a `attachments.list`, con degradación a subir)
+**Stories:** S-027, S-029, S-030
 
 ## Descripción
 
@@ -35,9 +35,11 @@ predecesor (`grava-gestion/mail-integration` v1.0.0) sí las procesaba, con una 
 requirementId`, porque el conector no tiene base propia (ADR-001) y no puede escribir la de Jiku
 (`core` es el único escritor, ADR-003). El KV del bus resolvió exactamente eso.
 
-**Lo que NO hace, y es deliberado:** no modifica el Requisito (el Comentario es una entidad aparte),
-no consulta el Requisito antes de comentar, y no deduplica adjuntos contra el resto del hilo. Ver
-**Notas**.
+**Lo que NO hace, y es deliberado:** no modifica el Requisito (el Comentario es una entidad aparte) y
+no consulta el Requisito antes de comentar. Ver **Notas**.
+
+*(Hasta S-029 esta enumeración tenía una tercera —"no deduplica adjuntos contra el resto del hilo"—
+que **se retiró** por REQ-006 / S-030: el dedup contra el hilo se implementó. Ver Paso 3.)*
 
 ## Servicios Involucrados
 
@@ -67,10 +69,17 @@ sequenceDiagram
         MC-->>MC: descarta con motivo es_respuesta
     else con match
         KV-->>MC: requirementId
-        loop por cada adjunto aceptado
-            MC->>CORE: files.request-upload
-            CORE-->>MC: fileId + uploadUrl prefirmada
-            MC->>S3: PUT del byte
+        loop por cada adjunto aceptado (ya deduplicado intra-mail y recortado por el tope)
+            MC->>CORE: attachments.list (entityType, entityId, checksum, uploadedBy)
+            alt con match
+                CORE-->>MC: items[0].fileId — se REUSA
+                Note over MC,CORE: ni files.request-upload ni PUT
+            else items: [] o consulta fallida
+                CORE-->>MC: items: []
+                MC->>CORE: files.request-upload
+                CORE-->>MC: fileId + uploadUrl prefirmada
+                MC->>S3: PUT del byte
+            end
         end
         MC->>MC: componerDescripcion() — cuerpo + avisos + placeholders
         MC->>CORE: requirements.{id}.comment (visibilityLevel: public, fileIds)
@@ -145,19 +154,48 @@ Sus tres resultados y qué hace el tick con cada uno:
 blanca, tope de tamaño, tope de 10, dedup **intra-mail** por checksum, placeholders al final,
 continue-on-failure.
 
-**Ref:** S-017 a S-021, reusadas sin cambios por S-027
+**Ref:** S-017 a S-021, reusadas sin cambios por S-027 · **la consulta de reuso: S-029, REQ-006**
 
-> **El caso observado en la prueba local, y aceptado:** Gmail arrastra los adjuntos del mail
-> original en la respuesta. El dedup intra-mail colapsa las repeticiones **dentro de esa respuesta**,
-> pero el archivo **se sube de nuevo** porque ya estaba vinculado al Requisito por el mail original.
-> Es una fila más en `files` y un objeto más en S3, y Jiku ya declara el archivo con 0..N vínculos
-> como estado válido.
+> **El reuso del adjunto contra el hilo.** Gmail arrastra los adjuntos del mail original en la
+> respuesta, y desde S-029 ese archivo **no vuelve a subirse**: se reusa el `fileId` que ya está
+> vinculado al Requisito. La pregunta es una consulta a **`attachments.list`** con cuatro filtros
+> —`entityType` (`requirement`), `entityId` (el `requirementId` del hilo), `checksum` (el hash que ya
+> calculó el dedup intra-mail) y `uploadedBy` (el `sub` del caller)— con `include: ['checksum']`,
+> `fields: ['fileId']` y `limit: 1`.
 >
-> **No se deduplica contra el hilo**, y la razón es la forma del contrato de consultas:
-> `attachments.list` **no** devuelve `checksum` y `files` no tiene `list`. Deduplicar contra el hilo
-> serían **N+1 consultas por respuesta** para evitar un placeholder repetido — y obligaría a tocar el
-> plano de consultas, que ADR-003 prohíbe. Si en la práctica molesta, la solución correcta es pedirle
-> a Jiku que `attachments.list` exponga `checksum` como incluible, y entonces el dedup es **una** consulta.
+> **Sus dos ramas, y son dos, no tres:**
+>
+> - **Con match** → se reusa `items[0].fileId`. **No** corre `files.request-upload` y **no** corre el
+>   `PUT`: el byte ya está en el storage. El adjunto queda en estado `reusado` y su `fileId` entra en
+>   los `fileIds` del comentario igual que uno subido.
+> - **`items: []`** → no hay nada que reusar y se sube como siempre: permiso + `PUT`. La ausencia de
+>   match es un `success` con la lista vacía, **nunca** un `*_not_found`.
+>
+> **La degradación: cualquier fallo de la consulta degrada a subir.** Los seis códigos del contrato,
+> el timeout, el `JikuError` de forma y cualquier clase del SDK caen todos en la misma rama, loguean
+> `warn` y devuelven el mismo resultado que "pregunté y no hay". La degradación **no tiene variante
+> propia** a propósito — el llamador no tiene nada distinto que hacer con cada caso. El peor
+> escenario es exactamente el duplicado que existía antes de REQ-006: nunca un adjunto ni un ticket
+> perdido.
+>
+> **El orden es `intra-mail → tope → consulta`, y no se invierte.** El pipeline real es
+> `particionar() → deduplicar() → aplicarTope() → consulta → permiso → PUT`. El **dedup intra-mail se
+> conserva y corre primero**: colapsa las repeticiones dentro de la respuesta, así que se paga **una
+> consulta por checksum sobreviviente**, no una por adjunto. Y el tope de 10 corre **antes** de la
+> consulta: un excedente que se va a descartar **no paga consulta**.
+>
+> **La precondición que este flujo pedía, se entregó.** Hasta S-027 este paso registraba que
+> deduplicar contra el hilo serían N+1 consultas, y que la solución correcta era pedirle a Jiku que
+> `attachments.list` expusiera `checksum` como incluible. **Eso ocurrió:** `core` lo entregó en su
+> **REQ-014** (`status: formalized`), declarándolo **filtrable e incluible**, con esta nota verbatim
+> en el contrato — *"Es FILTRABLE para que un consumidor pueda deduplicar contra los vínculos ya
+> existentes en UNA consulta, combinándolo con `uploadedBy`"*. **Ésta es esa consulta**, y por eso es
+> una y no N+1.
+>
+> **Es el primer y único consumo del plano de lectura del conector**, y la habilitación es puntual:
+> ADR-003 la reescribió enumerando este caso, no abriendo el plano. La prohibición de **suscribirse**
+> a subjects de otros servicios **no se derogó**: `client.list()` es un request/reply sobre el inbox
+> propio.
 
 ---
 
@@ -227,6 +265,7 @@ Tras el `success`, se escribe `sha256(Message-Id de la respuesta) → requiremen
 |---|---|---|---|
 | 2 | El bucket de hilos no se puede leer | — | Descarta con `es_respuesta`. **No** se comenta: sin saber el Requisito no hay dónde |
 | 2 | Ninguna referencia matchea | — | Descarta con `hilo_desconocido`. Log `warn`, **una sola línea** |
+| 3 | **Falla la consulta de reuso** (`attachments.list`: timeout, cualquiera de los seis códigos, `JikuError` de forma) | — | Log `warn`, **degrada a subir**: sigue el ciclo normal de permiso + `PUT`. **No cuesta un adjunto ni un ticket** (reglas 13 y 27), y el peor caso es el duplicado que existía antes de REQ-006 |
 | 3 | Un adjunto lo rechaza la política local | — | **El comentario se publica igual**, con el aviso en su texto |
 | 3 | Falla el `PUT` del byte | — | Ídem: aviso de fallo en el texto, el comentario **no** se cancela |
 | 4 | `core` rechaza el comando (`requirement_not_found`, `file_not_owned`, cualquier otro) | `PUBLISH_ERROR` | `fallidos += 1`, **sin write**, sin reintento. El `for` **continúa** con el siguiente UID |
@@ -254,9 +293,14 @@ una entrada nueva en el Mapa de Hilos que permite que la conversación siga.
 sigue sin publicar ningún comando de edición, y hay un test de propiedad que escanea `src/` para
 afirmar que ningún sufijo de comando dinámico sea `.update`, `.delete` o `.close`.
 
-**No se consulta el Requisito antes de comentar.** Si se borró, `core` contesta
-`requirement_not_found` y **ese es el diagnóstico**. Consultar antes sería usar el plano de lectura
-que ADR-003 prohíbe, para adelantar un error que el comando ya da con más precisión.
+**No se consulta el Requisito antes de comentar.** Sigue siendo cierto: no se publica
+`requirements.get`. Si el Requisito se borró, `core` contesta `requirement_not_found` y **ese es el
+diagnóstico**. La razón es que consultar antes **adelantaría un error que el comando ya da con más
+precisión** — no que el plano de lectura esté prohibido. *(PRECISADA por REQ-006 / S-030: hasta
+entonces esta nota se apoyaba además en "usar el plano de lectura que ADR-003 prohíbe". Esa razón
+dejó de valer: la prohibición se derogó puntualmente para `attachments.list` (ver Paso 3). La nota
+**se conserva** porque su otra razón alcanza sola — y queda anotado para que no se repone la
+derogada.)*
 
 **El texto del comentario es contenido del cliente** y nunca se loguea. La defensa es doble: ningún
 punto de log lo incluye (estructural, con un test que lo afirma) y `REDACT_PATHS` cubre `comment` y

@@ -154,10 +154,19 @@ son quienes disparan, configuran o consumen su resultado.
   el contrato de consultas del bus, y está marcado para eliminarse: un conector que resolviera por
   bus **no tiene por dónde**. Guardar el id y no el nombre es lo que hace al KV autosuficiente.
 
-- **El conector no consulta el bus: sólo escribe** (decisión 4): Validar el proyecto antes de crear
+- **El alta no valida el proyecto antes de crear** (decisión 4): Validar el proyecto antes de crear
   no agregaría información —`core` ya responde `project_not_found`, que nombra el problema real— y
   duplicaría la validación con la peor de las dos decidiendo. Además el plano de lectura exige fila
   en `users`, así que validar antes **adelantaría el fallo con un código que no señala la causa**.
+
+  *(PRECISADA por REQ-006 / S-030: esta decisión se enunciaba como "**El conector no consulta el
+  bus: sólo escribe**". Esa restricción quedó **derogada puntualmente**: desde REQ-006 el conector
+  consulta el plano de lectura en **un caso enumerado** —`attachments.list` filtrando por
+  `entityType`, `entityId`, `checksum` y `uploadedBy`, para reusar un adjunto ya vinculado al
+  Requisito del hilo— y nada más (ADR-003, Implementation Rule del plano de consultas; invariante 28).
+  **Lo que la decisión realmente decide sigue vigente entero:** el alta no valida el proyecto antes
+  de crear, por el argumento de arriba, que no se apoyaba en la prohibición sino en el diagnóstico
+  de `core`. Ver también ADR-004, vigente.)*
 
 - **El autor es el machine user del conector, resuelto del subject por `core`** (decisión 6): No hay
   persona detrás de un mail entrante, y `resolveActor` ya hace exactamente esto para un publicador

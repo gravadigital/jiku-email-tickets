@@ -204,22 +204,50 @@ describe('el catalogo de codigo reutilizable suma las dos piezas de esta story',
   });
 });
 
-describe('la derogacion DOCUMENTAL de ADR-003 sigue pendiente en S-030', () => {
-  it('ADR-003 NO fue modificada por esta story: su texto sigue prohibiendo el plano de consultas', async () => {
-    // ESTE CASO ES SOBRE LA STORY SIGUIENTE, y es deliberado.
-    //
-    // S-029 implementa el CAMBIO DE COMPORTAMIENTO; S-030 reescribe el TEXTO. Mientras las dos
-    // esten separadas hay una inconsistencia real entre el codigo y la ADR, y la unica forma de que
-    // no se convierta en una inconsistencia OLVIDADA es que algo la afirme: mientras este caso
-    // pase, la deuda documental esta REGISTRADA. Cuando S-030 reescriba la ADR, este caso va a
-    // fallar — y ese fallo es la señal de que este archivo tiene que actualizarse con ella, no de
-    // que el test este mal.
-    //
-    // Hasta entonces, quien tiene razon sobre la frontera del plano de lectura es
-    // `test/publicacion/source-properties.test.ts`, que la mantiene EJECUTABLE.
+describe('la derogacion DOCUMENTAL de ADR-003 YA OCURRIO (S-030)', () => {
+  // ESTE BLOQUE ERA LA DEUDA DOCUMENTAL REGISTRADA, y S-030 la salda.
+  //
+  // S-029 implemento el CAMBIO DE COMPORTAMIENTO; S-030 reescribio el TEXTO. Mientras las dos
+  // estuvieron separadas hubo una inconsistencia real entre el codigo y la ADR, y este bloque
+  // afirmaba que la ADR seguia prohibiendo el plano de consultas — precisamente para que la deuda
+  // no se olvidara. Su comentario decia que cuando S-030 reescribiera la ADR el caso iba a fallar,
+  // y que ese fallo era la señal de actualizar este archivo. Eso paso: los tres casos de abajo
+  // invierten la afirmacion y ahora vigilan que la reescritura NO SE REVIERTA.
+  //
+  // Quien tiene razon sobre la frontera del plano de lectura sigue siendo
+  // `test/publicacion/source-properties.test.ts`, que la mantiene EJECUTABLE sobre `src/`. Este
+  // archivo vigila el TEXTO; aquel, el codigo.
+
+  it('la prohibicion absoluta ya no es una regla vigente: solo sobrevive citada en su anotacion', async () => {
     const adr = await read(ADR_003);
 
     expect(adr.length).toBeGreaterThan(500);
-    expect(adr).toMatch(/MUST NOT publicar en el plano de consultas/);
+    // El literal derogado NO puede aparecer como bullet de Implementation Rule. Si aparece, es
+    // dentro de la anotacion de reescritura, citando el texto anterior — nunca al inicio de un
+    // item de lista.
+    expect(adr).not.toMatch(/^- El conector MUST NOT publicar en el plano de consultas/m);
+    expect(adr).toMatch(/REESCRITA por REQ-006 \/ S-030/);
+  });
+
+  it('la regla nueva enumera el caso habilitado con los CUATRO filtros exactos del codigo', async () => {
+    const adr = await read(ADR_003);
+
+    // Los nombres se copian del codigo (`lookup-attachment.ts`), no se parafrasean: una regla
+    // parafraseada no es verificable contra el contrato.
+    expect(adr).toMatch(/La única consulta permitida en el plano de consultas/);
+    expect(adr).toContain('`attachments.list`');
+    for (const filtro of ['entityType', 'entityId', 'checksum', 'uploadedBy']) {
+      expect(adr).toContain(filtro);
+    }
+    // Enumera de forma CERRADA: la habilitacion puntual va con su cierre explicito.
+    expect(adr).toMatch(/MUST NOT publicarse ninguna otra consulta/);
+  });
+
+  it('la prohibicion de SUSCRIBIRSE sobrevive como regla propia e independiente', async () => {
+    const adr = await read(ADR_003);
+
+    // Es la mitad que NO se derogo, y quedo como item de lista separado a proposito: si siguiera
+    // compartiendo bullet con la derogada, el proximo lector que borre el bullet se lleva las dos.
+    expect(adr).toMatch(/^- El conector MUST NOT suscribirse a subjects de otros servicios$/m);
   });
 });

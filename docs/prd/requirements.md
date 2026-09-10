@@ -71,9 +71,12 @@ bus de Jiku, que ya es su dependencia, como su único mecanismo de estado.
   opt), `contentId` (string, opt)
 - **Relaciones:** belongs_to Mail Entrante
 - **Notas:** Efímero, igual que su mail. `mimeType` y `size` son **declaraciones**, y ni el conector
-  ni Jiku verifican que se correspondan con el byte. `contentDisposition` y `contentId` se conservan
-  aunque v1 no los use: son lo que permitiría distinguir una imagen inline (una firma, un logo) de
-  un adjunto real, y **v1 decide tratarlas igual**.
+  ni Jiku verifican que se correspondan con el byte. El `checksum` tiene **dos consumidores**
+  *(REQ-006)*: el `checksum` del payload de `files.request-upload` y el filtro de la consulta de
+  reuso contra el hilo — **se calcula una sola vez** (en el dedup intra-mail) y nunca se recalcula.
+  `contentDisposition` y `contentId` se conservan aunque v1 no los use: son lo que permitiría
+  distinguir una imagen inline (una firma, un logo) de un adjunto real, y **v1 decide tratarlas
+  igual**.
 
 ### Entrada del Mapa de Tickets
 
@@ -147,13 +150,22 @@ bus de Jiku, que ya es su dependencia, como su único mecanismo de estado.
   max 100), `fileSize` (int, req, ≥ 1), `checksum` (string sha256, opt)
 - **Atributos que decide `core` y el conector nunca elige:** `storageKey`, `storageBucket`,
   `storageRegion`, `byteStatus`, `uploadedBy`, `retentionStatus`
-- **Relaciones:** has_many Adjunto (**0..N** — un archivo puede no estar vinculado a nada)
+- **Relaciones:** has_many Adjunto (**0..N** — un archivo puede no estar vinculado a nada, y
+  *(REQ-006)* también puede tener **N vínculos vivos por diseño**: ver Notas)
 - **Notas:** **Quien sube no elige dónde se guarda** — `core` construye la clave. El conector recibe
   el `id` y una URL prefirmada, y hace el `PUT` del byte directo al storage: **el byte nunca viaja
   por el bus** (el `max_payload` es 1 MB y los adjuntos llegan a 10 MB). `uploadedBy` queda con el
   `sub` del caller, resuelto por `core`, y es **lo que hace que la titularidad se cumpla por
   construcción**. Un archivo huérfano —subido y nunca vinculado— es un estado válido y nadie lo
   limpia.
+
+  **El `0..N` se extiende en el otro sentido** *(REQ-006)*: a partir del dedup contra el hilo, el
+  conector **crea vínculos nuevos sobre un Archivo que no subió en este tick**, así que un mismo
+  Archivo pasa a tener **N vínculos vivos por diseño y no por accidente** — uno por el mail original
+  y uno por cada respuesta que arrastró el mismo byte. La titularidad sigue cumpliéndose por
+  construcción, y ahora está garantizada **también en la lectura**: la consulta de reuso filtra por
+  `uploadedBy` con la identidad propia, así que el `fileId` reusado es siempre vinculable y nunca
+  produce un `file_not_owned`.
 
 ### Adjunto *(entidad de Jiku)*
 
@@ -200,8 +212,9 @@ sigue siendo la única marca y el KV no se aprovecha para idempotencia.
 |---|---|---|---|
 | `pendiente` | Recién parseado del mail | → `aceptado`, `rechazado` | — |
 | `rechazado` | Falla la política local, o `core` la rechaza | (terminal) → deja **aviso** en la descripción | → `aceptado` |
-| `aceptado` | Pasa la política y está dentro del tope de 10 | → `subido`, `duplicado`, `fallido` | — |
+| `aceptado` | Pasa la política y está dentro del tope de 10 | → `subido`, `duplicado`, `reusado`, `fallido` | — |
 | `duplicado` | Su checksum ya apareció en el mismo mail | (terminal) → **no deja aviso ni placeholder** | → `subido` |
+| `reusado` | Su checksum ya estaba **vinculado al Requisito del hilo** y lo subió el conector (REQ-006) | → `vinculado`, `fallido` | → `subido`. **No gastó `files.request-upload` ni `PUT`** |
 | `subido` | El `PUT` a la URL prefirmada respondió OK | → `vinculado`, `huerfano` | — |
 | `fallido` | El `PUT` o el pedido de permiso falló | (terminal) → deja **aviso** en la descripción | → `subido` |
 | `vinculado` | El alta del Requisito con su `fileId` fue `success` | (terminal) | — |
@@ -210,6 +223,23 @@ sigue siendo la única marca y el KV no se aprovecha para idempotencia.
 **`duplicado` y `rechazado` son estados distintos a propósito, y confundirlos sería un bug**: un
 rechazado le avisa al cliente que su archivo no entró; un duplicado es el **mismo** archivo que ya
 entró, así que avisar sería ruido y contar el placeholder dos veces sería mentira.
+
+**`reusado` es el cuarto estado que no hay que confundir con ninguno de los tres** (REQ-006), y cada
+contraste es un bug distinto si se pierde:
+
+- **contra `subido`:** el `reusado` **no gastó** un `files.request-upload` ni un `PUT`, así que **no
+  creó fila en `files` ni objeto en el storage**. Tratarlo como subido haría creer que hay un archivo
+  nuevo que no existe.
+- **contra `duplicado`:** el `reusado` **sí deja placeholder** y **sí entra en los `fileIds`** — el
+  archivo del cliente llega al hilo. El `duplicado` no deja nada y no se vincula. Tratarlo como
+  duplicado le sacaría al cliente un adjunto que sí tiene.
+- **contra `rechazado`:** el `reusado` **no deja aviso**, porque no es una falla. Avisar de un reuso
+  sería el mismo ruido que la regla 12 evita para el duplicado intra-mail.
+
+Su transición terminal la decide el comentario (o el alta): `reusado → vinculado` con `success`, y
+`reusado → fallido` si la escritura falla. **Un `reusado` nunca llega a `huerfano`**, y es la única
+mejora de este estado sobre la ventana de huérfanos de ADR-003: el archivo ya estaba vinculado a otra
+cosa antes de esta escritura, así que un fallo no lo deja sin vínculo.
 
 ---
 
@@ -246,7 +276,12 @@ entró, así que avisar sería ruido y contar el placeholder dos veces sería me
 11. **Adjunto del Mail** — A lo sumo **10** por Requisito. Es el `maxItems` del contrato del bus, no
     un límite de transporte: es una regla de dominio.
 12. **Adjunto del Mail** — Dos adjuntos con el mismo checksum en el mismo mail **se colapsan a
-    uno**, y el colapsado no deja aviso ni placeholder.
+    uno**, y el colapsado no deja aviso ni placeholder. **Y** *(REQ-006)* un adjunto de una
+    **respuesta al hilo** cuyo checksum ya está vinculado al Requisito del hilo **y fue subido por el
+    conector** se **reusa** en vez de subirse. El reuso, **al contrario del colapso intra-mail**, sí
+    deja placeholder y sí se vincula: el archivo del cliente llega al hilo, apuntando al `fileId` que
+    ya existía. Los dos dedups **conviven y el intra-mail va primero** — colapsa las repeticiones
+    dentro de la respuesta, y recién entonces se consulta una vez por checksum sobreviviente.
 13. **Adjunto del Mail** — El fallo de un adjunto **nunca cancela el Requisito**. Abortar
     convertiría un archivo corrupto en un ticket perdido, y el ticket es el activo.
 14. **Archivo** — El conector **no elige la clave de storage**: la construye `core`. Un conector que
@@ -283,6 +318,20 @@ entró, así que avisar sería ruido y contar el placeholder dos veces sería me
 27. **Tick** *(REQ-005)* — Un fallo del write al Mapa de Hilos **nunca cancela el alta**: se loguea y
     la consecuencia asumida es que ese hilo no va a rutear después. Convertir una falla de KV en un
     ticket perdido sería lo contrario de la regla 13 ("el ticket es el activo").
+28. **Caller** *(REQ-006)* — El conector **puede** publicar en el plano de consultas
+    (`jiku-queries.*`), y el **único caso habilitado en v1** es la consulta de reuso de adjuntos
+    (`attachments.list` filtrando por `entityType`, `entityId`, `checksum` y `uploadedBy`). Es una
+    habilitación **puntual y enumerada, no un plano abierto**: el alta sigue sin consultar nada antes
+    de crear (ADR-004), y el comentario sigue sin consultar el Requisito antes de comentar. Deroga la
+    Implementation Rule de ADR-003 (*"MUST NOT publicar en el plano de consultas"*), completando la
+    derogación que REQ-005 dejó a medias — allí se derogó *"sólo escribe"* como restricción de
+    diseño, pero la regla de la ADR nunca se reescribió. **Suscribirse a subjects de otros servicios
+    sigue prohibido**: eso no se derogó.
+29. **Adjunto del Mail** *(REQ-006)* — Un fallo de la consulta de reuso **nunca cuesta un adjunto ni
+    un ticket**: se loguea con su motivo y el adjunto **se sube como hoy**. Es la misma forma que la
+    regla 27 le dio al fallo del write del Mapa de Hilos, y por la misma razón de la regla 13 — el
+    ticket es el activo, y una **optimización** no puede costar un archivo que el código actual sí
+    entrega. El peor caso del fallo es el duplicado que ya existía antes de REQ-006.
 
 ---
 
@@ -485,10 +534,11 @@ para que el equipo vea el problema sin que yo tenga que describirlo.
 | ID | Capability | Actor | Entity | Operation | Key Fields | Business Rules |
 |----|-----------|-------|--------|-----------|------------|----------------|
 | C-20 | Particionar los adjuntos por la política local | Caller | Adjunto del Mail | ACTION | `allowedExtensions` (string[]), `maxFileSize` (int) | **La política autoritativa es la de `core`**, que lee la doble lista blanca —extensión **y** MIME— en caliente de `system_settings`. La local es una **conveniencia** para no gastar un round-trip en un `.exe`, y **puede quedar desalineada**. Tamaño 0 o sobre el tope: rechazado. Cada rechazado deja **aviso** en la descripción |
-| C-21 | Deduplicar por checksum dentro del mail | Caller | Adjunto del Mail | ACTION | `checksum` (string sha256, calculado por el conector) | Dos adjuntos idénticos **se colapsan a uno**. Un colapsado **no es un rechazo**: no suma aviso ni placeholder. Confundir `duplicado` con `rechazado` sería un bug — avisar de un duplicado sería ruido, y contar su placeholder dos veces sería mentira |
-| C-22 | Pedir permiso de subida | Caller | Archivo | CREATE | `fileName` (string, req, max 255), `mimeType` (string, req, max 100), `fileSize` (int, req, ≥ 1), `checksum` (string sha256, opt) | Vía `files.request-upload`. `core` valida la doble lista blanca, crea la fila de `files` con el byte sin verificar, **construye la clave** —el conector **no elige dónde se guarda**— y devuelve el `fileId` y una URL prefirmada de `PutObject`. Si responde `failure` (`file_type_not_allowed`, `file_too_large`), el archivo se saltea con aviso y **el requisito se crea sin él** |
-| C-23 | Subir el byte a la URL prefirmada | Caller | Archivo | ACTION | timeout del `PUT` (int, default `30000` ms) | **`PUT` directo al storage, no por el bus**: el `max_payload` de NATS es 1 MB y los adjuntos llegan a 10 MB — no es una optimización, es la única forma. **Sin credenciales de S3**: sólo la URL que `core` firmó. **No hace falta CORS**: lo hace un proceso de servidor, no un navegador. Si el `PUT` falla, el archivo se saltea con warn y aviso, y **el requisito se crea igual** |
-| C-24 | Aplicar el tope de 10 archivos | Caller | Archivo | ACTION | `fileIds` (int[], **maxItems 10**) | **Es el `maxItems` del contrato, no un límite de transporte**: es una regla de dominio y **no es configurable**. Un mail con 15 adjuntos aceptables sube los primeros 10 y anota los otros 5 como no adjuntados |
+| C-21 | Deduplicar por checksum dentro del mail | Caller | Adjunto del Mail | ACTION | `checksum` (string sha256, calculado por el conector) | Dos adjuntos idénticos **se colapsan a uno**. Un colapsado **no es un rechazo**: no suma aviso ni placeholder. Confundir `duplicado` con `rechazado` sería un bug — avisar de un duplicado sería ruido, y contar su placeholder dos veces sería mentira. **Se conserva sin cambios y corre PRIMERO**, antes de C-21b *(REQ-006)*: colapsar antes de consultar evita gastar consultas por un archivo que igual se iba a colapsar |
+| C-21b | Deduplicar contra el hilo por checksum *(REQ-006)* | Caller | Adjunto (de Jiku) | READ | `entityType` (`'requirement'`), `entityId` (int — el `requirementId` del Mapa de Hilos), `checksum` (string sha256), `uploadedBy` (string — el `sub` propio); `include: [checksum]` | **La primera y única consulta del conector al plano de lectura** (`attachments.list`), y **sólo en la rama de la respuesta**: un mail nuevo no tiene hilo contra el que deduplicar y no consulta nada. Con match: **no** se pide permiso (C-22) y **no** se sube el byte (C-23) — se reusa el `fileId` y se emite su placeholder normalmente, **sin aviso de reuso**. Sin match (`items: []`): el ciclo actual completo. **Los cuatro filtros son obligatorios y por razones distintas**: `entityId` es lo que impide cruzar un archivo entre dos clientes (G-04), y `uploadedBy` es lo que garantiza que el `fileId` sea vinculable y nunca produzca `file_not_owned`. **Un fallo de la consulta degrada a subir** (regla 29), nunca cuesta un adjunto |
+| C-22 | Pedir permiso de subida | Caller | Archivo | CREATE | `fileName` (string, req, max 255), `mimeType` (string, req, max 100), `fileSize` (int, req, ≥ 1), `checksum` (string sha256, opt) | Vía `files.request-upload`. `core` valida la doble lista blanca, crea la fila de `files` con el byte sin verificar, **construye la clave** —el conector **no elige dónde se guarda**— y devuelve el `fileId` y una URL prefirmada de `PutObject`. Si responde `failure` (`file_type_not_allowed`, `file_too_large`), el archivo se saltea con aviso y **el requisito se crea sin él**. **Precondición nueva** *(REQ-006)*: en la rama de la respuesta, este paso corre **sólo si C-21b no encontró match** — con match no se publica el comando y no se crea fila en `files` |
+| C-23 | Subir el byte a la URL prefirmada | Caller | Archivo | ACTION | timeout del `PUT` (int, default `30000` ms) | **`PUT` directo al storage, no por el bus**: el `max_payload` de NATS es 1 MB y los adjuntos llegan a 10 MB — no es una optimización, es la única forma. **Sin credenciales de S3**: sólo la URL que `core` firmó. **No hace falta CORS**: lo hace un proceso de servidor, no un navegador. Si el `PUT` falla, el archivo se saltea con warn y aviso, y **el requisito se crea igual**. **Con un reuso de C-21b este paso no corre**: es el ahorro concreto — un objeto de menos en el storage por respuesta *(REQ-006)* |
+| C-24 | Aplicar el tope de 10 archivos | Caller | Archivo | ACTION | `fileIds` (int[], **maxItems 10**) | **Es el `maxItems` del contrato, no un límite de transporte**: es una regla de dominio y **no es configurable**. Un mail con 15 adjuntos aceptables sube los primeros 10 y anota los otros 5 como no adjuntados. **Un `fileId` reusado consume cupo igual que uno nuevo** *(REQ-006)*: el `maxItems` es del contrato y no distingue el origen. El tope se aplica **antes** de C-21b, así que no se paga una consulta por un excedente |
 | C-25 | Vincular los archivos al requisito | Caller | Adjunto (de Jiku) | CREATE | `fileIds` (int[], opt) | Se pasan en el alta (C-16). `core` crea el Requisito y, **en la misma transacción**, valida la titularidad de cada archivo e inserta un vínculo por cada uno. **La titularidad se cumple por construcción**: `core` resuelve el actor del subject —infalsificable— e ignora lo que el conector declare, así que `uploaded_by == actor` se satisface sin que el conector haga nada. **El conector nunca crea el Adjunto directamente** ni conoce su `id` |
 | C-26 | Componer la descripción final | Caller | Requisito | ACTION | — | Orden **determinístico**: cuerpo base, después los avisos de rechazo, después los avisos de fallo de subida, y **los placeholders siempre al final**. **Un fallo de un archivo nunca cancela el Requisito**: abortar convertiría un archivo corrupto en un ticket perdido, y el ticket es el activo |
 

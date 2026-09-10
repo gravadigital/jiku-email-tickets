@@ -1,6 +1,8 @@
 # ADR-003: Toda escritura por comandos del bus, con el byte fuera de banda
 
-**Status:** Accepted (regla de los comandos permitidos reescrita el 2026-09-08 por REQ-005 / S-027)
+**Status:** Accepted (dos reescrituras, de dos reglas distintas: la de los **comandos permitidos** el
+2026-09-08 por REQ-005 / S-027, y la del **plano de consultas** el 2026-09-10 por REQ-006 / S-030.
+La decisión no se supersede: cambió el alcance de dos de sus Implementation Rules)
 **Date:** 2026-08-26
 **Deciders:** Technical Leader
 **Tags:** integracion, escritura, bus, storage, adjuntos
@@ -38,8 +40,19 @@ una optimización — **es la única forma posible**.
 La escritura de un adjunto queda entonces en **dos planos separados: el permiso y el byte.** El
 permiso viaja por el bus; el byte va directo al storage.
 
-**El conector no usa el plano de lectura del bus.** Sólo escribe. Ver
-[ADR-004](ADR-004-mapa-tickets-kv-local.md) para por qué no consulta antes de crear.
+**Del plano de lectura del bus el conector usa exactamente una consulta: `attachments.list`**, y
+sólo para preguntar si el `checksum` de un adjunto ya está vinculado al Requisito del hilo por el
+propio conector, para reusar ese `fileId` en vez de subir el byte de nuevo. Filtra por
+`entityType`, `entityId`, `checksum` y `uploadedBy`, y nada más del plano de lectura queda
+habilitado. Ver la Implementation Rule correspondiente para el alcance exacto.
+
+El **alta** sigue sin consultar antes de crear: ver
+[ADR-004](ADR-004-mapa-tickets-kv-local.md) para por qué. Esa razón sigue vigente y sigue acotada al
+alta — un conector que empezara a consultar antes de crear reintroduciría lo que ADR-004 descartó.
+
+*(REESCRITO por REQ-006 / S-030: hasta entonces esta frase decía "**El conector no usa el plano de
+lectura del bus.** Sólo escribe". Dejó de ser cierto cuando REQ-006 habilitó la consulta de reuso de
+adjuntos contra el hilo. El puntero a ADR-004 se conserva, acotado al alta.)*
 
 **Tres cosas que el conector deliberadamente no decide, porque son de `core`:**
 
@@ -69,8 +82,24 @@ con el barrido de abandonados fuera del alcance del producto entero.
   tercero es el que convierte la respuesta de un cliente en un Comentario del Requisito, y es el
   único de los tres cuyo `method` lleva un id embebido — lo arma el publicador y el SDK deriva el
   subject, sin concatenar subjects a mano.)*
-- El conector MUST NOT publicar en el plano de consultas (`jiku-queries.*`) ni suscribirse a subjects
-  de otros servicios
+- El conector MUST NOT suscribirse a subjects de otros servicios
+  *(No se derogó y sigue vigente. `client.list()` no la viola: es un **request/reply sobre el inbox
+  propio**, no una suscripción. Por eso esta regla quedó como ítem independiente del de las
+  consultas — comparten historia, no alcance.)*
+- La única consulta permitida en el plano de consultas (`jiku-queries.*`) es **`attachments.list`**,
+  filtrando por **`entityType`**, **`entityId`**, **`checksum`** y **`uploadedBy`**, y sólo para el
+  reuso de un adjunto ya vinculado al Requisito del hilo. MUST NOT publicarse ninguna otra consulta
+  en `jiku-queries.*`
+  *(REESCRITA por REQ-006 / S-030: hasta entonces la regla decía "El conector MUST NOT publicar en el
+  plano de consultas (`jiku-queries.*`) ni suscribirse a subjects de otros servicios" — una
+  prohibición absoluta de las dos cosas. Cambió porque `core` expuso `checksum` como filtrable e
+  incluible en `attachments.list` (su REQ-014), y con eso el dedup contra el hilo pasó de N+1
+  consultas a **una**. La derogación es **puntual: un caso enumerado, no un plano abierto** — ningún
+  otro recurso ni operación de lectura queda habilitado, y `test/publicacion/source-properties.test.ts`
+  lo mantiene ejecutable. Esta reescritura **completa la derogación que REQ-005 dejó a medias**: allí
+  se derogó "sólo escribe" como restricción de diseño, pero esta regla nunca se reescribió y quedó
+  prohibiendo lo que el código iba a hacer. El **alta** sigue sin consultar antes de crear, por
+  [ADR-004](ADR-004-mapa-tickets-kv-local.md), que sigue vigente.)*
 - El byte de un adjunto MUST viajar por `PUT` HTTPS a la `uploadUrl` devuelta por
   `files.request-upload`. MUST NOT incluirse en el payload de ningún comando
 - El `PUT` MUST hacerse con `fetch` nativo y un timeout de **30000 ms**

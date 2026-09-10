@@ -184,6 +184,11 @@ Itera `mail.referenceIds` **en el orden recibido**, secuencialmente, y por cada 
 
 - **`null`** es "no está" — un resultado normal, no un fallo — y se sigue con la siguiente referencia.
 - **Hit válido** → devuelve el `requirementId` y **CORTA**: las referencias posteriores no se consultan.
+  Ese `requirementId` tiene **dos consumidores** desde S-029: es el `{id}` del comando
+  `requirements.{id}.comment`, y es el `entityId` de la consulta de reuso de adjuntos contra el hilo
+  (ver [publicacion-requirements-comment](publicacion-requirements-comment.md), Paso 3). El
+  comportamiento de **este** flujo no cambia por eso: se devuelve el mismo valor, sin paso, rama ni
+  fallo nuevos.
 - **Valor mal formado** (no un entero seguro estrictamente positivo, o que no se re-serialice
   idéntico) → **no es un hit**: se saltea con un `warn` que nombra el `messageIdHash`, y la iteración
   **continúa** con la siguiente. El dato malo de una clave no puede tapar el hilo real que está en la
