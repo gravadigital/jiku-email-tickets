@@ -19,11 +19,11 @@ import { AppError } from '#shared/errors/index.js';
  * lo encuentre en el proyecto de Jiku tiene que poder reconocer de inmediato que no es trabajo
  * real, sin preguntarle a nadie.
  */
-export const VERIFY_TITLE = '[verificacion de despliegue] jiku-mail-connector';
+export const VERIFY_TITLE = '[verificacion de despliegue] jiku-email-tickets';
 
 /** La descripcion del requisito de prueba. Misma razon que el titulo: se lee sola. */
 export const VERIFY_DESCRIPTION =
-  'Requisito generado por el modo de verificacion de jiku-mail-connector (npm run verify) para ' +
+  'Requisito generado por el modo de verificacion de jiku-email-tickets (npm run verify) para ' +
   'comprobar que el conector puede publicar comandos en el bus de Jiku. No es un requisito real ' +
   'y se puede ignorar. El conector no tiene comando de compensacion, asi que no puede borrarlo ' +
   'ni modificarlo: cada corrida deja uno nuevo.';

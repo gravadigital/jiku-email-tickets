@@ -48,7 +48,7 @@ traducción de errores queda igual**, y el punto de log también: la línea vive
 
 | Servicio | Rol | Tipo de Participación |
 |----------|-----|-----------------------|
-| jiku-mail-connector | Arma el payload (fijo o derivado del mail), publica el comando y traduce la respuesta | Iniciador |
+| jiku-email-tickets | Arma el payload (fijo o derivado del mail), publica el comando y traduce la respuesta | Iniciador |
 | Bus NATS + auth-callout | Autoriza el subject y entrega el comando a `core`; devuelve la reply por `_INBOX` | Procesador |
 | Jiku (`core`) | Autoriza el caller por rol, resuelve el actor del subject, valida la forma y crea el requisito | Procesador |
 | PostgreSQL de Jiku | Persiste el requisito (escrito por `core`, no por el conector) | Consumidor |
@@ -57,7 +57,7 @@ traducción de errores queda igual**, y el punto de log también: la línea vive
 
 ```mermaid
 sequenceDiagram
-    participant MC as jiku-mail-connector
+    participant MC as jiku-email-tickets
     participant BUS as Bus NATS (auth-callout)
     participant CORE as Jiku core
     participant DB as PostgreSQL de Jiku
@@ -99,7 +99,7 @@ sequenceDiagram
 
 ### Paso 1: Arranque y conexión, con dos disparadores
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** (interno)
 **Tipo:** Interno
 
@@ -132,7 +132,7 @@ identidad, **una sola conexión**.
 
 ### Paso 2: Armar y validar el payload
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** (interno)
 **Tipo:** Interno
 
@@ -254,7 +254,7 @@ byte, y **nunca se loguea**.
 
 ### Paso 3: Publicar el comando
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** Bus NATS + auth-callout
 **Tipo:** Evento (comando con reply)
 
@@ -301,7 +301,7 @@ ejecuta, `core` escribe (ADR-001).
 
 ### Paso 5: Traducir la respuesta
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** stdout
 **Tipo:** Interno
 

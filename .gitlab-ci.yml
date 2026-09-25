@@ -1,4 +1,4 @@
-# jiku-mail-connector — pipeline de CI (REQ-007 / S-031). Las decisiones y su por que: ADR-007.
+# jiku-email-tickets — pipeline de CI (REQ-007 / S-031). Las decisiones y su por que: ADR-007.
 #
 # build   -> compile (typecheck + build) y build-image (--target production, SIN publicar)
 # test    -> la suite COMPLETA sobre el checkout, con docker:dind como daemon
@@ -71,7 +71,7 @@ build-image:
   extends: .dind
   interruptible: true
   script:
-    - docker build --target production -t jiku-mail-connector:ci .
+    - docker build --target production -t jiku-email-tickets:ci .
 
 # ---------------------------------------------------------------- test
 # Sobre el checkout y no dentro de la imagen `test` (Decision 1): el .dockerignore saca docs/ y

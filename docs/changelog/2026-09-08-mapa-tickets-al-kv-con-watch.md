@@ -2,7 +2,7 @@
 date: 2026-09-08
 story: S-025
 request: REQ-005
-service: jiku-mail-connector
+service: jiku-email-tickets
 ---
 
 # S-025 — El Mapa de Tickets se muda al KV con `watch()`

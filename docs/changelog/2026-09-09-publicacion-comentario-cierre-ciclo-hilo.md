@@ -2,7 +2,7 @@
 date: 2026-09-09
 story: S-027
 request: REQ-005
-service: jiku-mail-connector
+service: jiku-email-tickets
 ---
 
 # S-027 — Publicación del comentario y cierre del ciclo del hilo

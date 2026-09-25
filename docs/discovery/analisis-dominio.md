@@ -2,10 +2,10 @@
 created: 2026-08-26
 last_updated: 2026-08-26
 status: Análisis de dominio cerrado
-documento_base: "analisis-funcional.md (jiku-mail-connector) + el dominio de Jiku en jiku/core/docs/prd/requirements.md"
+documento_base: "analisis-funcional.md (jiku-email-tickets) + el dominio de Jiku en jiku/core/docs/prd/requirements.md"
 ---
 
-# Análisis de Dominio — jiku-mail-connector
+# Análisis de Dominio — jiku-email-tickets
 
 > **Qué es este documento.** El modelo de dominio del conector, en la notación que
 > `/product-initialize` transcribe verbatim a la sección de Entidades del Dominio del PRD.

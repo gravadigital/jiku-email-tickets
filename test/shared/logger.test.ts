@@ -83,7 +83,7 @@ describe('createLogger output format', () => {
       level: 'info',
       msg: 'arranque ok',
       instance: 'dev',
-      service: 'jiku-mail-connector',
+      service: 'jiku-email-tickets',
       env: 'production',
     });
     // ISO 8601 UTC, como exige la convencion `_base` para los bordes del sistema.

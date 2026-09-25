@@ -1,4 +1,4 @@
-# jiku-mail-connector
+# jiku-email-tickets
 
 Conector que ingesta mails de una casilla y publica comandos en el bus de Jiku.
 
@@ -291,7 +291,7 @@ una opción.
 ### Construir y correr la imagen
 
 ```bash
-docker build --target production -t jiku-mail-connector:latest .
+docker build --target production -t jiku-email-tickets:latest .
 
 docker run --rm \
   -e JIKU_PROJECT_ID=... \
@@ -306,7 +306,7 @@ docker run --rm \
   -v /ruta/host/machine-user.json:/run/secrets/machine-user.json:ro \
   -v /ruta/host/sentinel.creds:/run/secrets/sentinel.creds:ro \
   --network <la-red-del-bus> \
-  jiku-mail-connector:latest
+  jiku-email-tickets:latest
 ```
 
 (El Mapa de Tickets no aparece acá porque ya no es una variable: se carga con `nats kv put` sobre
@@ -329,7 +329,7 @@ El binario **sí viaja en la imagen** y se corre a mano, contra un **proyecto de
 deja un requisito permanente — ver las tres advertencias de la sección anterior):
 
 ```bash
-docker run --rm --entrypoint node <mismo entorno y montajes> jiku-mail-connector:latest dist/verify.js
+docker run --rm --entrypoint node <mismo entorno y montajes> jiku-email-tickets:latest dist/verify.js
 # o, contra el contenedor ya corriendo:
 docker exec <container> node dist/verify.js
 ```
@@ -364,8 +364,8 @@ real con **Testcontainers**, así que correrla dentro del build exigiría Docker
 etapa `test` deja el contexto listo para correr la suite **a mano** dentro de un contenedor:
 
 ```bash
-docker build --target test -t jiku-mail-connector:test .
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock jiku-mail-connector:test npm test
+docker build --target test -t jiku-email-tickets:test .
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock jiku-email-tickets:test npm test
 ```
 
 El CI **no** usa esta etapa: corre la suite sobre el checkout. Ver

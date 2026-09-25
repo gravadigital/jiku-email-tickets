@@ -26,11 +26,11 @@ const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 /**
  * `:vitest` y no `:test`, deliberadamente: el README documenta `--target test -t
- * jiku-mail-connector:test` para la etapa de la SUITE, y reusar esa etiqueta aca haria que una
+ * jiku-email-tickets:test` para la etapa de la SUITE, y reusar esa etiqueta aca haria que una
  * corrida de tests pisara la imagen de la otra etapa —o al reves— produciendo un verde o un rojo
  * que no corresponde a lo que se creyo construir.
  */
-const IMAGE_TAG = 'jiku-mail-connector:vitest';
+const IMAGE_TAG = 'jiku-email-tickets:vitest';
 
 /** Las mismas listas que `test/manifest.test.ts` afirma sobre el package.json. Dos listas divergen. */
 const DATABASE_CLIENTS = [
@@ -292,7 +292,7 @@ describe('the production image', () => {
     const line = JSON.parse(first) as Record<string, unknown>;
 
     expect(line['msg']).toBe('configuracion valida');
-    expect(line['service']).toBe('jiku-mail-connector');
+    expect(line['service']).toBe('jiku-email-tickets');
     expect(line['level']).toBe('info');
   }, 120_000);
 

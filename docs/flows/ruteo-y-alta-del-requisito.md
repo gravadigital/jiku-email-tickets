@@ -48,9 +48,9 @@ resultado (alta, descarte, fallo).
 
 | Servicio | Rol | Tipo de Participación |
 |----------|-----|-----------------------|
-| jiku-mail-connector (`ruteo`) | Resuelve el proyecto del mail o el motivo de descarte, de forma pura y sin loguear | Procesador |
-| jiku-mail-connector (`adjuntos`/`publicacion`, `procesarAdjuntosDelMail()`) | Particiona, dedupica, topea y sube cada adjunto del mail (permiso + `PUT`), sin cancelar el requisito ante ningún fallo de archivo | Procesador |
-| jiku-mail-connector (`publicacion`) | Arma el payload derivado del mail (con `fileIds` condicional y la `description` compuesta), lo valida y lo publica | Procesador |
+| jiku-email-tickets (`ruteo`) | Resuelve el proyecto del mail o el motivo de descarte, de forma pura y sin loguear | Procesador |
+| jiku-email-tickets (`adjuntos`/`publicacion`, `procesarAdjuntosDelMail()`) | Particiona, dedupica, topea y sube cada adjunto del mail (permiso + `PUT`), sin cancelar el requisito ante ningún fallo de archivo | Procesador |
+| jiku-email-tickets (`publicacion`) | Arma el payload derivado del mail (con `fileIds` condicional y la `description` compuesta), lo valida y lo publica | Procesador |
 | Bus NATS | Entrega los comandos `files.request-upload` y `requirements.new` a `core` y devuelve las replies | Procesador |
 | Jiku (`core`) | Autoriza, valida la forma, concede o rechaza el permiso de subida, y crea el requisito | Procesador |
 | Storage S3-compatible | Recibe el `PUT` directo del byte del adjunto, fuera de banda del bus | Procesador |

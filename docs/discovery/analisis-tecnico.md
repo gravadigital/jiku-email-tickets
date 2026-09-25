@@ -2,10 +2,10 @@
 created: 2026-08-26
 last_updated: 2026-08-26
 status: Análisis técnico cerrado
-documento_base: "analisis-funcional.md + analisis-dominio.md (jiku-mail-connector)"
+documento_base: "analisis-funcional.md + analisis-dominio.md (jiku-email-tickets)"
 ---
 
-# Análisis Técnico — jiku-mail-connector
+# Análisis Técnico — jiku-email-tickets
 
 > **Qué es este documento.** La pre-arquitectura del conector: tecnologías, servicios,
 > comunicación y flujos clave. `/product-initialize-technical` lo lee para **transcribir** —
@@ -38,7 +38,7 @@ para transportar mails con adjuntos de 10 MB, y no hay ninguna razón para pagar
 
 ```
                   ┌──────────────────────────────────────────┐
-   Casilla IMAP   │  S1 · jiku-mail-connector (worker)       │
+   Casilla IMAP   │  S1 · jiku-email-tickets (worker)       │
    tickets+slug@ ─┼──> [Ingesta] ──> [Ruteo] ──> [Publicación]
         (poll)    │                     │             │      │
                   │              Mapa de Tickets      │      │
@@ -65,7 +65,7 @@ desplegado. El conector no despliega NATS, ni el callout, ni el storage.
 
 | # | Servicio | Responsabilidad |
 |---|---|---|
-| S1 | **jiku-mail-connector** | El worker completo: poll IMAP, normalización, ruteo por slug contra el KV, y publicación de los dos comandos de escritura al bus de Jiku |
+| S1 | **jiku-email-tickets** | El worker completo: poll IMAP, normalización, ruteo por slug contra el KV, y publicación de los dos comandos de escritura al bus de Jiku |
 
 ### Infraestructura Compartida
 
@@ -98,7 +98,7 @@ desplegado. El conector no despliega NATS, ni el callout, ni el storage.
 
 ## Tecnologías por Servicio
 
-### S1 — jiku-mail-connector
+### S1 — jiku-email-tickets
 
 | Pieza | Tecnología | Razón |
 |---|---|---|

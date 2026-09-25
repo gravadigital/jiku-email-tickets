@@ -2,7 +2,7 @@
 date: 2026-09-08
 story: S-024
 request: REQ-005
-service: jiku-mail-connector
+service: jiku-email-tickets
 ---
 
 # S-024 — Apertura de los dos buckets KV sobre la conexión única

@@ -19,7 +19,7 @@ adjunto deja de ser alcance futuro de FG-4 — describe el log real del módulo 
 
 ## Descripción
 
-El tick completo del `jiku-mail-connector`, de punta a punta. Se dispara por `node-cron` según
+El tick completo del `jiku-email-tickets`, de punta a punta. Se dispara por `node-cron` según
 `POLL_CRON` — **nunca al arrancar**: el primer tick espera al primer disparo del cron.
 
 El tick conecta a la casilla sobre TLS, toma el lock de `INBOX`, busca los mensajes `\Unseen`, los
@@ -43,12 +43,12 @@ el alta tenga efecto.
 
 | Servicio | Rol | Tipo de Participación |
 |----------|-----|-----------------------|
-| jiku-mail-connector (`scheduler`) | Guarda el no solapamiento y libera el indicador siempre | Iniciador |
-| jiku-mail-connector (`tick`) | Aplica el cap, el orden, el marcado, el aislamiento de fallos y los contadores | Procesador |
-| jiku-mail-connector (`src/infra/imap`) | Adaptador del puerto `MailSource` sobre `imapflow` | Procesador |
-| jiku-mail-connector (`normalize`) | Funciones puras: headers, cuerpo y adjuntos a `IncomingMail` | Procesador |
-| jiku-mail-connector (`ruteo`) | Resuelve el proyecto del mail o el motivo de descarte | Procesador |
-| jiku-mail-connector (`publicacion`) | Arma, valida y publica el requisito derivado del mail | Procesador |
+| jiku-email-tickets (`scheduler`) | Guarda el no solapamiento y libera el indicador siempre | Iniciador |
+| jiku-email-tickets (`tick`) | Aplica el cap, el orden, el marcado, el aislamiento de fallos y los contadores | Procesador |
+| jiku-email-tickets (`src/infra/imap`) | Adaptador del puerto `MailSource` sobre `imapflow` | Procesador |
+| jiku-email-tickets (`normalize`) | Funciones puras: headers, cuerpo y adjuntos a `IncomingMail` | Procesador |
+| jiku-email-tickets (`ruteo`) | Resuelve el proyecto del mail o el motivo de descarte | Procesador |
+| jiku-email-tickets (`publicacion`) | Arma, valida y publica el requisito derivado del mail | Procesador |
 | Bus NATS | Entrega el comando `requirements.new` a `core` y devuelve la reply | Procesador |
 | Jiku (`core`) | Autoriza, valida la forma y crea el requisito | Procesador |
 | Casilla IMAP | Entrega los mensajes `\Unseen` y persiste el flag `\Seen` | Fuente externa |
@@ -318,7 +318,7 @@ payload de `requirements.new`. Del adjunto **sí** aparecen `nombre` y `mime` (n
 rechazo de la política local (particionar/deduplicar/aplicarTope), `requestFileUpload()` con nivel
 `warn` (más el `code`) para un rechazo de negocio de `core`, y `uploadFileContent()` con nivel `warn`
 para un fallo de `PUT`. Ver
-`docs/reusable-code/jiku-mail-connector/services.md` para el detalle de cada función.
+`docs/reusable-code/jiku-email-tickets/services.md` para el detalle de cada función.
 
 **`subject` y `recipient` no están en `REDACT_PATHS`, y agregarlos sería un error:** ADR-006 exige que
 `messageId`, `projectId` y `slug` **sí** se logueen. Su protección es **por omisión deliberada en cada

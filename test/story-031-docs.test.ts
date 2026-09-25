@@ -59,7 +59,7 @@ describe('README.md documenta el pipeline de CI', () => {
 });
 
 describe('overview.md ya no difiere el CI', () => {
-  const OVERVIEW = 'docs/architectures/jiku-mail-connector/overview.md';
+  const OVERVIEW = 'docs/architectures/jiku-email-tickets/overview.md';
   let overview: string;
   let deferred: string;
 

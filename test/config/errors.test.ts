@@ -38,7 +38,7 @@ describe('ConfigValidationError', () => {
       issue('JIKU_VERIFY_PROJECT_ID'),
     ]);
 
-    expect(err.message).toContain('jiku-mail-connector');
+    expect(err.message).toContain('jiku-email-tickets');
     for (const name of ['JIKU_CREDS', 'JIKU_KEY_FILE', 'JIKU_PROJECT_ID', 'JIKU_VERIFY_PROJECT_ID']) {
       expect(err.message).toContain(name);
     }

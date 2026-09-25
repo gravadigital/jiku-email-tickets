@@ -23,11 +23,11 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
-const E2E_DOC = 'docs/architectures/jiku-mail-connector/verificacion-e2e-manual.md';
-const OVERVIEW = 'docs/architectures/jiku-mail-connector/overview.md';
-const CATALOG_INDEX = 'docs/reusable-code/jiku-mail-connector/index.md';
-const SERVICES = 'docs/reusable-code/jiku-mail-connector/services.md';
-const TEST_HELPERS = 'docs/reusable-code/jiku-mail-connector/test-helpers.md';
+const E2E_DOC = 'docs/architectures/jiku-email-tickets/verificacion-e2e-manual.md';
+const OVERVIEW = 'docs/architectures/jiku-email-tickets/overview.md';
+const CATALOG_INDEX = 'docs/reusable-code/jiku-email-tickets/index.md';
+const SERVICES = 'docs/reusable-code/jiku-email-tickets/services.md';
+const TEST_HELPERS = 'docs/reusable-code/jiku-email-tickets/test-helpers.md';
 const ADR_003 = 'docs/adrs/ADR-003-escritura-solo-por-comandos.md';
 
 function read(relativePath: string): Promise<string> {

@@ -222,7 +222,7 @@ describe('the built dist/ resolves subpath imports at runtime', () => {
     const line = JSON.parse(lines[0] as string) as Record<string, unknown>;
 
     expect(line['msg']).toBe('configuracion valida');
-    expect(line['service']).toBe('jiku-mail-connector');
+    expect(line['service']).toBe('jiku-email-tickets');
     expect(line['level']).toBe('info');
     expect(line['instance']).toBe('dev');
     expect(line['logLevel']).toBe('info');

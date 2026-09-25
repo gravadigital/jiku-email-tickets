@@ -45,7 +45,7 @@ que **se retiró** por REQ-006 / S-030: el dedup contra el hilo se implementó. 
 
 | Servicio | Rol |
 |---|---|
-| `jiku-mail-connector` | Publica el comando. Compone el texto, procesa los adjuntos y escribe la entrada del hilo |
+| `jiku-email-tickets` | Publica el comando. Compone el texto, procesa los adjuntos y escribe la entrada del hilo |
 | Bus NATS | Transporte del comando y del KV donde vive el Mapa de Hilos |
 | `core` (Jiku) | **Único escritor.** Crea el Comentario y lo vincula al Requisito |
 | Storage S3-compatible | Recibe el byte de cada adjunto por `PUT` a la `uploadUrl` prefirmada |
@@ -54,7 +54,7 @@ que **se retiró** por REQ-006 / S-030: el dedup contra el hilo se implementó. 
 
 ```mermaid
 sequenceDiagram
-    participant MC as jiku-mail-connector
+    participant MC as jiku-email-tickets
     participant KV as KV del bus (Mapa de Hilos)
     participant CORE as Jiku core
     participant S3 as Storage
@@ -99,7 +99,7 @@ sequenceDiagram
 
 ### Paso 1: El tick reconoce la intención de comentar
 
-**Origen:** `jiku-mail-connector` (`domain/ruteo`)
+**Origen:** `jiku-email-tickets` (`domain/ruteo`)
 **Tipo:** Decisión pura, sincrónica
 
 `routeMail()` evalúa `referenceIds` **antes** que el slug y devuelve
@@ -121,7 +121,7 @@ sequenceDiagram
 
 ### Paso 2: El lookup en el Mapa de Hilos
 
-**Origen:** `jiku-mail-connector`
+**Origen:** `jiku-email-tickets`
 **Destino:** Bus NATS (KV)
 
 `lookupThread()` recorre los `referenceIds` **en orden** —la unión deduplicada de `In-Reply-To` +
@@ -147,7 +147,7 @@ Sus tres resultados y qué hace el tick con cada uno:
 
 ### Paso 3: Los adjuntos de la respuesta
 
-**Origen:** `jiku-mail-connector`
+**Origen:** `jiku-email-tickets`
 **Destino:** `core` + Storage
 
 `procesarAdjuntosDelMail()`, **la misma función y la misma política** que el alta: doble lista
@@ -201,7 +201,7 @@ continue-on-failure.
 
 ### Paso 4: La publicación del Comentario
 
-**Origen:** `jiku-mail-connector`
+**Origen:** `jiku-email-tickets`
 **Destino:** `core` (Jiku)
 
 **Comando:** `requirements.{id}.comment`
@@ -237,7 +237,7 @@ continue-on-failure.
 
 ### Paso 5: El write que cierra el ciclo del hilo
 
-**Origen:** `jiku-mail-connector`
+**Origen:** `jiku-email-tickets`
 **Destino:** Bus NATS (KV)
 
 Tras el `success`, se escribe `sha256(Message-Id de la respuesta) → requirementId`.

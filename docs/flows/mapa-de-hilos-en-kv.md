@@ -51,14 +51,14 @@ contra los módulos:
 | El write que falla **no cancela el alta**, y el del comentario está condicionado al `success` | `test/ingesta/tick-propiedades-kv.test.ts` (TS-21 a TS-26) |
 | El bucket **no participa de la idempotencia**: el `\Seen` sigue siendo la única marca | `test/ingesta/tick-propiedades-kv.test.ts` (TS-51 a TS-53) |
 | **No hay dedup de adjuntos contra el hilo**, y es deliberado | `test/ingesta/tick-propiedades-kv.test.ts` (TS-54 a TS-56) |
-| Los pasos manuales de inspección del bucket (las claves son 64 chars de hex) | [verificacion-e2e-manual.md](../architectures/jiku-mail-connector/verificacion-e2e-manual.md), Parte 2 |
+| Los pasos manuales de inspección del bucket (las claves son 64 chars de hex) | [verificacion-e2e-manual.md](../architectures/jiku-email-tickets/verificacion-e2e-manual.md), Parte 2 |
 
 ## Servicios Involucrados
 
 | Servicio | Rol | Tipo de Participación |
 |----------|-----|-----------------------|
-| jiku-mail-connector (`infra/kv`, `threads.ts`) | Construye la clave hasheada, escribe la entrada y resuelve el lookup. Ninguna de sus dos operaciones lanza | Procesador |
-| jiku-mail-connector (`ingesta`, el tick) | Invoca el write después del alta y el lookup en la rama de la respuesta; decide el motivo del descarte con el resultado | Procesador |
+| jiku-email-tickets (`infra/kv`, `threads.ts`) | Construye la clave hasheada, escribe la entrada y resuelve el lookup. Ninguna de sus dos operaciones lanza | Procesador |
+| jiku-email-tickets (`ingesta`, el tick) | Invoca el write después del alta y el lookup en la rama de la respuesta; decide el motivo del descarte con el resultado | Procesador |
 | Bus NATS / JetStream (bucket `MAIL_THREADS`) | Almacena las entradas del Mapa de Hilos con su TTL de 90 días | Almacén |
 | stdout | Recibe el `warn` de cada fallo del write, del lookup y de cada entrada mal formada | Consumidor |
 
