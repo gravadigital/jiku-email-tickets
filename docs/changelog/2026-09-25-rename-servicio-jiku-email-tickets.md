@@ -20,6 +20,18 @@ Es un renombre mecánico: **ningún comportamiento cambia**.
 - El `name` de `package.json` y los tags locales de imagen que usan el pipeline, el `Dockerfile` y los
   tests (`jiku-email-tickets:ci`, `:test`, `:vitest`).
 
+### El proyecto en GitLab también cambió de path
+
+El proyecto pasó de `jiku-connectors/ticket-receptor` a `jiku-connectors/email-tickets` (el path del
+proyecto no coincide con el nombre del servicio). Como `$CI_REGISTRY_IMAGE` sale del path del
+proyecto, **la imagen se publica desde ahora en el registry de `jiku-connectors/email-tickets`**. Quien haga
+`docker pull` de la ruta vieja tiene que actualizarla. Las menciones al proyecto en ADR-007, REQ-007, S-031 y su story
+plan apuntan al path nuevo, y el remoto local se actualiza con:
+
+```sh
+git remote set-url origin git@git.grava.io:jiku-connectors/email-tickets.git
+```
+
 ### Lo que cambia en la documentación
 
 - `docs/architectures/jiku-mail-connector/` → `docs/architectures/jiku-email-tickets/`, y `service:`
@@ -30,9 +42,6 @@ Es un renombre mecánico: **ningún comportamiento cambia**.
 
 ### Lo que no cambia
 
-- El proyecto en GitLab sigue siendo `jiku-connectors/ticket-receptor`, y con él la imagen publicada:
-  `$CI_REGISTRY_IMAGE` sale del path del proyecto, no del nombre del servicio. Las menciones a ese
-  path en ADR-007, REQ-007, S-031 y su story plan se mantienen.
 - Las variables `JIKU_*`: nombran la plataforma Jiku, no este servicio.
 - `mail-connector` en ADR-005: es el nombre de un rol de Zitadel que se consideró como alternativa,
   no el servicio.

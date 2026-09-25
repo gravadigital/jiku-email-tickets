@@ -10,7 +10,7 @@
 **El PRD difería el CI/CD** (`docs/prd/architecture.md`, §CI/CD: *"el pipeline, la publicación de la
 imagen y el registry quedan como decisión pendiente"*). Jiku usa GitHub Actions con una matriz de
 servicios, pero el conector es un repositorio aparte en `git.grava.io` (proyecto
-`jiku-connectors/ticket-receptor`) y **no hereda ese workflow**. Hasta REQ-007 nada impedía que un
+`jiku-connectors/email-tickets`) y **no hereda ese workflow**. Hasta REQ-007 nada impedía que un
 cambio llegara a `dev` o `main` sin correr la suite, y la imagen que se desplegaba era la que alguien
 construyera a mano.
 
