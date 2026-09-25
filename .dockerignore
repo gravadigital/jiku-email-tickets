@@ -29,6 +29,11 @@ coverage
 *.md
 .claude
 
+# El TMPDIR del job `test` de CI y la cache de npm de CI viven aca, dentro del checkout, porque es lo
+# unico que el job comparte con dind (ADR-007). Ahi se generan las keys y los creds de prueba: no
+# tienen que entrar al contexto del `docker build` que hace `test/docker-image.test.ts`.
+.ci-tmp
+
 # NO se excluyen `test/`, `vitest.config.ts` ni `scripts/`, aunque no viajen a la imagen final.
 # `.dockerignore` excluye del CONTEXTO, asi que lo excluido no puede copiarse en NINGUNA etapa:
 # excluirlos dejaria la etapa `test` inservible. Que entren al contexto no debilita nada — CA-4 es

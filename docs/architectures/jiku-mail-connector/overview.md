@@ -166,10 +166,16 @@ porque el unico check disponible siempre pasa y una señal verde que no prueba n
 ninguna (ADR-006). Las cinco precondiciones de despliegue —que el conector **no puede resolver**, y
 ante cuya ausencia lo unico que hace es fallar de forma legible— estan en el `README.md`.
 
-**Diferido a operaciones:** CI/CD, build y registry de la imagen (no hereda el workflow de Jiku, que
-usa GitHub Actions) — el `Dockerfile` deja la etapa `test` lista y documentada, pero **el
-`docker build` no corre la suite**: levanta un NATS con Testcontainers y necesitaria Docker dentro
-del build, asi que quien la corre es el pipeline. Tambien diferidos: entorno de staging; rotacion de
+**El servicio tiene CI (REQ-007 / S-031).** GitLab CI (`.gitlab-ci.yml`, no hereda el workflow de
+GitHub Actions de Jiku) corre `build` → `test` → `release` en cada push y cada merge request con
+cambios de codigo. La suite **completa** (`npm run test:teardown`, con los NATS reales de
+Testcontainers y los tests que construyen la imagen) es el unico gate: corre sobre el checkout con
+`docker:dind`, no dentro de la etapa `test` del `Dockerfile`. Solo `dev` y `main` publican en el
+registry del proyecto: `:dev`, y `:<version.txt>` + `:master`. Ver ADR-007.
+
+**Diferido a operaciones:** el deploy (el `Dockerfile` deja la etapa `test` lista para correr la
+suite a mano; el `docker build` no la corre, porque levanta un NATS con Testcontainers y necesitaria
+Docker dentro del build); entorno de staging; rotacion de
 la key del machine user (Zitadel la entrega **una sola vez** y **no hay procedimiento definido**);
 gestion de secretos mas alla de env + archivos montados. **Fuera de alcance v1:** healthchecks,
 metricas exportadas y alertas.
