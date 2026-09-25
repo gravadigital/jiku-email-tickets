@@ -197,7 +197,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await nats.stop();
+  await nats?.stop();
   await bus.cleanup();
 });
 

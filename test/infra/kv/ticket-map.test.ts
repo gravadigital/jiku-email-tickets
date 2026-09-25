@@ -129,7 +129,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
-  await nats.stop();
+  await nats?.stop();
 });
 
 describe('startTicketMapWatch: initial load', () => {

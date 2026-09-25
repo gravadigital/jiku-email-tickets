@@ -102,7 +102,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await nats.stop();
+  await nats?.stop();
 });
 
 describe('sha256hex — la clave del Mapa de Hilos', () => {

@@ -1,3 +1,5 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
 import { Client } from '@gravadigital/jiku';
 // El cliente NATS y el KV salen del subpath del SDK, nunca de `@nats-io/*` ni de `nats`: no son
 // dependencias de este proyecto (ADR-002 / S-023) y el subpath garantiza una sola copia de
@@ -48,11 +50,56 @@ export interface JetStreamNats {
    * no rompe la propiedad de que el unico `create()` del repo vive en `seedBucket`.
    */
   readonly openBucket: (name: string) => Promise<KV>;
+  /**
+   * Si `startJetStreamNats()` rechazo en el `beforeAll`, la variable del archivo nunca se asigno:
+   * los `afterAll` llaman `nats?.stop()` para que un `TypeError` no tape el error original.
+   */
   readonly stop: () => Promise<void>;
 }
 
 /** Milisegundos en un dia. Duplicado a proposito: el test no debe importar la constante que verifica. */
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Errores de socket que se reintentan en la PRIMERA conexion al contenedor recien levantado.
+ *
+ * En CI el puerto mapeado se alcanza a traves de `docker:dind`, y un contenedor nuevo puede
+ * responder `EHOSTUNREACH` al primer connect aunque ya haya logueado `Server is ready`: dind 27
+ * reutiliza las IPs de los contenedores que se fueron sin anunciar la nueva por ARP, y la entrada
+ * vieja del cache de vecinos rechaza el primer intento. El mismo helper conecta bien en los demas
+ * archivos de la misma corrida, asi que es transitorio — pero el cliente NATS, sin
+ * `waitOnFirstConnect`, hace un solo intento y el `beforeAll` entero cae.
+ *
+ * No es un sleep para esperar una condicion: la readiness ya la resolvio `Wait.forLogMessage`.
+ * Es un reintento acotado del socket, y cualquier otro error sale en el primer intento.
+ */
+const TRANSIENT_CONNECT_CODES = new Set(['EHOSTUNREACH', 'ENETUNREACH', 'ECONNREFUSED']);
+const CONNECT_ATTEMPTS = 5;
+const CONNECT_RETRY_DELAY_MS = 1_000;
+
+/**
+ * `@nats-io/transport-node` deja pasar el error de socket crudo, salvo `ECONNREFUSED`, que lo
+ * envuelve en un `ConnectionError` con el original como `cause`.
+ */
+function socketCode(err: unknown): unknown {
+  const { code, cause } = (err ?? {}) as { code?: unknown; cause?: { code?: unknown } };
+  return code ?? cause?.code;
+}
+
+async function connectWithRetry(url: string): Promise<NatsConnection> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await connect({ servers: url });
+    } catch (err) {
+      const code = socketCode(err);
+      const transient = typeof code === 'string' && TRANSIENT_CONNECT_CODES.has(code);
+      if (!transient || attempt === CONNECT_ATTEMPTS) {
+        throw err;
+      }
+      await delay(CONNECT_RETRY_DELAY_MS);
+    }
+  }
+}
 
 export async function startJetStreamNats(): Promise<JetStreamNats> {
   // El TAG es DISTINTO del `nats:2.10-alpine` del contenedor compartido a proposito, y no es una
@@ -86,7 +133,17 @@ export async function startJetStreamNats(): Promise<JetStreamNats> {
   }
 
   const url = `nats://${container.getHost()}:${String(container.getMappedPort(4222))}`;
-  const connection = await connect({ servers: url });
+  let connection: NatsConnection;
+  try {
+    connection = await connectWithRetry(url);
+  } catch (cause) {
+    // El `afterAll` no puede detener este contenedor: `stop()` nunca llego a devolverse. Si el
+    // stop tambien falla se descarta, porque el error que hay que leer es el de la conexion.
+    await container.stop().catch(() => undefined);
+    throw new Error(`No se pudo conectar al NATS con JetStream de los tests del KV (${url}).`, {
+      cause,
+    });
+  }
   const client = Client.fromConnection(connection, {
     instance: TEST_INSTANCE,
     userId: TEST_USER_ID,

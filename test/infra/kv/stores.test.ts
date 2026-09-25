@@ -84,7 +84,7 @@ describe('openKvStores contra un NATS con JetStream', () => {
   }, 120_000);
 
   afterAll(async () => {
-    await nats.stop();
+    await nats?.stop();
   });
 
   // TS-11
