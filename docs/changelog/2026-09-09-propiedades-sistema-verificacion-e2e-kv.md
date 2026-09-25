@@ -2,7 +2,7 @@
 date: 2026-09-09
 story: S-028
 request: REQ-005
-service: jiku-mail-connector
+service: jiku-email-tickets
 ---
 
 # S-028 — Propiedades del sistema y verificación E2E del KV

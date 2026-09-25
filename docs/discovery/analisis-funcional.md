@@ -5,7 +5,7 @@ status: Análisis funcional cerrado
 documento_base: "grava-gestion/mail-integration (servicio existente, v1.0.0) + el PRD de Jiku en jiku/core/docs/prd/ + el SDK @gravadigital/jiku v1.0.0 (jiku/jiku-ts)"
 ---
 
-# Análisis Funcional — jiku-mail-connector
+# Análisis Funcional — jiku-email-tickets
 
 > **Qué es este documento.** El pre-PRD del conector de mail de Jiku. Es
 > **decision-complete**: cada ambigüedad que apareció al portar el servicio existente a la
@@ -38,7 +38,7 @@ documento_base: "grava-gestion/mail-integration (servicio existente, v1.0.0) + e
 
 ### Producto
 
-**jiku-mail-connector** es un worker sin interfaz que convierte mails en requisitos de Jiku. Una
+**jiku-email-tickets** es un worker sin interfaz que convierte mails en requisitos de Jiku. Una
 casilla de tickets con subaddress —`tickets+<slug>@grava.io`— recibe el pedido de un cliente; el
 conector lo ingesta por IMAP, resuelve a qué proyecto corresponde por el `<slug>`, y publica en el
 bus de Jiku la creación del requisito con sus adjuntos.
@@ -128,7 +128,7 @@ alcance; queda registrado en [Fuera de Alcance](#fuera-de-alcance--preguntas-abi
 > precondiciones y postcondiciones. FG-1 es el walking skeleton.
 
 ```
-jiku-mail-connector
+jiku-email-tickets
 ├── FG-1 · Ingesta y normalización del mail
 │   ├── Poll IMAP de la casilla de tickets
 │   ├── Cap por tick y marcado \Seen

@@ -1,0 +1,17 @@
+service: jiku-email-tickets
+type: worker
+language: node
+
+conventions:
+  - logging
+  - env-config
+  - validation
+  - error-handling
+  - testing
+  - module-imports
+  - dockerfile
+
+modules:
+  - ingesta
+  - ruteo
+  - publicacion

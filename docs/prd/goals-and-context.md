@@ -12,7 +12,7 @@ status: Draft - In Definition
 
 ### Nombre
 
-**jiku-mail-connector**
+**jiku-email-tickets**
 
 ### Planteo del Problema
 
@@ -27,7 +27,7 @@ externa. El conector acepta el canal del cliente en vez de cambiarlo, y lo hace 
 mismo modelo que el resto de Jiku: un requisito, en un proyecto, con su trazabilidad hasta las
 horas.
 
-**jiku-mail-connector** es un worker sin interfaz que convierte mails en requisitos de Jiku. Una
+**jiku-email-tickets** es un worker sin interfaz que convierte mails en requisitos de Jiku. Una
 casilla de tickets con subaddress —`tickets+<slug>@grava.io`— recibe el pedido de un cliente; el
 conector lo ingesta por IMAP, resuelve a qué proyecto corresponde por el `<slug>`, y publica en el
 bus de Jiku la creación del requisito con sus adjuntos. Para el cliente que escribe el mail, el

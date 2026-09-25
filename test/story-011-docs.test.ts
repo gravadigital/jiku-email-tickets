@@ -81,7 +81,7 @@ describe('TS-19: overview.md marca ingesta como implementado', () => {
   let overview: string;
 
   beforeAll(async () => {
-    overview = await readDoc('docs/architectures/jiku-mail-connector/overview.md');
+    overview = await readDoc('docs/architectures/jiku-email-tickets/overview.md');
   });
 
   it('el modulo ingesta tiene una nota de estado equivalente a la de publicacion', () => {
@@ -99,8 +99,8 @@ describe('TS-21: el catalogo de codigo reusable suma el scheduler', () => {
   let services: string;
 
   beforeAll(async () => {
-    index = await readDoc('docs/reusable-code/jiku-mail-connector/index.md');
-    services = await readDoc('docs/reusable-code/jiku-mail-connector/services.md');
+    index = await readDoc('docs/reusable-code/jiku-email-tickets/index.md');
+    services = await readDoc('docs/reusable-code/jiku-email-tickets/services.md');
   });
 
   it('index.md lista triggerTick, waitForCurrentTick, scheduleTick y createShutdownHandler', () => {

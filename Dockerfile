@@ -1,4 +1,4 @@
-# jiku-mail-connector — imagen del worker.
+# jiku-email-tickets — imagen del worker.
 #
 # Variante WORKER de la convencion `dockerfile`: tres etapas, usuario no-root, `npm ci --omit=dev`,
 # y ningun secreto horneado. La key del machine user y el creds del sentinel se MONTAN read-only en
@@ -20,8 +20,8 @@
 # queda preparada y la corre quien quiera la suite dentro de un contenedor; el CI la corre sobre el
 # checkout, no aca (ver ADR-007):
 #
-#   docker build --target test -t jiku-mail-connector:test .
-#   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock jiku-mail-connector:test npm test
+#   docker build --target test -t jiku-email-tickets:test .
+#   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock jiku-email-tickets:test npm test
 FROM node:22-alpine AS test
 WORKDIR /app
 # `package*.json` + `npm ci` ANTES de `COPY . .`: invertirlo hace que cualquier cambio de codigo

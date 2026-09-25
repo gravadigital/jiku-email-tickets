@@ -1,1 +1,1 @@
-export const SERVICE_NAME = 'jiku-mail-connector';
+export const SERVICE_NAME = 'jiku-email-tickets';

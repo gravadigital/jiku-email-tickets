@@ -24,7 +24,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
-const E2E_DOC = 'docs/architectures/jiku-mail-connector/verificacion-e2e-manual.md';
+const E2E_DOC = 'docs/architectures/jiku-email-tickets/verificacion-e2e-manual.md';
 
 describe('CA-15: verificacion-e2e-manual.md cubre el alcance del KV', () => {
   let doc: string;

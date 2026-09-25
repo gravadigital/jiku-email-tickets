@@ -26,7 +26,7 @@ el Mapa de Tickets desde el bucket y lo sigue con `watch()`; el Paso 1 deja de v
 
 ## Descripción
 
-Flujo completo del arranque del `jiku-mail-connector`, desde la validación de su configuración hasta
+Flujo completo del arranque del `jiku-email-tickets`, desde la validación de su configuración hasta
 la conexión establecida con el bus NATS de Jiku. Se dispara al iniciar el proceso (`npm run start` o
 el `CMD` del contenedor — desde S-006 ese `CMD` existe y es `node dist/index.js`, verificado sobre la
 imagen construida). Cubre la validación fail-fast de la configuración, la construcción del
@@ -40,7 +40,7 @@ publicación es del flujo [publicacion-requirements-new](publicacion-requirement
 
 | Servicio | Rol | Tipo de Participación |
 |----------|-----|-----------------------|
-| jiku-mail-connector | Valida su configuración, construye identidad y conexión | Iniciador |
+| jiku-email-tickets | Valida su configuración, construye identidad y conexión | Iniciador |
 | Zitadel | Emite el access token (JWT con claim de roles) a partir de la key firmada | Procesador |
 | Bus NATS + auth-callout | Evalúa el token al conectar y autoriza los subjects de la identidad | Procesador |
 | Jiku (`core`) | Consume el evento del auth-callout y crea la fila del conector en `users` | Consumidor |
@@ -49,7 +49,7 @@ publicación es del flujo [publicacion-requirements-new](publicacion-requirement
 
 ```mermaid
 sequenceDiagram
-    participant MC as jiku-mail-connector
+    participant MC as jiku-email-tickets
     participant ZI as Zitadel
     participant BUS as Bus NATS (auth-callout)
     participant CORE as Jiku core
@@ -103,7 +103,7 @@ sequenceDiagram
 
 ### Paso 1: Validar la configuración
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** (interno)
 **Tipo:** Interno
 
@@ -221,7 +221,7 @@ no duplicar sus defaults ni romper el punto de lectura único.
 
 ### Paso 2: Construir el logger
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** (interno)
 **Tipo:** Interno
 
@@ -289,7 +289,7 @@ logger que redacta. Un logger agregado después dejaría sin cubrir el tramo má
 
 ### Paso 3: Construir la identidad desde la key
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** (interno — lee un archivo montado read-only)
 **Tipo:** Interno
 
@@ -337,7 +337,7 @@ subject sale de `auth.userId`, **derivado de la key y nunca del entorno** (invar
 
 ### Paso 4: Obtener el access token
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** Zitadel
 **Tipo:** REST (HTTPS, RFC 7523)
 
@@ -380,7 +380,7 @@ como **getter, no como string**.
 
 ### Paso 5: Conectar al bus
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** Bus NATS + auth-callout
 **Tipo:** Interno (conexión NATS vía SDK)
 
@@ -426,7 +426,7 @@ credencial**.
 
 ### Paso 5.5: Abrir y verificar los dos buckets del KV
 
-**Origen:** `jiku-mail-connector`
+**Origen:** `jiku-email-tickets`
 **Destino:** Bus NATS (JetStream)
 **Tipo:** Operación del bus (no es un comando de `core`)
 
@@ -485,7 +485,7 @@ el del Mapa de Tickets (`KV_TICKETS_BUCKET`, por default `TICKETS`) y el del Map
 
 ### Paso 5.6: Cargar el Mapa de Tickets y seguirlo con `watch()`
 
-**Origen:** `jiku-mail-connector`
+**Origen:** `jiku-email-tickets`
 **Destino:** Bus NATS (JetStream)
 **Tipo:** Operación del bus
 
@@ -577,7 +577,7 @@ próxima autenticación, y reconectar lo resuelve.
 
 ### Paso 7: Refresh del token en background
 
-**Origen:** jiku-mail-connector (SDK)
+**Origen:** jiku-email-tickets (SDK)
 **Destino:** Zitadel
 **Tipo:** REST (HTTPS), recurrente
 
@@ -599,7 +599,7 @@ sigue sirviendo; lo que se rompe es el próximo reconnect.
 
 ### Paso 8: Schedular el tick
 
-**Origen:** jiku-mail-connector
+**Origen:** jiku-email-tickets
 **Destino:** (interno)
 **Tipo:** Interno
 

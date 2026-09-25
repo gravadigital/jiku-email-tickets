@@ -4,7 +4,7 @@ last_updated: 2026-08-26
 status: Draft
 ---
 
-# Arquitectura del Producto — jiku-mail-connector
+# Arquitectura del Producto — jiku-email-tickets
 
 > Derivado del discovery: [análisis técnico](../discovery/analisis-tecnico.md)
 
@@ -30,7 +30,7 @@ son **módulos internos**, no servicios.
 
 | Servicio | Tecnología | Responsabilidades | Entidades que posee | Base de Datos | APIs Externas |
 |---|---|---|---|---|---|
-| **jiku-mail-connector** | Node.js ≥ 22.12 + TypeScript 5.x (`strict`, ESM) | Poll IMAP de la casilla de tickets, normalización del mail, ruteo por slug contra el KV local, y publicación de los dos comandos de escritura al bus de Jiku | Mail Entrante, Adjunto del Mail, Entrada del Mapa de Tickets (**las tres efímeras o de configuración: ninguna se persiste**) | **Ninguna** | Casilla IMAP, Zitadel (RFC 7523), NATS (bus de Jiku), Storage S3-compatible (`PUT` prefirmado) |
+| **jiku-email-tickets** | Node.js ≥ 22.12 + TypeScript 5.x (`strict`, ESM) | Poll IMAP de la casilla de tickets, normalización del mail, ruteo por slug contra el KV local, y publicación de los dos comandos de escritura al bus de Jiku | Mail Entrante, Adjunto del Mail, Entrada del Mapa de Tickets (**las tres efímeras o de configuración: ninguna se persiste**) | **Ninguna** | Casilla IMAP, Zitadel (RFC 7523), NATS (bus de Jiku), Storage S3-compatible (`PUT` prefirmado) |
 
 **Las entidades persistidas que el conector crea —Requisito, Archivo, Adjunto— no le pertenecen: son
 de Jiku y las escribe `core`.** El conector sólo las pide por comando. Ver la sección de Entidades
@@ -38,7 +38,7 @@ del Dominio en [requirements.md](requirements.md).
 
 ```
                   ┌──────────────────────────────────────────┐
-   Casilla IMAP   │  S1 · jiku-mail-connector (worker)       │
+   Casilla IMAP   │  S1 · jiku-email-tickets (worker)       │
    tickets+slug@ ─┼──> [Ingesta] ──> [Ruteo] ──> [Publicación]
         (poll)    │                     │             │      │
                   │              Mapa de Tickets      │      │
@@ -120,32 +120,32 @@ comunican por llamada de función dentro del mismo proceso, secuencialmente, un 
 
 ### Integraciones Externas
 
-- **Casilla IMAP → jiku-mail-connector** (IMAP sobre TLS 993, sync, **poll**)
+- **Casilla IMAP → jiku-email-tickets** (IMAP sobre TLS 993, sync, **poll**)
   - La única entrada del sistema. El conector **tira** del mail en vez de recibirlo: un tick por
     expresión cron, sin solaparse con el anterior, procesando a lo sumo N mails **los más nuevos
     primero**.
   - Credenciales: usuario + password IMAP por variable de entorno (App Password en Gmail).
 
-- **jiku-mail-connector → Zitadel** (HTTPS, RFC 7523, sync)
+- **jiku-email-tickets → Zitadel** (HTTPS, RFC 7523, sync)
   - Solicita el access token del machine user firmando con la key JSON. Al arrancar y en cada
     refresh (~1 h, en background, lo hace el SDK).
   - **Sin el project id configurado el token no lleva el claim de roles, y un token sin roles no
     conecta a nada.** El error dice sólo `Authorization Violation`.
 
-- **jiku-mail-connector → NATS → `core`** (NATS request/reply **sin JetStream**, **sync**)
+- **jiku-email-tickets → NATS → `core`** (NATS request/reply **sin JetStream**, **sync**)
   - **Toda la escritura del conector.** Dos formas de comando y ninguna nueva:
     `files.request-upload` y `requirements.new`.
   - Publica y **espera la respuesta**. Sin JetStream no hay cola, reintento, persistencia ni
     idempotencia: si `core` está caído, **la operación no ocurrió**.
   - Timeout: 15 s (el default del SDK), **deliberadamente por encima** de los 10 s del servidor.
 
-- **jiku-mail-connector → Storage S3-compatible** (HTTPS `PUT` a URL prefirmada, sync)
+- **jiku-email-tickets → Storage S3-compatible** (HTTPS `PUT` a URL prefirmada, sync)
   - Un `PUT` por adjunto aceptado, con el byte directo. **Sin credenciales de S3**: la autorización
     viaja en la URL que `core` firmó.
   - No es una optimización: el `max_payload` del bus es 1 MB y los adjuntos llegan a 10 MB, así que
     es **la única forma**. **No hace falta CORS**: lo hace un proceso de servidor, no un navegador.
 
-- **jiku-mail-connector → stdout** (unidireccional)
+- **jiku-email-tickets → stdout** (unidireccional)
   - La única salida de diagnóstico. **No hay a quién reportarle** un fallo: no hay usuario esperando
     ni request que responder.
 

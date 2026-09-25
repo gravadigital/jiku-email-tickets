@@ -11,7 +11,7 @@ status: Pending Formalization
 ## Overview
 
 Este documento contiene los feature groups identificados durante la inicialización del producto
-**jiku-mail-connector**.
+**jiku-email-tickets**.
 
 **Los feature groups son agrupaciones de funcionalidad relacionada** que deben ser capturadas como
 requests, diseñadas técnicamente y formalizadas en stories antes de iniciar la implementación.
