@@ -204,7 +204,8 @@ silencio**, que es el peor resultado posible en un servicio sin nadie mirando.
   NATS.
 - **Pendiente de operaciones:** si el compose de Jiku lo incorpora como un servicio más o se
   despliega aparte alcanzando esa red **es una decisión de operaciones que el análisis técnico
-  difiere explícitamente**. Lo mismo el registry de la imagen.
+  difiere explícitamente**. El registry de la imagen, en cambio, está decidido: el del proyecto en
+  GitLab ([ADR-007](../adrs/ADR-007-ci-gitlab-registry-del-proyecto.md)).
 - **Instancias: exactamente 1.** Sin idempotencia ni coordinación, dos instancias sobre la misma
   casilla duplicarían tickets (NFR-SC03).
 
@@ -218,9 +219,20 @@ silencio**, que es el peor resultado posible en un servicio sin nadie mirando.
 
 **CI/CD:**
 
-**Diferido.** Jiku usa GitHub Actions con una matriz de servicios, pero el conector es un
-repositorio aparte y **no hereda ese workflow**. El pipeline, la publicación de la imagen y el
-registry quedan como decisión pendiente.
+**Decidido (REQ-007, [ADR-007](../adrs/ADR-007-ci-gitlab-registry-del-proyecto.md)).** Jiku usa
+GitHub Actions con una matriz de servicios, pero el conector es un repositorio aparte y **no hereda
+ese workflow**: usa **GitLab CI** en su propio proyecto de `git.grava.io`, con el Container Registry
+del proyecto.
+
+- **Stages:** `build` (typecheck + build, y la imagen `--target production` sin publicar) → `test`
+  (la suite **completa**, `npm run test:teardown`, sobre el checkout con `docker:dind`) →
+  `release`.
+- **Gate:** la suite completa, incluidos los NATS reales y los tests que construyen la imagen. Si
+  algo falla, no se publica nada.
+- **Tags:** `:dev` desde `dev`; `:<version.txt>` y después `:master` desde `main`. La versión sale
+  de `version.txt`, independiente de `package.json#version`. Las ramas de feature, los merge requests
+  y los tags de git no publican.
+- **El deploy sigue fuera de alcance:** el pipeline entrega la imagen en el registry, no la despliega.
 
 ### Preocupaciones Transversales
 
@@ -346,7 +358,7 @@ omisiones de este documento):
 | Tema | Estado |
 |---|---|
 | Compose propio vs. incorporarse al de Jiku | Pendiente. La restricción dura es estar en la red del bus |
-| CI/CD, build y registry de la imagen | Pendiente. No hereda el workflow de Jiku (es otro repo) |
+| CI/CD, build y registry de la imagen | Decidido (REQ-007, ADR-007): GitLab CI + registry del proyecto. El deploy sigue pendiente |
 | Entorno de staging | Depende de si Jiku tiene instancia intermedia |
 | Rotación de la key del machine user | Sin procedimiento |
 | Gestión de secretos más allá de env + archivos montados | Pendiente. Jiku tampoco tiene gestor |

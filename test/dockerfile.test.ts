@@ -280,8 +280,8 @@ describe('Dockerfile', () => {
 
     expect(test).toContain('npm ci');
     // La suite levanta un contenedor NATS con Testcontainers: correrla con `RUN` exigiria Docker
-    // DENTRO del build, que un `docker build` normal no tiene. La etapa deja el contexto listo y
-    // el pipeline la corre con `docker run --target test`.
+    // DENTRO del build, que un `docker build` normal no tiene. La etapa deja el contexto listo para
+    // correrla a mano con `docker run`; el CI la corre sobre el checkout (ADR-007).
     expect(test).not.toMatch(/RUN\s+npm\s+(test|run test)/);
     expect(commentText(lines)).toContain('testcontainers');
   });

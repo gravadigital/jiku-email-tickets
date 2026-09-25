@@ -361,15 +361,15 @@ lo deseado, no un loop ciego: el log dice en cada vuelta qué falta.
 
 El `docker build` **no** ejecuta los tests, y no es una omisión: la suite levanta un contenedor NATS
 real con **Testcontainers**, así que correrla dentro del build exigiría Docker dentro del build. La
-etapa `test` deja el contexto listo y quien la corre es el pipeline:
+etapa `test` deja el contexto listo para correr la suite **a mano** dentro de un contenedor:
 
 ```bash
 docker build --target test -t jiku-mail-connector:test .
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock jiku-mail-connector:test npm test
 ```
 
-CI/CD, el registry y el pipeline están **fuera del alcance de este repo**: lo que el repo entrega es
-la etapa lista y el comando exacto.
+El CI **no** usa esta etapa: corre la suite sobre el checkout. Ver
+[Integración continua (GitLab CI)](#integración-continua-gitlab-ci).
 
 ## Testear
 
@@ -396,6 +396,55 @@ Comprobacion manual equivalente, si se prefiere:
 npm test
 docker ps --filter ancestor=nats:2.10-alpine   # no debe listar nada tras la corrida
 ```
+
+## Integración continua (GitLab CI)
+
+El pipeline vive en [`.gitlab-ci.yml`](.gitlab-ci.yml) y tiene tres stages: `build` → `test` →
+`release`. Las decisiones y su por qué están en
+[ADR-007](docs/adrs/ADR-007-ci-gitlab-registry-del-proyecto.md).
+
+| Evento | Qué corre | Qué se publica |
+|---|---|---|
+| Push a una rama de feature | `compile`, `build-image`, `test` | Nada |
+| Merge request contra `dev` o `main` | `compile`, `build-image`, `test` (pipeline de MR, visible en el MR). Un push a la rama de origen no crea además un pipeline de rama | Nada |
+| Push a `dev` (incluido el merge de un MR) | `build`, `test` y `release:dev` | `$CI_REGISTRY_IMAGE:dev`, que reemplaza al anterior. Corre aunque haya un MR `dev → main` abierto |
+| Push a `main` | `build`, `test` y `release:main` | `$CI_REGISTRY_IMAGE:<version.txt>` y después `$CI_REGISTRY_IMAGE:master`, la misma imagen |
+| Cambio sólo de documentación | Nada: no se crea pipeline | Nada |
+| Push de un tag de git | Nada: el release sale de `main`, no de tags | Nada |
+
+**Qué verifica.** `compile` corre `npm ci` → `npm run typecheck` → `npm run build`, y `build-image`
+construye `--target production` **sin publicarla**. Si cualquiera de los dos falla, `test` y el
+release no corren. `test` corre la suite **completa** con `npm run test:teardown`, sin filtros:
+incluye los NATS reales por Testcontainers y `test/docker-image.test.ts`, que construye y ejecuta la
+imagen. Corre **sobre el checkout** (`node:22-alpine` + `docker-cli`) con un servicio `docker:dind`
+como daemon, y no dentro de la etapa `test` del `Dockerfile`: el `.dockerignore` saca `docs/` y
+`*.md`, que varios tests leen. El `TMPDIR` del job es `$CI_PROJECT_DIR/.ci-tmp`, porque el checkout es
+lo único que el job comparte con dind y los `-v` de los tests de imagen se resuelven del lado de
+dind. `.ci-tmp` está en el `.dockerignore`.
+
+**Qué se publica.** Sólo `release:dev` y `release:main` hacen `docker login` (con
+`--password-stdin`) y `docker push`: las ramas de feature y los merge requests **no tocan el
+registry**. El release **reconstruye** `--target production` desde el mismo commit, con
+`--cache-from` del tag anterior. En `main`, la versión se publica **antes** que `:master`, así un
+fallo entre los dos pushes nunca deja `:master` apuntando a una imagen sin versión. Si un test falla,
+no corre ningún release y los tags siguen en la imagen anterior.
+
+**Cómo subir la versión.** Editar `version.txt` (una sola línea semver, p. ej. `0.2.0` o
+`0.2.0-rc1`, con salto de línea final) y mergear a `main`. Es **independiente** del `version` de
+`package.json`. Si `version.txt` falta, está vacío o no es semver (incluidos `dev`, `master` o
+`latest`), `release:main` falla antes del login y del build, y no se publica nada. Si no se cambia,
+el tag de versión se sobrescribe con la imagen nueva.
+
+**Qué dispara el pipeline.** `rules:changes` no admite negación, así que "sólo docs" se expresa
+como una allowlist de rutas de código (`src/`, `test/`, `scripts/`, `vendor/`, `package*.json`,
+`tsconfig*.json`, `vitest.config.ts`, `Dockerfile`, `.dockerignore`, `version.txt` y el propio
+`.gitlab-ci.yml`). El primer push de una rama nueva siempre dispara, aunque sea sólo de docs. Una
+entrada nueva en la raíz del repo hace fallar `test/gitlab-ci.test.ts` hasta que se clasifique en
+la allowlist o en su lista de exclusiones.
+
+**Precondiciones del runner.** Executor Docker **privilegiado** (para `docker:dind`) y Container
+Registry habilitado en el proyecto. No hace falta ninguna variable ni secreto propio: todo sale de
+las variables predefinidas de GitLab (`CI_REGISTRY*`).
 
 ## Imports absolutos
 

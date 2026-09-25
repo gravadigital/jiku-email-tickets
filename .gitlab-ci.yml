@@ -1,0 +1,138 @@
+# jiku-mail-connector — pipeline de CI (REQ-007 / S-031). Las decisiones y su por que: ADR-007.
+#
+# build   -> compile (typecheck + build) y build-image (--target production, SIN publicar)
+# test    -> la suite COMPLETA sobre el checkout, con docker:dind como daemon
+# release -> reconstruye --target production y publica: :dev desde dev; :<version.txt> + :master
+#            desde main. Ramas de feature y MR no tocan el registry.
+
+# Allowlist de rutas de CODIGO (Decision 5): rules:changes no admite negacion. Toda entrada nueva
+# de la raiz tiene que clasificarse aca o en la lista de exclusiones de test/gitlab-ci.test.ts.
+.code-changes: &code-changes
+  - src/**/*
+  - test/**/*
+  - scripts/**/*
+  - vendor/**/*
+  - package.json
+  - package-lock.json
+  - tsconfig*.json
+  - vitest.config.ts
+  - Dockerfile
+  - .dockerignore
+  - version.txt
+  - .gitlab-ci.yml
+
+stages: [build, test, release]
+
+workflow:
+  rules:
+    # El release sale de main, no de tags.
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: *code-changes
+    # Sin pipeline de rama duplicado si ya corre el del MR, pero NUNCA en dev/main (Decision 6).
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_OPEN_MERGE_REQUESTS && $CI_COMMIT_BRANCH !~ /^(dev|main)$/
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "push"
+      changes: *code-changes
+
+variables:
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_TLS_VERIFY: "1"
+  DOCKER_CERT_PATH: "/certs/client"
+
+.dind:
+  services: [docker:27-dind]
+
+# La cache de npm vive bajo .ci-tmp, que esta en el .dockerignore: si viviera en .npm/ entraria al
+# contexto del docker build que hace test/docker-image.test.ts.
+.npm-cache:
+  cache:
+    key:
+      files: [package-lock.json]
+    paths: [.ci-tmp/npm/]
+
+# ---------------------------------------------------------------- build
+compile:
+  stage: build
+  image: node:22-alpine
+  extends: .npm-cache
+  interruptible: true
+  script:
+    - npm ci --cache .ci-tmp/npm --prefer-offline
+    - npm run typecheck
+    - npm run build
+
+# `image` es una palabra reservada del nivel raiz de GitLab: el job no puede llamarse asi.
+build-image:
+  stage: build
+  image: docker:27-cli
+  extends: .dind
+  interruptible: true
+  script:
+    - docker build --target production -t jiku-mail-connector:ci .
+
+# ---------------------------------------------------------------- test
+# Sobre el checkout y no dentro de la imagen `test` (Decision 1): el .dockerignore saca docs/ y
+# *.md, que los tests de documentacion leen.
+test:
+  stage: test
+  image: node:22-alpine
+  extends: [.dind, .npm-cache]
+  interruptible: true
+  needs: [compile, build-image]
+  variables:
+    # Dentro del checkout: es lo unico que el job comparte con dind, y los -v de
+    # docker-image.test.ts se resuelven en dind (Decision 3).
+    TMPDIR: $CI_PROJECT_DIR/.ci-tmp
+    TESTCONTAINERS_HOST_OVERRIDE: docker
+  before_script:
+    - apk add --no-cache docker-cli docker-cli-buildx
+    - mkdir -p "$TMPDIR"
+  script:
+    - npm ci --cache .ci-tmp/npm --prefer-offline
+    - npm run test:teardown
+
+# ---------------------------------------------------------------- release
+# Reconstruye en vez de retaggear (Decision 2): asi las ramas de feature y los MR no escriben nada
+# en el registry. No interrumpible y serializado por tag (Decision 7).
+.release:
+  stage: release
+  image: docker:27-cli
+  extends: .dind
+  interruptible: false
+  needs: [test]
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+
+release:dev:
+  extends: .release
+  resource_group: release-dev
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"
+  script:
+    - docker pull "$CI_REGISTRY_IMAGE:dev" || true
+    - docker build --target production --cache-from "$CI_REGISTRY_IMAGE:dev" --build-arg BUILDKIT_INLINE_CACHE=1 -t "$CI_REGISTRY_IMAGE:dev" .
+    - docker push "$CI_REGISTRY_IMAGE:dev"
+
+release:main:
+  extends: .release
+  resource_group: release-main
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+  before_script:
+    # ANTES del login y del build: sin version valida no se publica nada, ni siquiera :master
+    # (Decision 8).
+    - |
+      test -f version.txt || { echo "version.txt no existe: no se publica nada"; exit 1; }
+      VERSION="$(tr -d '[:space:]' < version.txt)"
+      echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$' || { echo "version.txt no es una version valida: '$VERSION'"; exit 1; }
+    - !reference [.release, before_script]
+  script:
+    - docker pull "$CI_REGISTRY_IMAGE:master" || true
+    - docker build --target production --cache-from "$CI_REGISTRY_IMAGE:master" --build-arg BUILDKIT_INLINE_CACHE=1 -t "$CI_REGISTRY_IMAGE:$VERSION" -t "$CI_REGISTRY_IMAGE:master" .
+    # La version primero y el tag movil despues: un fallo entre los dos pushes nunca deja :master
+    # apuntando a una imagen sin version.
+    - docker push "$CI_REGISTRY_IMAGE:$VERSION"
+    - docker push "$CI_REGISTRY_IMAGE:master"

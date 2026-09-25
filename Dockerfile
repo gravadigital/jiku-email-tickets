@@ -17,7 +17,8 @@
 # El `docker build` NO ejecuta los tests, y eso es obligatorio, no una comodidad: la suite levanta
 # un contenedor NATS real con Testcontainers, asi que un `RUN npm test` necesitaria Docker DENTRO
 # del build (docker-in-docker o el socket montado), que un `docker build` normal no tiene. La etapa
-# queda preparada y quien la corre es el pipeline:
+# queda preparada y la corre quien quiera la suite dentro de un contenedor; el CI la corre sobre el
+# checkout, no aca (ver ADR-007):
 #
 #   docker build --target test -t jiku-mail-connector:test .
 #   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock jiku-mail-connector:test npm test
