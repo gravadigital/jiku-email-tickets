@@ -142,7 +142,8 @@ describe('el arnes de proceso real, con POLL_ENABLED=true', () => {
   it('TS-11: SIGTERM detiene el proceso ordenadamente y sale con codigo 0', async () => {
     const child = spawnHarness(harnessConfig());
 
-    await waitForStdout(child, /conectado al bus/);
+    // No alcanza con "conectado al bus": se loguea antes de registrar los handlers de señal.
+    await waitForStdout(child, /harness listo: handlers de señal registrados/);
 
     child.kill('SIGTERM');
     const code = await waitForExit(child);
@@ -153,7 +154,7 @@ describe('el arnes de proceso real, con POLL_ENABLED=true', () => {
   it('TS-12: SIGINT produce el mismo apagado ordenado, saliendo con codigo 0', async () => {
     const child = spawnHarness(harnessConfig());
 
-    await waitForStdout(child, /conectado al bus/);
+    await waitForStdout(child, /harness listo: handlers de señal registrados/);
 
     child.kill('SIGINT');
     const code = await waitForExit(child);
