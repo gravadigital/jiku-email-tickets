@@ -49,6 +49,12 @@ async function main() {
     closeBus,
     exit: (code) => process.exit(code),
   });
+
+  // Recien ACA los handlers de señal estan registrados. Los tests que mandan una señal esperan esta
+  // linea y no "conectado al bus": esa se escribe antes del `process.on`, y en un runner cargado
+  // (CI con dind) la señal podia llegar en esa ventana, sin handler, y matar el proceso con la
+  // accion por defecto (exit code `null` en vez de `0`).
+  logger.info({}, 'harness listo: handlers de señal registrados');
 }
 
 main().catch((error) => {
