@@ -117,9 +117,10 @@ describe('README deployment section', () => {
 
   // TS-47. ACTUALIZADO VARIAS VECES, y la cuenta es parte del rastro: eran diez hasta S-006; S-007
   // sumo las cuatro de la casilla y las tres del poll; S-012 las cinco del ruteo; S-024 las cuatro
-  // del KV; y S-025 SACO las dos del Mapa de Tickets, que se mudo al bucket. Un operador que
+  // del KV; S-025 SACO las dos del Mapa de Tickets, que se mudo al bucket; y S-032 SACO las cuatro
+  // del KV, porque el Espacio KV del SDK no tiene nada configurable (TS-83). Un operador que
   // despliega de cero tiene que poder hacerlo leyendo esta seccion, sin abrir el codigo.
-  it('documents the twenty-four configuration variables the orchestrator injects', () => {
+  it('documents the twenty configuration variables the orchestrator injects', () => {
     for (const variable of [
       'JIKU_CREDS',
       'JIKU_KEY_FILE',
@@ -141,10 +142,6 @@ describe('README deployment section', () => {
       'SUBADDRESS_PREFIX',
       'PLACEHOLDER_TITLE',
       'PLACEHOLDER_BODY',
-      'KV_TICKETS_BUCKET',
-      'KV_THREADS_BUCKET',
-      'KV_THREADS_TTL_DAYS',
-      'KV_WATCH_RETRY_MS',
     ]) {
       expect(deployment, `${variable} must be documented`).toContain(variable);
     }
@@ -154,6 +151,27 @@ describe('README deployment section', () => {
     for (const gone of ['TICKET_MAP=', 'TICKET_MAP_FILE=']) {
       expect(deployment, `${gone} must be gone from the docs`).not.toContain(gone);
     }
+  });
+
+  // TS-83 (S-032). Las cuatro variables del KV se eliminaron con los dos buckets: el bucket es
+  // `JIKU_KV`, fijo en el SDK, sin TTL que verificar ni `watch()` que reintentar. Una fila en la tabla
+  // le diria al operador que las declare y no harian nada; la nota le dice que, si quedaron en el
+  // entorno de un despliegue viejo, se ignoran (no hacen fallar el arranque).
+  it('drops the four KV variables from the table, and says that a leftover one is ignored', () => {
+    const removed = ['KV_TICKETS_BUCKET', 'KV_THREADS_BUCKET', 'KV_THREADS_TTL_DAYS', 'KV_WATCH_RETRY_MS'];
+
+    // El mismo criterio de FILA de tabla que usaba el caso de consistencia de S-028: la primera
+    // celda es el nombre de la variable entre backticks.
+    for (const variable of removed) {
+      const row = readme.split('\n').find((line) => line.startsWith(`| \`${variable}\``));
+      expect(row, `${variable} must not be a row of the variables table any more`).toBeUndefined();
+    }
+
+    // La nota, en la seccion de despliegue: nombra las cuatro y dice que se ignoran.
+    for (const variable of removed) {
+      expect(deployment, `the note must name ${variable}`).toContain(variable);
+    }
+    expect(deployment).toMatch(/se ignora/i);
   });
 
   // TS-48, INVERTIDO EN S-025. Afirmaba que el README explicaba las DOS FUENTES EXCLUYENTES del
@@ -179,7 +197,9 @@ describe('README deployment section', () => {
    *
    * El README YA tenia la precondicion 8 con las cuatro cosas, los dos `nats kv add` con el
    * `--ttl=90d`, la nota de que el operador los crea, y las cuatro variables `KV_*` en la tabla:
-   * S-024 a S-027 las fueron dejando. Lo que faltaba no era el CONTENIDO sino LA ASERCION, y en
+   * S-024 a S-027 las fueron dejando. (S-032 saco las cuatro variables y, con ellas, el caso de
+   * consistencia entre el bloque de comandos y la tabla, TS-64; la prosa de la precondicion 8 la
+   * reescribe S-033, junto con los casos de aca que la afirman.) Lo que faltaba no era el CONTENIDO sino LA ASERCION, y en
    * particular la de CONSISTENCIA — que es la unica falla que nadie ve leyendo una seccion sola.
    *
    * Por eso el caso de consistencia CRUZA las dos secciones del mismo archivo (extrae el nombre del
@@ -236,7 +256,9 @@ describe('README deployment section', () => {
   // TS-63, la contraparte: que pasa si falta cada cosa. Los dos diagnosticos son distintos y el
   // arreglo de cada uno vive en otro lugar.
   it('states what happens if each piece is missing, with its diagnosis', () => {
-    expect(deployment).toContain('KV_BUCKET_MISSING_ERROR');
+    // TS-84 (S-032): el codigo del error del arranque se renombro con el Espacio KV.
+    expect(deployment).toContain('KV_SPACE_UNAVAILABLE_ERROR');
+    expect(readme).not.toContain('KV_BUCKET_MISSING_ERROR');
     // Falta un bucket -> el log NOMBRA cual. Es el dato que hace falta para crearlo.
     expect(deployment).toContain('bucket_inexistente');
     expect(deployment).toMatch(/nombra cu[aá]l/i);
@@ -244,45 +266,6 @@ describe('README deployment section', () => {
     // las DOS cosas en vez de elegir una y mandar al operador al lugar equivocado.
     expect(deployment).toContain('kv_no_disponible');
     expect(deployment).toMatch(/indistinguibles/i);
-  });
-
-  // TS-64 — LA CONSISTENCIA INTERNA, cruzando las dos secciones del mismo archivo.
-  it('keeps the command block and the variables table CONSISTENT with each other', () => {
-    // Los nombres de bucket que el bloque de comandos le dice al operador que cree.
-    const ticketsEnComando = /nats kv add\s+([A-Z_][A-Z0-9_]*)/.exec(deployment)?.[1];
-    const threadsEnComando = /nats kv add\s+([A-Z_][A-Z0-9_]*)[^\n]*--ttl=(\d+)d/.exec(deployment);
-
-    expect(ticketsEnComando, 'el comando del bucket de slugs debe nombrar su bucket').toBeDefined();
-    expect(threadsEnComando, 'el comando del bucket de hilos debe nombrar su bucket y su TTL').not.toBeNull();
-
-    // Y los defaults que la tabla de variables declara para las mismas dos variables.
-    //
-    // Se lee la FILA de la tabla y se toma su TERCERA columna, que es la del default. Buscar "el
-    // primer valor entre backticks despues del nombre" seria fragil: la cuarta columna trae
-    // `nats kv add` entre backticks, y una regex mal anclada terminaria comparando contra eso.
-    const defaultDe = (variable: string): string | undefined => {
-      const row = readme.split('\n').find((line) => line.startsWith(`| \`${variable}\``));
-      // Columnas de la fila: ['', variable, requerida, default, descripcion, ''].
-      return row?.split('|')[3]?.trim().replace(/`/g, '');
-    };
-
-    const ticketsDefault = defaultDe('KV_TICKETS_BUCKET');
-    const threadsDefault = defaultDe('KV_THREADS_BUCKET');
-
-    expect(ticketsDefault, 'KV_TICKETS_BUCKET debe declarar su default en la tabla').toBeDefined();
-    expect(threadsDefault, 'KV_THREADS_BUCKET debe declarar su default en la tabla').toBeDefined();
-
-    // LA ASERCION QUE IMPORTA: las dos secciones dicen LO MISMO. Si divergieran, el operador
-    // crearia un bucket con un nombre y el conector buscaria otro.
-    expect(ticketsEnComando).toBe(ticketsDefault);
-    expect(threadsEnComando?.[1]).toBe(threadsDefault);
-
-    // Y el TTL del comando coincide con el default de `KV_THREADS_TTL_DAYS`. Si no coincidieran, el
-    // conector arrancaria emitiendo un `warn` de TTL discrepante en TODO despliegue nuevo — un
-    // aviso que nadie puede arreglar porque la documentacion misma lo produce.
-    const ttlDefault = defaultDe('KV_THREADS_TTL_DAYS');
-    expect(ttlDefault, 'KV_THREADS_TTL_DAYS debe declarar su default en la tabla').toBeDefined();
-    expect(threadsEnComando?.[2]).toBe(ttlDefault);
   });
 
   it('states that INBOX is fixed and not configurable', () => {
@@ -411,8 +394,15 @@ describe('.env.example', () => {
     expect(example).toMatch(/TICKET_MAP/);
     expect(example).toMatch(/KV|bucket/);
     expect(example).toContain('nats kv put');
-    // Y el nombre de la variable que SI configura algo del mapa hoy.
-    expect(example).toContain('KV_TICKETS_BUCKET');
+  });
+
+  // TS-85 (S-032). Las cuatro variables del KV ya no se declaran —ni siquiera comentadas— y el
+  // archivo avisa que, si quedaron en un entorno viejo, se ignoran. Hasta S-032 este caso exigia que
+  // nombrara `KV_TICKETS_BUCKET` como "la variable que si configura algo del mapa": desde REQ-008 no
+  // hay ninguna.
+  it('no longer declares the four KV variables, and says that a leftover one is ignored', () => {
+    expect(example).not.toMatch(/^\s*#?\s*KV_(TICKETS_BUCKET|THREADS_BUCKET|THREADS_TTL_DAYS|WATCH_RETRY_MS)\s*=/m);
+    expect(example).toMatch(/se ignora/i);
   });
 
   it('carries no real value: every declaration is an empty assignment', () => {

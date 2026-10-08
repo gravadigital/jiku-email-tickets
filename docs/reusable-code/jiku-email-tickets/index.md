@@ -24,7 +24,10 @@ composition of `description` — body, rejection notices, upload-failure notices
 always in that order) and S-029 (`lookupAttachmentByChecksum()`, the **first read** the connector
 ever makes — `attachments.list` filtered by the four names that make a reuse safe — plus
 `respondToQuery()`, the query-plane `core` double, and the optional fourth `ContextoHilo` argument
-that makes "the new mail never queries" structural rather than a conditional). The service is a
+that makes "the new mail never queries" structural rather than a conditional) and S-032 (all state
+moves to the SDK's **KV Space** — `openKvSpace()`, `lookupTicket()` with one `get` per mail, the
+single keys module, the startup diagnosis by SDK class — and the raw `@nats-io/kv` buckets, the
+`watch()` and the four `KV_*` variables go away). The service is a
 `worker` in Node.js with no HTTP surface and no database, so several categories do not apply and
 stay empty until a story creates them.
 
@@ -34,19 +37,26 @@ N/A (Backend service)
 
 ## Utils/Helpers
 
-**Total: 11**
+**Total: 14**
 
-- **sha256hex()** (`src/infra/kv/threads.ts`) - The sha256 of a string, hex-encoded (64 chars of
+- **sha256hex()** (`src/infra/kv/keys.ts`) - The sha256 of a string, hex-encoded (64 chars of
   `[0-9a-f]`), over the value **exactly as given** — no `trim()`, no `toLowerCase()`, no
-  normalization of any kind. It is how the Thread Map's key is built from a raw `Message-Id`: the
-  library's `validKeyRe` (`/^[-/=.\w]+$/`) rejects `<`, `>` and `@`, all three present in a real
+  normalization of any kind. It is how the Thread Map's key is built from a raw `Message-Id`: the KV
+  key rules (the SDK's `assertValidKVKey()`) reject `<`, `>` and `@`, all three present in a real
   `Message-Id`. Normalizing instead of hashing would let two distinct `Message-Id`s collapse onto the
-  same key and route a comment to the wrong requirement.
+  same key and route a comment to the wrong requirement. Moved here from `threads.ts` in S-032.
+- **ticketKey()** (`src/infra/kv/keys.ts`) - `'alfa'` → `'tickets.alfa'`: the Ticket Map key, only
+  the right-hand part (the SDK adds `{instance}.{userId}.`).
+- **threadKey()** (`src/infra/kv/keys.ts`) - `'hilos.' + sha256hex(messageId)` over the **raw**
+  `Message-Id` (invariant 23): the Thread Map key.
+- **isStorableSlug()** (`src/infra/kv/keys.ts`) - Whether a slug can be a KV key, delegating to the
+  SDK's `assertValidKVKey()` instead of copying NATS's rules. Never throws. A non-storable slug is
+  answered as `slug_no_mapeado` with no round-trip.
 - **parsePositiveId()** (`src/infra/kv/parse.ts`) - Parses a **safe, strictly positive integer** from
   the raw text of a KV entry, returning `undefined` for anything else. Rejects `'0'`, negatives,
   `'4.5'`, `'42abc'` and `'0x2a'` — the last three because the parsed value must **re-serialize
-  identically**. Shared by both buckets (the Ticket Map's `projectId` and the Thread Map's
-  `requirementId`): two copies of the rule would diverge on the first change.
+  identically**. Shared by both maps of the KV Space (the Ticket Map's `projectId` and the Thread
+  Map's `requirementId`): two copies of the rule would diverge on the first change.
 - **cleanSubject()** (`src/domain/ingesta/subject.ts`) - Strips `Re:`/`Fwd:`/`RV:` prefixes
   iteratively and case-insensitively. An all-prefix subject is left as `''`, a valid state.
 - **mergeReferenceIds()** (`src/domain/ingesta/headers.ts`) - Deduplicated union of `In-Reply-To`
@@ -152,9 +162,10 @@ N/A (no HTTP surface - ADR-001)
   stops the scheduled task (if any), awaits any in-flight tick without ever canceling it, closes the
   bus, and exits with code `0`. All four dependencies are injected, so the ordering is testable by
   calling the handler directly — no real OS signal, no real timer.
-- **routeMail()** (`src/domain/ruteo/route-mail.ts`) - Pure decision tree that resolves the project a
-  mail routes to, or the discard reason: `es_respuesta` first (before touching the slug), then
-  `sin_slug`, then `slug_no_mapeado`, then the happy path. Never throws, never logs.
+- **routeMail()** (`src/domain/ruteo/route-mail.ts`) - Pure decision tree that returns the mail's
+  **intent** or its discard reason: a reply first (`intencion: 'comentario'`, before touching the
+  slug), then `sin_slug`, then `intencion: 'alta'` with the slug lowercased. Since S-032 it does not
+  resolve the project — the tick does, with `lookupTicket()`. Never throws, never logs, no I/O.
 - **particionar()** (`src/domain/adjuntos/particionar.ts`) - First stage of the attachment pipeline:
   resolves a generated filename/default MIME when missing, then evaluates the local policy in fixed
   order (0-byte → extension → MIME → max size) over the real `content.length`, never the declared
@@ -201,45 +212,31 @@ N/A (no HTTP surface - ADR-001)
   interrupted, so every failure degrades to `sin_match` and the attachment simply uploads as it did
   before. Reuses `diagnosePublishFailure()`/`codeOf()` **without adding a single branch**.
 
-- **openKvStores()** (`src/infra/kv/stores.ts`) - Opens the two NATS KV buckets over the process's
-  **single** connection (`new Kvm(client.connection)`, never a new one) and **verifies they exist**
-  with `status()` — because `open()` does **not**: it binds lazily (`bindOnly: true` →
-  `Bucket.bind()`, which never calls `streams.info`) and resolves happily for a bucket that is not
-  there. Fails fast with an error that **names the missing bucket**, checking the tickets bucket
-  first and stopping there. Compares the threads bucket's TTL against the configured one and emits a
-  single `warn` if they differ — it never **sets** it, and it never **creates** a bucket. Takes
-  `logger` by parameter, not via `getLogger()`, so tests can inject a capture.
+- **openKvSpace()** (`src/infra/kv/space.ts`) - Opens the connector's **KV Space** (its
+  per-identity space inside the shared `JIKU_KV` bucket) with `client.kv()` **once**, over the
+  process's single connection — the only place in `src/` that calls it. Logs `info` `'espacio KV
+  abierto'` with `bucket` and `kvPrefix` (never a field named `key`). On failure throws
+  `KvSpaceUnavailableError`, diagnosed by the SDK's class. Never creates the bucket.
 
-- **startTicketMapWatch()** (`src/infra/kv/ticket-map.ts`) - Loads the Ticket Map from the KV bucket
-  and keeps it live with `watch()`, returning the `Map` plus a `stop()` for the ordered shutdown.
-  Waits for the **complete initial load** before returning, so no tick ever routes against a
-  half-filled map. Three traps it exists to avoid, all verified empirically: an **empty bucket emits
-  no entry at all** (so waiting for one hangs startup forever on any new deployment — it reads
-  `status().values` first); a **dropped watch ends the `for await` normally rather than throwing**
-  (so the retry is triggered after the loop, not from a `catch`); and a **`DEL` arrives with an empty
-  value** (so the operation is checked before the value is parsed). It **mutates one `Map` for the
-  life of the process and never replaces it** — a defensive copy anywhere in the path would break
-  liveness without failing to compile.
+- **lookupTicket()** (`src/infra/kv/tickets.ts`) - Resolves a slug to its `projectId` with **one**
+  `get('tickets.<slug>')`, **one attempt, no cache**, before the attachments are processed. Returns a
+  three-state union: found, not-there (`slug_no_mapeado`: never loaded, deleted, malformed value, or a
+  slug that cannot be a key — this last one with no round-trip) and could-not-query
+  (`slug_no_consultable`, with a `warn` carrying `slug` and `errorClass`). **Never throws.**
 
 - **recordThreadEntry()** (`src/infra/kv/threads.ts`) - Writes the Thread Map entry
-  `sha256(raw Message-Id) → requirementId` after a requirement is created, over the handle
-  `openKvStores()` already opened. **Never throws**: a rejected `put()` is absorbed with a single
-  `warn` carrying `{ messageId, messageIdHash, requirementId }` and the function resolves normally —
-  the requirement already exists in Jiku and there is no compensating command, so the write is a
-  **posterior** effect outside the create's critical path and `creados` is never reverted. The value
-  is the integer as **text** (`String(requirementId)`), not JSON: `entry.json<T>()` throws on an
-  unparseable payload. The `put()` takes **no options object** — the TTL belongs to the bucket and
-  the operator sets it.
+  `hilos.<sha256(raw Message-Id)> → requirementId` on the KV Space, after a create and after a
+  successful comment. **Never throws**: a rejected `put()` (including `JikuBucketFull`) is absorbed
+  with a single `warn` carrying `{ messageId, messageIdHash, requirementId, errorClass }` — the
+  requirement already exists and there is no compensating command, so `creados` is never reverted.
+  The value is the integer as **text**; the `put()` takes no options (no TTL: entries never expire).
 - **lookupThread()** (`src/infra/kv/threads.ts`) - Walks `referenceIds` **in the order received**,
-  sequentially, doing `get(sha256hex(refId))` on each, and **stops at the first valid hit**. Returns
-  a discriminated union with **three** states — found, not-found-but-queryable, and
-  **could-not-query** — because `number | undefined` would collapse "it isn't there" with "I
-  couldn't ask", which is the exact distinction that separates the `hilo_desconocido` discard from
-  the `es_respuesta` one. **Never throws.** A malformed value is not a hit: it is skipped with a
-  `warn` naming the `messageIdHash` and iteration **continues**; a rejected `get()`, by contrast,
-  **stops** — an unreachable bucket does not become reachable on the next reference. An empty
-  `referenceIds` costs **zero** round-trips. **Never `Promise.all`**: that would erase both the
-  first-hit cutoff and the ordering that makes the `In-Reply-To` reference win.
+  sequentially, doing `space.get(threadKey(refId))` on each, and **stops at the first valid hit**.
+  Returns a discriminated union with **three** states — found, not-found-but-queryable, and
+  **could-not-query** — the distinction between `hilo_desconocido` and `es_respuesta`. **Never
+  throws.** `undefined` from `get()` is "not there" and the walk continues; a malformed value is
+  skipped with a `warn`; a rejected `get()` **stops**. An empty `referenceIds` costs **zero**
+  round-trips. **Never `Promise.all`.**
 
 - **publishCommentFromMail()** (`src/domain/publicacion/publish-comment.ts`) - The connector's
   **third** and last write command (`requirements.{id}.comment`, S-027): publishes a client's mail
@@ -256,7 +253,7 @@ See full details in [services.md](./services.md)
 
 ## Test Helpers
 
-**Total: 12**
+**Total: 13**
 
 - **setupTestBus** (`test/bus/helpers.ts`) - Opens a NATS connection against the suite's shared
   container and builds a bus `Client` with `Client.fromConnection()`, returning a context with
@@ -269,17 +266,21 @@ See full details in [services.md](./services.md)
   auth-callout, the `internal-app` role, or the real inbox prefix.
 - **startJetStreamNats** (`test/infra/kv/helpers.ts`) - Starts a NATS container **with `-js`** (on a
   **different image tag** than the shared one, so `shared-container.test.ts`'s `ancestor=` count
-  never sees it — read its comment: that is not a version decision), plus a
-  `seedBucket(name, ttlDays?)` that stands in for the operator's `nats kv add`. The suite's shared
-  container runs **without** JetStream, so the KV happy path is inexpressible against it; `-js` is
-  deliberately **not** added there, because buckets seeded by one file would be visible to the others.
-  This helper is the only place in the repo that calls `kvm.create()` — production code never does.
-- **fakeThreadsKv** (`test/ingesta/fake-threads-kv.ts`) - An in-memory double of the threads bucket
-  for the tick suites that are **not** about the Thread Map. It reproduces the one behaviour those
-  suites depend on — `get()` returns `null` for a missing key rather than throwing — and records
-  `puts`/`gets` so a suite can assert the **absence** of a round-trip. The suites that *are* about
-  the Thread Map (`test/infra/kv/threads.test.ts`, `test/ingesta/tick-hilos.test.ts`) run against a
-  **real** KV with JetStream, which is where the property matters.
+  never sees it — read its comment: that is not a version decision) and creates `JIKU_KV` with the
+  stream configuration of the SDK's own integration test (`allow_direct: true`, no TTL). Exposes
+  `client`, `createBucket(overrides?)`, `deleteBucket()`, `bucketExists()` and `spaceFor(userId)` —
+  a **fresh space of another identity** per test, which replaces the old bucket-per-test (the SDK's
+  `KV` lists no keys). `createBucket` is the **only** place in the repo that creates a bucket
+  (`STREAM.CREATE`) — production code never does. Rewritten in S-032 without `Kvm`.
+- **fakeKvSpace** (`test/ingesta/fake-kv-space.ts`) - An in-memory double of the KV Space for the tick
+  suites that are **not** about the KV (replaces `fakeThreadsKv`, S-032). Seeded with right-hand keys
+  (`{ 'tickets.alfa': '42' }`, `threadKey(id)`), `get()` resolves `undefined` or a `KVEntry` with a
+  `Uint8Array` value, like the SDK's `KV`, and `puts`/`gets` make the **absence** of a round-trip
+  assertable.
+- **spyOnSpace / withFailingGet / withFailingPut** (`test/infra/kv/space-doubles.ts`) - Wrappers of a
+  `KvSpace` (real or fake): a spy that records the keys read and written, and the same space with a
+  `get()` or `put()` that rejects (by default with the SDK's timeout, a `JikuError`). Plain objects
+  that delegate — never a `Proxy`, which breaks on the SDK `KV`'s private fields.
 - **fakeTokenSource / rotatingTokenSource / failingTokenSource** (`test/bus/auth-helpers.ts`) -
   `TokenSource` doubles at the edge for the connection tests, since the real `ServiceUser` would call
   Zitadel.
@@ -330,10 +331,9 @@ See full details in [test-helpers.md](./test-helpers.md)
   `user`, `password`), nested so S-009 receives it complete instead of four loose parameters.
 - **PollConfig** (`src/config/index.ts`) - The tick's whole configuration (`cron`, `enabled`,
   `maxPerTick`), nested on the same criterion for S-010 and S-011.
-- **RuteoConfig** (`src/config/index.ts`) - The routing's whole configuration (`ticketMap`,
-  `subaddressPrefix`, `placeholderTitle`, `placeholderBody`), nested on the same criterion for S-013
-  and S-015. The `ticketMap` arrives already normalized and validated as `ReadonlyMap<string,
-  number>`: the read-only type is what seals the contract, since the underlying Map is mutable.
+- **RuteoConfig** (`src/config/index.ts`) - The routing's whole configuration (`subaddressPrefix`,
+  `placeholderTitle`, `placeholderBody`), nested on the same criterion for S-013 and S-015. Since
+  S-032 it has no `ticketMap`: the Ticket Map lives in the KV Space and is queried once per mail.
 - **TestBusContext** (`test/bus/helpers.ts`) - Return type of `setupTestBus()`: the NATS connection,
   the bus client, and a `cleanup()` that drains the connection.
 - **KeyLoadError** (`src/infra/bus/errors.ts`) - The machine-user key could not be loaded. Names the
@@ -345,25 +345,23 @@ See full details in [test-helpers.md](./test-helpers.md)
   union. `'desconocido'` is legitimate and is never mapped to another value.
 - **diagnoseConnectFailure() / causeChain()** (`src/infra/bus/errors.ts`) - Classify a connection
   failure by **structure**, never by the SDK's message text — the SDK's own regex misses a closed port.
-- **KvBucketMissingError** (`src/infra/kv/errors.ts`) - A KV bucket is not usable at startup. Exposes
-  `diagnosis`, **`bucket`**, `operation`, `errorClass` and `causes` as fields; `bucket` is what makes
-  the failure actionable, since with two buckets "a bucket is missing" does not say where the fix is.
-  Reuses `causeChain()` rather than reimplementing the walk. Has its **own** branch in
-  `reportStartupFailure()` — reporting it as a bus connection failure would send the operator to
-  Zitadel when the fix is a `nats kv add`.
-- **KvDiagnosis** (`src/infra/kv/errors.ts`) - What to fix, as a literal union:
-  `'bucket_inexistente'`, `'kv_no_disponible'`, `'nombre_de_bucket_invalido'`, `'desconocido'`.
-  `'kv_no_disponible'` covers **both** "JetStream disabled" and "no KV permissions", which are
-  indistinguishable from the client, so its remedy names both.
-- **diagnoseKvFailure()** (`src/infra/kv/errors.ts`) - Classifies a KV failure by `name` and by `code`
-  (`10059`) — **never** by the message text. The KV error classes are not importable from the SDK
-  subpath, so `instanceof` is impossible; and the library's own `Kvm.create()` compares
-  `err.message === "stream not found"`, which is the bug this does not replicate.
-- **isValidBucketName()** (`src/infra/kv/errors.ts`) - Whether a configured name can be a KV bucket,
-  against the same `/^[-\w]+$/` the library uses. Runs **before** any I/O so the diagnosis is
-  positive instead of depending on recognizing the library's plain `Error`.
-- **KvStores** (`src/infra/kv/stores.ts`) - The two open handles (`tickets`, `threads`) that S-025 and
-  S-026 consume.
+- **KvSpaceUnavailableError** (`src/infra/kv/errors.ts`) - The KV Space is not usable at startup
+  (`KV_SPACE_UNAVAILABLE_ERROR`, renamed from `KvBucketMissingError` in S-032). Exposes `diagnosis`,
+  `bucket` (always `JIKU_KV`), `subject` (only when the bus refused one), `errorClass` and `causes`
+  (the **full** messages, so the missing grants travel) as fields. Has its **own** branch in
+  `reportStartupFailure()`: the bus connection worked.
+- **KvDiagnosis** (`src/infra/kv/errors.ts`) - What to fix, as a literal union: `'bucket_no_usable'`
+  (no bucket, no `allow_direct`, or JetStream off — never suggests grants), `'kv_sin_permisos'`,
+  `'desconocido'` (legitimate, never mapped to another cause).
+- **diagnoseKvFailure()** (`src/infra/kv/errors.ts`) - Classifies a `client.kv()` failure by
+  `instanceof` against the SDK's `JikuNoBucket` and `JikuKVPermissionDenied` (main entry) — **never**
+  by the message text, the `name` or a `code`.
+- **KvSpace** (`src/infra/kv/space.ts`) - `Pick<KV, 'get' | 'put'>`: the KV Space handle that travels
+  by parameter. Structural (the SDK's `KV` is nominal: private ES fields), so test doubles satisfy
+  it, and without `delete()`, which the connector never calls.
+- **TicketLookupResult** (`src/infra/kv/tickets.ts`) - `lookupTicket()`'s outcome, three states on the
+  model of `ThreadLookupResult`: `{ found: true, projectId }`, `{ found: false, consultable: true }`
+  (→ `slug_no_mapeado`) and `{ found: false, consultable: false }` (→ `slug_no_consultable`).
 - **ThreadLookupResult** (`src/infra/kv/threads.ts`) - The outcome of a Thread Map lookup, as a
   discriminated union of **three** states: `{ found: true, requirementId }`,
   `{ found: false, consultable: true }` (queried, no match) and
@@ -409,12 +407,14 @@ See full details in [test-helpers.md](./test-helpers.md)
   shutdown handler (`scheduledTask`, `waitForCurrentTick`, `closeBus`, `exit`), all received by
   parameter so `createShutdownHandler()` never imports `node:process` or the bus connection module
   directly.
-- **MotivoDescarte** (`src/shared/motivo-descarte.ts`) - The closed catalog of the five ADR-006
-  discard reasons, as a string-literal union (never a `enum`), in the single place both `ingesta`
-  and `ruteo` can import from without either depending on the other.
-- **RouteResult** (`src/shared/motivo-descarte.ts`) - `routeMail()`'s return type: the resolved
-  project, or a discard `motivo` with `slug` present **only** when it is `'slug_no_mapeado'` (an
-  optional key, not a `string | undefined` value, so the key's absence is itself the guarantee).
+- **MotivoDescarte** (`src/shared/motivo-descarte.ts`) - The closed catalog of the **seven** discard
+  reasons, as a string-literal union (never a `enum`), in the single place both `ingesta` and `ruteo`
+  can import from without either depending on the other. S-032 added `slug_no_consultable` ("fix the
+  KV"), distinct from `slug_no_mapeado` ("load the slug").
+- **RouteResult** (`src/shared/motivo-descarte.ts`) - `routeMail()`'s return type: an intent
+  (`{ ok: false, intencion: 'alta', slug }` or `{ ok: false, intencion: 'comentario' }`) or a discard
+  `motivo` with an optional `slug` key. Since S-032 there is no resolved variant: the tick resolves the
+  `alta` intent with `lookupTicket()`.
 - **AdjuntosConfig** (`src/config/index.ts`) - The local attachment policy's whole configuration
   (`allowedExtensions`, `allowedMimeTypes`, `maxSizeBytes`, `putTimeoutMs`), nested on the same
   criterion as `ImapConfig`/`PollConfig`/`RuteoConfig`.
@@ -443,7 +443,7 @@ See full details in [types.md](./types.md)
 
 ## Constants
 
-**Total: 30**
+**Total: 31**
 
 - **SERVICE_NAME** (`src/shared/service-info.ts`) - The service name, used wherever the process has to
   identify itself.
@@ -503,6 +503,9 @@ See full details in [types.md](./types.md)
   `PUT`, 30000 ms. Not consumed by S-017; declared here for S-019.
 - **MAX_ATTACHMENTS_PER_REQUIREMENT** (`src/config/schema.ts`) - The fixed cap of attachments per
   requirement, 10. Not an env var — the bus contract's `maxItems` (ADR-003), fixed in code.
+- **TICKETS_KEY_PREFIX / THREADS_KEY_PREFIX** (`src/infra/kv/keys.ts`) - `'tickets.'` and `'hilos.'`,
+  the right-hand prefixes of the two maps in the KV Space. Code constants, never configuration:
+  changing them would orphan every loaded entry.
 
 See full details in [constants.md](./constants.md)
 
@@ -510,8 +513,8 @@ See full details in [constants.md](./constants.md)
 
 **Total: 5**
 
-- **envSchema** (`src/config/schema.ts`) - Zod shapes of the twenty-six environment variables in
-  scope, with their defaults and the timeout floor. The source of truth for the `Env` type. S-017
+- **envSchema** (`src/config/schema.ts`) - Zod shapes of the twenty-four environment variables in
+  scope (S-032 removed the four `KV_*`), with their defaults and the timeout floor. The source of truth for the `Env` type. S-017
   added the four attachment-policy variables (`ATTACHMENT_ALLOWED_EXTENSIONS`,
   `ATTACHMENT_ALLOWED_MIME_TYPES`, `ATTACHMENT_MAX_SIZE_BYTES`, `PUT_TIMEOUT_MS`), all with defaults
   and none cross-field.

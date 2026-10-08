@@ -27,10 +27,11 @@ function sdkResult(overrides: Partial<LoadedConfig> = {}): LoadedConfig {
   return {
     instance: 'dev',
     credsFile: VALID_ENV.JIKU_CREDS,
-    // `issuer` NO es opcional en `LoadedConfig` desde el minor del SDK que trae el KV (S-023):
-    // `loadConfig()` le aplica su propio default, asi que el tipo dejo de hedgear sobre el. El
-    // doble tiene que declararlo igual que el SDK real, y el valor es el del SDK —no el del
-    // schema— para que los casos que afirman "el issuer del SDK manda" sigan siendo verdaderos.
+    // En el build de jiku-ts@edd1064 (S-032) `issuer` es OPCIONAL en `LoadedConfig` y
+    // `loadConfig()` no le aplica default: cuando falta, el conector cae a `JIKU_ISSUER` (cuyo
+    // default del schema es el mismo valor). El doble lo declara igual que el SDK real, con un
+    // valor presente, para que los casos que afirman "el issuer del SDK manda" sigan siendo
+    // verdaderos.
     zitadel: {
       keyFile: VALID_ENV.JIKU_KEY_FILE,
       projectId: VALID_ENV.JIKU_PROJECT_ID,
@@ -205,7 +206,7 @@ describe('loadAppConfig', () => {
     });
   });
 
-  it('exposes exactly the fifteen documented fields', async () => {
+  it('exposes exactly the fourteen documented fields (fifteen until S-032 removed kv)', async () => {
     loadConfigMock.mockResolvedValue(sdkResult());
     const { loadAppConfig } = await import('#config/index.js');
 
@@ -223,10 +224,8 @@ describe('loadAppConfig', () => {
         'instance',
         'issuer',
         'keyFile',
-        // El bloque del KV lo agrega S-024: los dos buckets (el Mapa de Tickets y el Mapa de
-        // Hilos) se abren con la configuracion ENTERA, con el mismo criterio que `imap` y `poll`.
-        // `watchRetryMs` se declara aca y lo consume el watch de S-025.
-        'kv',
+        // El bloque `kv` que agrego S-024 (los dos buckets, el TTL esperado y el reintento del
+        // watch) SALIO con S-032: el Espacio KV del SDK no tiene nada configurable (TS-52).
         'logLevel',
         // nodeEnv lo agrega S-003: lo consume el logger para elegir formato (JSON vs pino-pretty).
         'nodeEnv',
@@ -239,6 +238,23 @@ describe('loadAppConfig', () => {
         'verifyProjectId',
         'zitadelProjectId',
       ]);
+    });
+  });
+
+  // TS-52 (S-032). `withTicketMap()` existia solo para componer el `AppConfig` final con la copia
+  // viva del `watch()`; sin watch no hay nada que componer. Y los defaults de las cuatro `KV_*` se
+  // fueron con ellas.
+  it('exports no withTicketMap and no DEFAULT_KV_* default', async () => {
+    loadConfigMock.mockResolvedValue(sdkResult());
+    const configModule = await import('#config/index.js');
+    const schemaModule = await import('#config/schema.js');
+
+    expect('withTicketMap' in configModule).toBe(false);
+    expect(Object.keys(schemaModule).filter((name) => name.startsWith('DEFAULT_KV_'))).toEqual([]);
+
+    await withEnv(VALID_ENV, async () => {
+      const config = await configModule.loadAppConfig();
+      expect(Object.keys(config)).not.toContain('kv');
     });
   });
 
@@ -404,12 +420,12 @@ describe('loadAppConfig routing block', () => {
   // TS-28. Llega ENTERO y anidado, con el mismo criterio con que ya llegan `imap` y `poll`: el
   // consumidor recibe su configuracion completa y no cuatro campos sueltos que tenga que recomponer.
   //
-  // REESCRITO EN S-025: la propiedad que este caso defiende —el bloque llega COMPLETO— sigue viva y
-  // sigue afirmada. Lo que ya no puede afirmar es el CONTENIDO del `ticketMap`, porque
-  // `loadAppConfig()` dejo de construirlo: sale vacio de aca y lo llena el watch del KV en el paso
-  // 5.6 del arranque. Su contenido se afirma ahora en `test/infra/kv/ticket-map.test.ts`, contra el
-  // bucket real.
-  it('exposes the whole routing block, with an empty map to be filled by the watch', async () => {
+  // REESCRITO EN S-025 Y EN S-032: la propiedad que este caso defiende —el bloque llega COMPLETO—
+  // sigue viva y sigue afirmada. Lo que cambio es que el bloque ya no tiene `ticketMap`: hasta S-032
+  // salia vacio de aca y lo llenaba el watch del KV; desde REQ-008 el Mapa de Tickets vive en el
+  // Espacio KV y `lookupTicket()` lo consulta una vez por mail (`test/infra/kv/tickets.test.ts`).
+  // (TS-52 de S-032)
+  it('exposes the whole routing block, with no ticket map in it', async () => {
     loadConfigMock.mockResolvedValue(sdkResult());
     const { loadAppConfig } = await import('#config/index.js');
 
@@ -420,12 +436,7 @@ describe('loadAppConfig routing block', () => {
         'placeholderBody',
         'placeholderTitle',
         'subaddressPrefix',
-        'ticketMap',
       ]);
-      // Sigue siendo un Map y sigue siendo el tipo que `routeMail()` consume sin transformar.
-      expect(config.ruteo.ticketMap).toBeInstanceOf(Map);
-      // Vacio, y eso es correcto: el Mapa de Tickets no puede existir antes de que haya conexion.
-      expect(config.ruteo.ticketMap.size).toBe(0);
       expect(config.ruteo.subaddressPrefix).toBe('tickets');
       expect(config.ruteo.placeholderTitle).toBe('Ticket recibido por mail');
       expect(config.ruteo.placeholderBody).toBe('(mail sin contenido)');

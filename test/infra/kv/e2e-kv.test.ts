@@ -1,12 +1,13 @@
-import type { KV } from '@gravadigital/jiku/nats';
+import { createHash } from 'node:crypto';
+
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import type { AppConfig } from '#config/index.js';
 import type { MailSource, RawMessage } from '#domain/ingesta/ports.js';
 import { runTick } from '#domain/ingesta/tick.js';
-import { KvBucketMissingError } from '#infra/kv/errors.js';
-import { openKvStores } from '#infra/kv/stores.js';
-import { sha256hex } from '#infra/kv/threads.js';
+import { KvSpaceUnavailableError } from '#infra/kv/errors.js';
+import { threadKey } from '#infra/kv/keys.js';
+import { openKvSpace, type KvSpace } from '#infra/kv/space.js';
 import { createLogger } from '#shared/logger.js';
 
 import { setupTestBus, type TestBusContext } from '../../bus/helpers.js';
@@ -15,31 +16,34 @@ import { createLogCapture, type LogCapture } from '../../shared/log-capture.js';
 import { startJetStreamNats, type JetStreamNats } from './helpers.js';
 
 /**
- * S-028 Tarea 4 (CA-7, CA-8): la verificacion E2E contra un NATS REAL con JetStream y los dos
- * buckets creados. TS-31 a TS-38.
+ * S-028 Tarea 4 (CA-7, CA-8): la verificacion E2E contra un NATS REAL con JetStream. TS-31 a TS-38,
+ * adaptados en S-032 al Espacio KV (TS-87 y TS-88 de su Story Plan).
  *
  * # QUE VERIFICA ESTE ARCHIVO Y QUE NO
  *
  * **CA-7 — el ciclo ENCADENADO.** `tick-hilos.test.ts` TS-40 ya cubre un tick MIXTO contra KV real.
- * Lo que no existia es la SECUENCIA de ticks separados sobre el mismo bucket:
+ * Lo que no existia es la SECUENCIA de ticks separados sobre el mismo espacio:
  * alta → write → (tick nuevo) respuesta → comentario → write → (tick nuevo) respuesta a la
  * respuesta → comentario. Esa cadena es la que prueba que el write del tick 1 es LEGIBLE por el
  * lookup del tick 2 —lo que en un tick mixto podria pasar por casualidad si el orden del lote
  * ayudara— y es lo que hace concreta la razon de que el SEGUNDO write exista.
  *
- * **CA-8 — el ENCADENADO del fail-fast.** `stores.test.ts` ya cubre `openKvStores()` fallando y
- * nombrando cada bucket, los dos ausentes, el nombre invalido y el NATS sin JetStream; y
- * `startup-wiring.test.ts` ya cubre el `logger.fatal` de `reportStartupFailure()` sobre un
- * `KvBucketMissingError` construido a mano. Lo que falta, y es lo que se agrega aca, es LA UNION:
- * el error que el SERVIDOR produjo de verdad pasando por `reportStartupFailure()` en la MISMA
- * corrida, con la afirmacion de que el bucket sigue sin existir despues.
+ * **CA-8 — el ENCADENADO del fail-fast.** `space.test.ts` ya cubre `openKvSpace()` fallando sin
+ * `JIKU_KV`, sin `allow_direct` y contra un NATS sin JetStream; y `startup-wiring.test.ts` ya cubre
+ * el `logger.fatal` de `reportStartupFailure()` sobre un `KvSpaceUnavailableError` construido a mano.
+ * Lo que falta, y es lo que se agrega aca, es LA UNION: el error que el SERVIDOR produjo de verdad
+ * pasando por `reportStartupFailure()` en la MISMA corrida, con la afirmacion de que el bucket sigue
+ * sin existir despues.
+ *
+ * Hasta S-032 este bloque tenia ademas dos escenarios por bucket faltante (el de hilos solo, y los
+ * dos a la vez). Desde REQ-008 hay UN solo bucket, `JIKU_KV`, y se borraron con los dos buckets.
  *
  * # POR QUE NO SE INVOCA `runStartup()`
  *
  * `runStartup()` llama a `connectToBus()`, que pide el token a Zitadel ANTES de abrir el socket. No
  * hay Zitadel en test y no puede haberlo: `Client.fromConnection()` existe precisamente para
  * saltear ese handshake. Asi que el encadenado se arma con las DOS piezas reales que el arranque
- * ejecuta en secuencia —`openKvStores()` y `reportStartupFailure()`— sobre el `client` de
+ * ejecuta en secuencia —`openKvSpace()` y `reportStartupFailure()`— sobre el `client` de
  * `fromConnection()`. Es el mismo encadenado que produce el arranque real y es el precedente que
  * `startup-wiring.test.ts` ya usa.
  *
@@ -48,10 +52,8 @@ import { startJetStreamNats, type JetStreamNats } from './helpers.js';
  *
  * # UN SOLO CONTENEDOR POR ARCHIVO
  *
- * Los escenarios de CA-8 necesitan buckets AUSENTES. Se resuelve con NOMBRES DE BUCKET DISTINTOS
- * por escenario, sembrando solo el que corresponde, en vez de un contenedor por escenario: el KV no
- * tiene forma de borrar un bucket sin `create()`, y un contenedor por caso multiplicaria el tiempo
- * de la suite por nada.
+ * Los escenarios de CA-8 necesitan el bucket AUSENTE: lo borran con `deleteBucket()` y el
+ * `afterEach` lo recrea. Un contenedor por caso multiplicaria el tiempo de la suite por nada.
  */
 
 const BASE_CONFIG: AppConfig = {
@@ -73,7 +75,6 @@ const BASE_CONFIG: AppConfig = {
   },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
   ruteo: {
-    ticketMap: new Map([['alfa', 42]]),
     subaddressPrefix: 'tickets',
     placeholderTitle: 'Ticket recibido por mail',
     placeholderBody: '(mail sin contenido)',
@@ -84,18 +85,9 @@ const BASE_CONFIG: AppConfig = {
     maxSizeBytes: 10_485_760,
     putTimeoutMs: 30_000,
   },
-  kv: {
-    ticketsBucket: 'TICKETS',
-    threadsBucket: 'MAIL_THREADS',
-    threadsTtlDays: 90,
-    watchRetryMs: 30_000,
-  },
 };
 
-const configWithKv = (ticketsBucket: string, threadsBucket: string): AppConfig => ({
-  ...BASE_CONFIG,
-  kv: { ...BASE_CONFIG.kv, ticketsBucket, threadsBucket },
-});
+const FATAL_MESSAGE = 'el arranque fallo: el espacio KV no esta usable';
 
 /**
  * El capture del caso en curso, leido por el `getLogger()` mockeado.
@@ -119,6 +111,17 @@ vi.mock('#shared/logger.js', async (importOriginal) => {
 
 // Se importa DESPUES del `vi.mock` para que `startup.ts` resuelva el `getLogger()` mockeado.
 const { reportStartupFailure } = await import('../../../src/startup.js');
+
+/** El hash calculado INDEPENDIENTEMENTE en el test, nunca importado de `src/`. */
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+/** El valor de una entrada del espacio como texto, o `undefined` si no esta. */
+async function valueOf(space: KvSpace, key: string): Promise<string | undefined> {
+  const entry = await space.get(key);
+  return entry === undefined ? undefined : new TextDecoder().decode(entry.value);
+}
 
 function loggerWithCapture(): { logger: ReturnType<typeof createLogger>; capture: LogCapture } {
   const capture = createLogCapture();
@@ -193,13 +196,14 @@ afterAll(async () => {
  * CA-7 — EL CAMINO COMPLETO DE UNA RESPUESTA, CONTRA EL KV REAL
  * ========================================================================================== */
 describe('E2E contra NATS real: el ciclo alta -> respuesta -> respuesta a la respuesta (CA-7)', () => {
-  // TS-31, TS-32, TS-33 en una sola cadena: los tres ticks comparten el MISMO handle del bucket, y
-  // eso NO es un detalle de comodidad — es lo que hace que el write del tick 1 sea legible por el
-  // lookup del tick 2. Por eso este escenario NO refresca el bucket entre ticks, a diferencia del
-  // resto de las suites del KV, que si aislan.
+  // TS-31, TS-32, TS-33 (TS-87 de S-032) en una sola cadena: los tres ticks comparten el MISMO
+  // espacio, y eso NO es un detalle de comodidad — es lo que hace que el write del tick 1 sea legible
+  // por el lookup del tick 2. Por eso este escenario NO refresca el espacio entre ticks, a diferencia
+  // del resto de las suites del KV, que si aislan.
   it('TS-31/TS-32/TS-33: los tres ticks encadenados contra el KV real, sin ningun doble del KV', async () => {
-    await nats.seedBucket('E2E_THREADS', 90);
-    const threads: KV = await nats.openBucket('E2E_THREADS');
+    // El espacio de una identidad propia, con el slug cargado como lo cargaria U-02.
+    const space = await nats.spaceFor('e2e-ciclo');
+    await space.put('tickets.alfa', '42');
 
     // ---------- TICK 1: el mail nuevo crea el Requisito y ESCRIBE su entrada ----------
     const { logger: l1, capture: c1 } = loggerWithCapture();
@@ -210,19 +214,20 @@ describe('E2E contra NATS real: el ciclo alta -> respuesta -> respuesta a la res
 
     await runTick(
       sourceWith(new Map([[1, mail({ messageId: '<orig-1@cliente.com>' })]])),
-      configWithKv('E2E_TICKETS_NO_USADO', 'E2E_THREADS'),
+      BASE_CONFIG,
       l1,
       bus.client,
-      threads,
+      space,
     );
 
     expect(tickLine(c1)).toMatchObject({ creados: 1, comentados: 0, descartados: 0, fallidos: 0 });
     expect(altas.count()).toBe(1);
+    // El alta fue al proyecto que el Mapa de Tickets del espacio resolvio.
+    expect((altas.payloads()[0] as Record<string, unknown>)['projectId']).toBe(42);
 
-    // El valor se lee DEL KV REAL, no de un doble.
-    const entrada1 = await threads.get(sha256hex('<orig-1@cliente.com>'));
-    expect(entrada1).not.toBeNull();
-    expect(entrada1?.string()).toBe('700');
+    // El valor se lee DEL KV REAL, no de un doble, bajo la clave `hilos.<sha256>`.
+    expect(threadKey('<orig-1@cliente.com>')).toBe(`hilos.${sha256('<orig-1@cliente.com>')}`);
+    expect(await valueOf(space, `hilos.${sha256('<orig-1@cliente.com>')}`)).toBe('700');
 
     // ---------- TICK 2: la respuesta COMENTA y escribe la entrada de SU PROPIO Message-Id ----------
     const { logger: l2, capture: c2 } = loggerWithCapture();
@@ -237,10 +242,10 @@ describe('E2E contra NATS real: el ciclo alta -> respuesta -> respuesta a la res
           [2, mail({ messageId: '<reply-1@cliente.com>', inReplyTo: '<orig-1@cliente.com>', subject: 'Re: Consulta' })],
         ]),
       ),
-      configWithKv('E2E_TICKETS_NO_USADO', 'E2E_THREADS'),
+      BASE_CONFIG,
       l2,
       bus.client,
-      threads,
+      space,
     );
 
     expect(tickLine(c2)).toMatchObject({
@@ -273,9 +278,7 @@ describe('E2E contra NATS real: el ciclo alta -> respuesta -> respuesta a la res
     expect(Object.keys(payload).sort()).toEqual(['comment', 'visibilityLevel']);
 
     // El SEGUNDO write: la entrada del Message-Id de LA RESPUESTA, apuntando al MISMO requisito.
-    const entrada2 = await threads.get(sha256hex('<reply-1@cliente.com>'));
-    expect(entrada2).not.toBeNull();
-    expect(entrada2?.string()).toBe('700');
+    expect(await valueOf(space, threadKey('<reply-1@cliente.com>'))).toBe('700');
 
     // ---------- TICK 3: una respuesta A LA RESPUESTA rutea igual ----------
     //
@@ -290,10 +293,10 @@ describe('E2E contra NATS real: el ciclo alta -> respuesta -> respuesta a la res
           [3, mail({ messageId: '<reply-2@cliente.com>', inReplyTo: '<reply-1@cliente.com>', subject: 'Re: Re: Consulta' })],
         ]),
       ),
-      configWithKv('E2E_TICKETS_NO_USADO', 'E2E_THREADS'),
+      BASE_CONFIG,
       l3,
       bus.client,
-      threads,
+      space,
     );
 
     expect(tickLine(c3)).toMatchObject({ comentados: 1, creados: 0, descartados: 0, fallidos: 0 });
@@ -301,34 +304,35 @@ describe('E2E contra NATS real: el ciclo alta -> respuesta -> respuesta a la res
     // Comenta en el MISMO requisito 700, no en otro.
     expect(comentarios.subjects()[1]).toContain('requirements.700.comment');
     // Y escribe su propia entrada, para que la cadena siga.
-    expect((await threads.get(sha256hex('<reply-2@cliente.com>')))?.string()).toBe('700');
+    expect(await valueOf(space, threadKey('<reply-2@cliente.com>'))).toBe('700');
   }, 90_000);
 });
 
 /* ==========================================================================================
- * CA-8 — EL FAIL-FAST DEL BUCKET FALTANTE, ENCADENADO CON EL REPORTE DEL ARRANQUE
+ * CA-8 — EL FAIL-FAST DEL ESPACIO NO USABLE, ENCADENADO CON EL REPORTE DEL ARRANQUE
  * ========================================================================================== */
-describe('E2E contra NATS real: el arranque falla nombrando el bucket faltante (CA-8)', () => {
+describe('E2E contra NATS real: el arranque falla cuando JIKU_KV no esta usable (CA-8)', () => {
+  // Los escenarios que borran `JIKU_KV` lo dejan como estaba para el resto del archivo.
+  afterEach(async () => {
+    if (!(await nats.bucketExists())) await nats.createBucket();
+  });
+
   /**
-   * El encadenado real: `openKvStores()` contra el servidor de verdad, el error capturado, y
+   * El encadenado real: `openKvSpace()` contra el servidor de verdad, el error capturado, y
    * `reportStartupFailure()` sobre ESE error. Es lo que el arranque hace en secuencia.
    */
   async function arrancarYFallar(
-    ticketsBucket: string,
-    threadsBucket: string,
     client = nats.client,
-  ): Promise<{ error: KvBucketMissingError; fatals: Record<string, unknown>[] }> {
+  ): Promise<{ error: KvSpaceUnavailableError; fatals: Record<string, unknown>[] }> {
     startupCapture = createLogCapture();
-    const { logger } = loggerWithCapture();
+    const { logger, capture } = loggerWithCapture();
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
-    const caught = await openKvStores({
-      client,
-      config: configWithKv(ticketsBucket, threadsBucket),
-      logger,
-    }).catch((error: unknown) => error);
+    const caught = await openKvSpace({ client, logger }).catch((error: unknown) => error);
 
-    expect(caught).toBeInstanceOf(KvBucketMissingError);
+    expect(caught).toBeInstanceOf(KvSpaceUnavailableError);
+    // Y no se logueo la linea de exito: el espacio no se abrio.
+    expect(capture.lines().some((line) => line['msg'] === 'espacio KV abierto')).toBe(false);
 
     // Y aca esta la union que faltaba: el error del SERVIDOR pasando por el reporte del arranque.
     reportStartupFailure(caught);
@@ -338,41 +342,33 @@ describe('E2E contra NATS real: el arranque falla nombrando el bucket faltante (
     expect(stderr).not.toHaveBeenCalled();
 
     return {
-      error: caught as KvBucketMissingError,
+      error: caught as KvSpaceUnavailableError,
       fatals: startupCapture.lines().filter((line) => line['level'] === 'fatal'),
     };
   }
 
-  /** Tras el fallo, el bucket TIENE que seguir sin existir: el conector no lo creo. */
-  async function sigueSinExistir(name: string): Promise<void> {
-    const handle = await nats.openBucket(name);
-    // `open()` NO falla si el bucket no existe (fija `bindOnly` y delega en `Bucket.bind()`, que
-    // nunca consulta `streams.info`). El fallo esta diferido al primer acceso real, y por eso la
-    // verificacion es el `status()` — el mismo que hace produccion. NO es redundante.
-    await expect(handle.status()).rejects.toThrow();
-  }
+  // TS-34 (TS-88 de S-032)
+  it('TS-34: sin JIKU_KV -> falla como bucket_no_usable, el fatal sale por la rama del KV, y no lo crea', async () => {
+    await nats.deleteBucket();
 
-  // TS-34
-  it('TS-34: falta el bucket de SLUGS -> falla nombrandolo, el fatal sale por la rama del KV, y no lo crea', async () => {
-    await nats.seedBucket('T34_THREADS', 90);
+    const { error, fatals } = await arrancarYFallar();
 
-    const { error, fatals } = await arrancarYFallar('T34_TICKETS', 'T34_THREADS');
-
-    expect(error.bucket).toBe('T34_TICKETS');
-    expect(error.operation).toBe('status');
-    expect(error.diagnosis).toBe('bucket_inexistente');
+    expect(error.bucket).toBe('JIKU_KV');
+    expect(error.diagnosis).toBe('bucket_no_usable');
+    expect(error.errorClass).toBe('JikuNoBucket');
 
     // UNA sola linea fatal, con el contexto PLANO que la convencion `logging` exige (`redact.paths`
     // de Pino no tiene comodin profundo: un contexto anidado dejaria un valor sin redactar sin
     // fallar y sin avisar).
     expect(fatals).toHaveLength(1);
     const fatal = fatals[0];
-    expect(fatal?.['code']).toBe('KV_BUCKET_MISSING_ERROR');
-    expect(fatal?.['diagnosis']).toBe('bucket_inexistente');
-    expect(fatal?.['bucket']).toBe('T34_TICKETS');
-    expect(fatal?.['operation']).toBe('status');
-    expect(fatal?.['msg']).toBe('el arranque fallo: un bucket del KV no esta usable');
-    expect(fatal?.['errorClass']).toBeDefined();
+    expect(fatal).toMatchObject({
+      code: 'KV_SPACE_UNAVAILABLE_ERROR',
+      diagnosis: 'bucket_no_usable',
+      bucket: 'JIKU_KV',
+      errorClass: 'JikuNoBucket',
+      msg: FATAL_MESSAGE,
+    });
     expect(Array.isArray(fatal?.['causes'])).toBe(true);
     for (const [key, value] of Object.entries(fatal ?? {})) {
       if (key === 'causes') continue;
@@ -380,71 +376,46 @@ describe('E2E contra NATS real: el arranque falla nombrando el bucket faltante (
     }
 
     // Y NO lo creo.
-    await sigueSinExistir('T34_TICKETS');
+    expect(await nats.bucketExists()).toBe(false);
   });
 
-  // TS-35
-  it('TS-35: falta el bucket de HILOS -> falla nombrandolo, y no lo crea', async () => {
-    await nats.seedBucket('T35_TICKETS');
+  // TS-37 (TS-88 de S-032)
+  it('TS-37: el fallo del espacio es una rama PROPIA, no la del bus', async () => {
+    await nats.deleteBucket();
 
-    const { error, fatals } = await arrancarYFallar('T35_TICKETS', 'T35_THREADS');
-
-    expect(error.bucket).toBe('T35_THREADS');
-    expect(error.diagnosis).toBe('bucket_inexistente');
-    expect(fatals).toHaveLength(1);
-    expect(fatals[0]?.['bucket']).toBe('T35_THREADS');
-
-    await sigueSinExistir('T35_THREADS');
-  });
-
-  // TS-36
-  it('TS-36: faltan los DOS -> nombra el de slugs y SOLO ese, con una sola linea fatal', async () => {
-    const { error, fatals } = await arrancarYFallar('T36_TICKETS', 'T36_THREADS');
-
-    // La verificacion es SECUENCIAL (slugs primero) y corta ahi a proposito: sin el Mapa de
-    // Tickets no se puede rutear nada, y el error tiene que nombrar UN bucket para que el operador
-    // sepa cual crear. Nombrar los dos lo dejaria dudando de por donde empezar.
-    expect(error.bucket).toBe('T36_TICKETS');
-    expect(error.message).not.toContain('T36_THREADS');
-    expect(fatals).toHaveLength(1);
-    expect(fatals[0]?.['bucket']).toBe('T36_TICKETS');
-
-    await sigueSinExistir('T36_TICKETS');
-    await sigueSinExistir('T36_THREADS');
-  });
-
-  // TS-37
-  it('TS-37: el fallo del bucket es una rama PROPIA, no la del bus', async () => {
-    await nats.seedBucket('T37_THREADS', 90);
-
-    const { fatals } = await arrancarYFallar('T37_TICKETS', 'T37_THREADS');
+    const { fatals } = await arrancarYFallar();
 
     const msg = String(fatals[0]?.['msg']);
     // La conexion al bus FUNCIONO: el `client` de este escenario esta conectado y usable.
     // Reportarlo como "el conector no pudo conectarse al bus" mandaria al operador a revisar
-    // Zitadel, la red y los montajes de credenciales cuando el arreglo es UN `nats kv add`. Ese es
-    // el diagnostico equivocado que ADR-006 existe para evitar.
-    expect(msg).toBe('el arranque fallo: un bucket del KV no esta usable');
+    // Zitadel, la red y los montajes de credenciales cuando el arreglo es el bucket. Ese es el
+    // diagnostico equivocado que ADR-006 existe para evitar.
+    expect(msg).toBe(FATAL_MESSAGE);
     expect(msg).not.toContain('el conector no pudo conectarse al bus');
     expect(msg).not.toMatch(/conectar|conexion/i);
     expect(fatals[0]?.['diagnosis']).not.toBe('bus_inalcanzable');
   });
 
-  // TS-38 — contra el contenedor COMPARTIDO, que por NO tener JetStream es el doble perfecto y
-  // gratis del escenario "JetStream deshabilitado". No hay que simular nada.
-  it('TS-38: contra un NATS sin JetStream el diagnostico es kv_no_disponible y nombra las DOS cosas', async () => {
-    const { error, fatals } = await arrancarYFallar('TICKETS', 'MAIL_THREADS', bus.client);
+  // TS-38 (TS-88 de S-032) — contra el contenedor COMPARTIDO, que por NO tener JetStream es el doble
+  // perfecto y gratis del escenario "JetStream deshabilitado". No hay que simular nada.
+  it('TS-38: contra un NATS sin JetStream el diagnostico es bucket_no_usable y no sugiere grants', async () => {
+    const { error, fatals } = await arrancarYFallar(bus.client);
 
-    // NO es `bucket_inexistente`: el KV entero no esta disponible. Desde el cliente, JetStream
-    // deshabilitado y los permisos de KV faltantes son INDISTINGUIBLES, asi que el mensaje nombra
-    // las dos cosas a revisar en vez de elegir una y mandar al operador al lugar equivocado.
-    expect(error.diagnosis).toBe('kv_no_disponible');
-    expect(error.message).toMatch(/JetStream/i);
-    expect(error.message).toMatch(/permisos/i);
+    // Desde S-032 el SDK DISTINGUE JetStream apagado de los permisos: nadie contesta el
+    // `STREAM.INFO`, y eso es un `JikuNoBucket`. El texto del CONECTOR no sugiere grants —con el KV
+    // apagado serian el arreglo equivocado— y la causa exacta viaja en `causes`.
+    expect(error.diagnosis).toBe('bucket_no_usable');
+    expect(error.errorClass).toBe('JikuNoBucket');
+    expect(error.causes[0]).toMatch(/JetStream/);
+    expect(error.message).not.toMatch(/grant|permis/i);
     expect(error.message).not.toMatch(/inalcanzable|no se pudo conectar/i);
 
     expect(fatals).toHaveLength(1);
-    expect(fatals[0]?.['diagnosis']).toBe('kv_no_disponible');
-    expect(fatals[0]?.['msg']).toBe('el arranque fallo: un bucket del KV no esta usable');
+    expect(fatals[0]).toMatchObject({
+      code: 'KV_SPACE_UNAVAILABLE_ERROR',
+      diagnosis: 'bucket_no_usable',
+      bucket: 'JIKU_KV',
+      msg: FATAL_MESSAGE,
+    });
   });
 });

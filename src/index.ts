@@ -22,7 +22,7 @@ loadDotenvUnlessTest();
  * propiedad que escanea el codigo para afirmarlo.
  */
 async function main(): Promise<void> {
-  const { config, logger, client, kv, ticketMapWatch } = await runStartup();
+  const { config, logger, client, space } = await runStartup();
 
   // Apagado ordenado (CA-8, CA-9, CA-10): los handlers de SIGTERM/SIGINT se registran ACA, ANTES
   // de `scheduleTick()`, y no despues. `shutdown` se reconstruye (mismo `waitForCurrentTick` y
@@ -36,9 +36,6 @@ async function main(): Promise<void> {
   let shutdown = createShutdownHandler({
     scheduledTask: undefined,
     waitForCurrentTick,
-    // El watch YA esta activo cuando esto se registra: `runStartup()` lo dio de alta en el paso 5.6
-    // y espero su carga inicial, asi que una señal que llegue en esta ventana lo baja igual.
-    stopTicketMapWatch: ticketMapWatch.stop,
     closeBus,
     exit: (code) => process.exit(code),
   });
@@ -60,12 +57,11 @@ async function main(): Promise<void> {
   // archivo NO importa nada de `#domain/publicacion/` para lograrlo — el import queda encapsulado
   // en `tick.ts` (CA-24).
   //
-  // El handle del bucket de HILOS viaja hasta el tick por esta cadena, con la misma forma con que
-  // ya viaja el `client` (S-026). Es el que `openKvStores()` ya abrio y verifico sobre la conexion
-  // UNICA del proceso: aca no se abre nada nuevo (ADR-002). Se pasa el bucket suelto y no el
-  // `KvStores` entero — el tick necesita el de hilos, no el de tickets, que ya le llega por
-  // `config.ruteo.ticketMap`.
-  const scheduledTask = scheduleTick(config, logger, client, kv.threads);
+  // El Espacio KV viaja hasta el tick por esta cadena, con la misma forma con que ya viaja el
+  // `client` (S-032). Es el que `openKvSpace()` ya abrio sobre la conexion UNICA del proceso: aca
+  // no se abre nada nuevo (ADR-002). Guarda los dos mapas: el tick consulta el slug y el hilo
+  // contra el.
+  const scheduledTask = scheduleTick(config, logger, client, space);
 
   // El proceso queda VIVO en ambas ramas. Con el poll habilitado, ademas hay un cron activo. Con
   // el poll deshabilitado (CA-3/CA-4), el proceso sigue vivo igual, pero NO por codigo de esta
@@ -74,7 +70,6 @@ async function main(): Promise<void> {
   shutdown = createShutdownHandler({
     scheduledTask,
     waitForCurrentTick,
-    stopTicketMapWatch: ticketMapWatch.stop,
     closeBus,
     exit: (code) => process.exit(code),
   });

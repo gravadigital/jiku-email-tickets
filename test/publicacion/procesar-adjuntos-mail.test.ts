@@ -75,18 +75,11 @@ function configWith(overrides: Partial<AppConfig> = {}): AppConfig {
     },
     poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
     ruteo: {
-      ticketMap: new Map([['alfa', 42]]),
       subaddressPrefix: 'tickets',
       placeholderTitle: 'Ticket recibido por mail',
       placeholderBody: '(mail sin contenido)',
     },
     adjuntos: CONFIG_ADJUNTOS,
-    kv: {
-      ticketsBucket: 'TICKETS',
-      threadsBucket: 'MAIL_THREADS',
-      threadsTtlDays: 90,
-      watchRetryMs: 30_000,
-    },
     ...overrides,
   };
 }

@@ -104,11 +104,10 @@ describe('EXPECTATIONS', () => {
     'ATTACHMENT_ALLOWED_MIME_TYPES',
     'ATTACHMENT_MAX_SIZE_BYTES',
     'PUT_TIMEOUT_MS',
-    // Las cuatro del KV (S-024).
-    'KV_TICKETS_BUCKET',
-    'KV_THREADS_BUCKET',
-    'KV_THREADS_TTL_DAYS',
-    'KV_WATCH_RETRY_MS',
+    // Las cuatro del KV de S-024 (`KV_TICKETS_BUCKET`, `KV_THREADS_BUCKET`, `KV_THREADS_TTL_DAYS`,
+    // `KV_WATCH_RETRY_MS`) SALIERON con S-032 junto con sus claves del schema: el Espacio KV del SDK
+    // tiene el bucket fijo, sin TTL y sin watch. La correspondencia bidireccional de abajo rompe la
+    // suite si alguna entrada quedara sin clave.
   ] as const;
 
   // TS-26. La correspondencia se afirma en las DOS direcciones para que una variable futura sin

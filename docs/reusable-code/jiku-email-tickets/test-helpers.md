@@ -430,45 +430,150 @@ const warnLine = capture.lines().find((line) => line['level'] === 'warn');
 
 ---
 
-## fakeThreadsKv
+## fakeKvSpace
 
-**Location:** `test/ingesta/fake-threads-kv.ts`
+**Location:** `test/ingesta/fake-kv-space.ts`
 
-**Description:** An in-memory double of the threads KV bucket, for the tick suites that are **not**
-about the Thread Map.
+**Description:** An in-memory double of the connector's **KV Space** (S-032), for the tick suites that
+are **not** about the KV. Replaces `fakeThreadsKv`: since REQ-008 the space holds **both** maps
+(`tickets.<slug>` and `hilos.<sha256>`), so a "threads" name would lie.
 
 **Signature:**
 
 ```ts
-interface FakeThreadsKv {
-  readonly kv: KV;
+interface FakeKvSpace {
+  readonly space: KvSpace;
   readonly puts: { key: string; value: string }[];  // keys written, in order
   readonly gets: string[];                          // keys queried, in order
-  seed(key: string, value: string): void;
+  seed(key: string, value: string): void;           // FULL right-hand key: 'tickets.alfa', threadKey(id)
 }
 
-function fakeThreadsKv(): FakeThreadsKv
+function fakeKvSpace(seed?: Record<string, string>): FakeKvSpace
 ```
 
 **Usage example:**
 
 ```ts
-import { fakeThreadsKv } from './fake-threads-kv.js';
+import { threadKey } from '#infra/kv/keys.js';
+import { fakeKvSpace } from './fake-kv-space.js';
 
-const THREADS_KV = fakeThreadsKv().kv;
+// The same map that used to travel in config.ruteo.ticketMap, now loaded in the space.
+const fake = fakeKvSpace({ 'tickets.alfa': '42' });
+fake.seed(threadKey('<r1@x>'), '77');
 
-await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+await runTick(source, BASE_CONFIG, logger, bus.client, fake.space);
+expect(fake.gets).toEqual(['tickets.alfa']);
 ```
 
 **Notes:**
 
-- **It does not violate "the bus is never mocked".** The threads bucket is a dependency those suites
-  neither exercise nor assert on; all they need is that the write the tick performs after each create
-  does not fail, without forcing them to start a second container with JetStream.
-- **The suites that ARE about the Thread Map run against a real KV** — `test/infra/kv/threads.test.ts`
-  and `test/ingesta/tick-hilos.test.ts` both start their own `-js` container via
-  `startJetStreamNats()`. That is where the behaviour matters and where it is verified.
-- **It reproduces the one behaviour the code under test depends on:** `get()` returns `null` for a
-  missing key rather than throwing. Getting that wrong would make `lookupThread()` look broken.
-- **`puts` and `gets` make absence assertable** — e.g. "a mail with no `Message-Id` writes nothing"
-  is `expect(spy.puts).toEqual([])`, which a store-only double could not express.
+- **It does not violate "the bus is never mocked".** The space is a dependency those suites do not
+  assert on; all they need is that the slug query resolves and the thread write does not fail,
+  without a second container with JetStream. The suites that ARE about the KV
+  (`test/infra/kv/*.test.ts`, `tick-hilos.test.ts`, `tick-propiedades-kv.test.ts`) run against the
+  **real** `JIKU_KV` via `startJetStreamNats()`.
+- **It reproduces the SDK's `KV` where the code depends on it:** `get()` resolves `undefined` for a
+  missing key (never `null`, never a throw) and otherwise a `KVEntry` whose `value` is a
+  `Uint8Array`. It satisfies `KvSpace` structurally, without casts.
+- **`puts` and `gets` make absence assertable** — e.g. "a mail with no slug does not query the
+  Ticket Map" is `expect(fake.gets.filter((k) => k.startsWith('tickets.'))).toEqual([])`.
+
+---
+
+## startJetStreamNats()
+
+**Location:** `test/infra/kv/helpers.ts`
+
+**Description:** Starts a NATS container **with `-js`** (on the `nats:2.11-alpine` tag, different from
+the shared `nats:2.10-alpine`, so `shared-container.test.ts`'s `ancestor=` count never sees it — not a
+version decision) and creates `JIKU_KV` with the stream configuration the SDK's own integration test
+uses (`allow_direct: true`, **no** `max_age`). Rewritten in S-032 without `Kvm`.
+
+**Signature:**
+
+```ts
+interface JetStreamNats {
+  readonly url: string;
+  readonly connection: NatsConnection;  // raw, from '@gravadigital/jiku/nats'
+  readonly client: Client;              // Client.fromConnection(connection, { instance: 'test', userId: 'test-machine-user' })
+  readonly createBucket: (overrides?: Record<string, unknown>) => Promise<void>;  // $JS.API.STREAM.CREATE.KV_JIKU_KV
+  readonly deleteBucket: () => Promise<void>;
+  readonly bucketExists: () => Promise<boolean>;  // false on err_code 10059
+  readonly spaceFor: (userId: string, instance?: string) => Promise<KvSpace>;
+  readonly stop: () => Promise<void>;
+}
+
+function startJetStreamNats(): Promise<JetStreamNats>
+```
+
+**Usage example:**
+
+```ts
+const nats = await startJetStreamNats();               // beforeAll, 120 s timeout
+const space = await nats.spaceFor('tk-1');            // a FRESH space: another identity, same bucket
+await space.put('tickets.alfa', '42');
+
+await nats.deleteBucket();                            // a "no JIKU_KV" scenario…
+await openKvSpace({ client: nats.client, logger });   // …rejects with bucket_no_usable
+await nats.createBucket();                            // restore it in afterEach
+```
+
+**Notes:**
+
+- **`createBucket` is the ONLY place in the repo that creates a bucket** — it stands in for the deploy
+  of Jiku. A property test (`test/infra/kv/source-properties.test.ts`, TS-82) scans `src/` and
+  `test/` for any other `STREAM.CREATE`.
+- **A fresh space per identity replaces the bucket per test.** The bucket is one and fixed; what
+  isolates tests is the `{instance}.{userId}.` prefix the SDK adds, the same isolation production
+  has. The SDK's `KV` does not list keys, so there is no other way to start clean.
+- **The shared container, having no JetStream, is a free double of "JetStream disabled"**: against
+  it `client.kv()` rejects with `JikuNoBucket`.
+- Keeps the bounded retry of the first connection (`EHOSTUNREACH`/`ENETUNREACH`/`ECONNREFUSED`, for
+  `docker:dind` in CI) and the wrapper that names Docker as a precondition.
+
+---
+
+## spyOnSpace() / withFailingGet() / withFailingPut()
+
+**Location:** `test/infra/kv/space-doubles.ts`
+
+**Description:** Reusable wrappers of a `KvSpace` (real or fake), for the KV and tick suites (S-032).
+`spyOnSpace()` records the keys read and written, in order, and delegates; `withFailingGet()` /
+`withFailingPut()` return the same space with one operation rejecting (by default with the SDK's
+timeout, a `JikuError`).
+
+**Signature:**
+
+```ts
+interface SpaceSpy {
+  readonly space: KvSpace;
+  readonly gets: string[];
+  readonly puts: { key: string; value: string }[];
+}
+
+function spyOnSpace(space: KvSpace): SpaceSpy;
+function withFailingGet(space: KvSpace, error?: unknown): KvSpace;
+function withFailingPut(space: KvSpace, error?: unknown): KvSpace;
+```
+
+**Usage example:**
+
+```ts
+import { JikuBucketFull } from '@gravadigital/jiku';
+import { spyOnSpace, withFailingPut } from '../infra/kv/space-doubles.js';
+
+const spy = spyOnSpace(await nats.spaceFor('tick-t1'));
+await runTick(source, config, logger, bus.client, spy.space);
+expect(spy.gets.filter((k) => k.startsWith('hilos.'))).toEqual([]);
+
+await runTick(source, config, logger, bus.client, withFailingPut(space, new JikuBucketFull('…')));
+```
+
+**Notes:**
+
+- **Wrap, don't mock.** "The KV fails while running" cannot be provoked against a healthy container
+  without taking it down; wrapping the REAL handle keeps the rest of the space real.
+- **Plain objects that delegate, never a `Proxy`.** The SDK's `KV` has private ES fields: a `Proxy`
+  over the instance breaks as soon as a method touches `this.#prefix` with the proxy as `this`.
+- **"Nothing was written" is asserted on what the code ASKED for**, since the SDK's `KV` cannot list
+  keys.

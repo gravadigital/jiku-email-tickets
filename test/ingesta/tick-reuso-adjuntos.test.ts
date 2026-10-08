@@ -7,11 +7,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 import type { AppConfig } from '#config/index.js';
 import type { MailSource, RawMessage } from '#domain/ingesta/ports.js';
 import { runTick } from '#domain/ingesta/tick.js';
-import { sha256hex } from '#infra/kv/threads.js';
+import { threadKey } from '#infra/kv/keys.js';
 
 import { setupTestBus, type TestBusContext } from '../bus/helpers.js';
 import { type CoreResponder, respondTo, respondToQuery } from '../bus/responder.js';
-import { fakeThreadsKv } from './fake-threads-kv.js';
+import { fakeKvSpace } from './fake-kv-space.js';
 import { testLoggerWithCapture } from './test-logger.js';
 
 /**
@@ -84,7 +84,6 @@ const BASE_CONFIG: AppConfig = {
   },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
   ruteo: {
-    ticketMap: new Map([['alfa', 42]]),
     subaddressPrefix: 'tickets',
     placeholderTitle: 'Ticket recibido por mail',
     placeholderBody: '(mail sin contenido)',
@@ -94,12 +93,6 @@ const BASE_CONFIG: AppConfig = {
     allowedMimeTypes: ['image/png', 'application/pdf'],
     maxSizeBytes: 10_485_760,
     putTimeoutMs: 30_000,
-  },
-  kv: {
-    ticketsBucket: 'TICKETS',
-    threadsBucket: 'MAIL_THREADS',
-    threadsTtlDays: 90,
-    watchRetryMs: 30_000,
   },
 };
 
@@ -246,10 +239,11 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
   // TS-28
   it('TS-28: el tick reusa el arrastre de Gmail y publica el comentario con el fileId reusado', async () => {
     const { logger, capture } = testLoggerWithCapture();
-    const threads = fakeThreadsKv();
-    // La entrada del hilo: `sha256(referenceId CRUDO)` → el requirementId. El `Message-Id` va con
-    // sus brackets porque `sha256hex()` NO lo normaliza.
-    threads.seed(sha256hex(REFERENCE_ID), String(REQUIREMENT_ID));
+    const kv = fakeKvSpace({ 'tickets.alfa': '42' });
+    // La entrada del hilo: `hilos.` + `sha256(referenceId CRUDO)` → el requirementId. El
+    // `Message-Id` va con sus brackets porque `threadKey()` NO lo normaliza. `tickets.alfa` esta
+    // cargado como en el resto de las suites del tick (S-032: el mapa vive en el Espacio KV).
+    kv.seed(threadKey(REFERENCE_ID), String(REQUIREMENT_ID));
 
     responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, conMatch(1000));
     // El responder del permiso queda ACTIVO a proposito: su `count() === 0` es la unica forma de
@@ -271,7 +265,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
       BASE_CONFIG,
       logger,
       bus.client,
-      threads.kv,
+      kv.space,
     );
 
     // ==== LA CONSULTA SE HIZO, UNA VEZ, CON EL FILTRO COMPLETO ====
@@ -302,8 +296,8 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
     expect(tick).toMatchObject({ comentados: 1, creados: 0, fallidos: 0, descartados: 0 });
 
     // ==== LA ENTRADA DEL HILO SE ESCRIBIO CON EL `messageId` DE LA RESPUESTA ====
-    expect(threads.puts).toEqual([
-      { key: sha256hex(REPLY_MESSAGE_ID), value: String(REQUIREMENT_ID) },
+    expect(kv.puts).toEqual([
+      { key: threadKey(REPLY_MESSAGE_ID), value: String(REQUIREMENT_ID) },
     ]);
 
     // ==== EL LOG DEL REUSO, Y NINGUNA OBSERVABILIDAD PROHIBIDA (CA-14) ====
@@ -334,8 +328,8 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
   // TS-29
   it('TS-29: el requisito borrado tras la consulta no deja el reuso huerfano', async () => {
     const { logger, capture } = testLoggerWithCapture();
-    const threads = fakeThreadsKv();
-    threads.seed(sha256hex(REFERENCE_ID), String(REQUIREMENT_ID));
+    const kv = fakeKvSpace({ 'tickets.alfa': '42' });
+    kv.seed(threadKey(REFERENCE_ID), String(REQUIREMENT_ID));
 
     responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, conMatch(1000));
     responderUpload = await respondTo(bus.connection, UPLOAD_COMMAND, {
@@ -356,14 +350,14 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
       BASE_CONFIG,
       logger,
       bus.client,
-      threads.kv,
+      kv.space,
     );
 
     const tick = capture.lines().find((line) => line['msg'] === 'tick completado');
     expect(tick).toMatchObject({ fallidos: 1, comentados: 0, creados: 0 });
 
     // NO se escribio la entrada del hilo: el write vive dentro del `try`, DESPUES del `success`.
-    expect(threads.puts).toEqual([]);
+    expect(kv.puts).toEqual([]);
 
     // Y EL `fileId` 1000 NO SE TOCO: no hay comando de compensacion, y no hace falta uno. UN
     // `fileId` REUSADO ES UNA MEJORA sobre la ventana de huerfanos que ADR-003 declara (CA-13): no
@@ -376,7 +370,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
   // TS-30
   it('TS-30: el alta no consulta, ni una vez', async () => {
     const { logger, capture } = testLoggerWithCapture();
-    const threads = fakeThreadsKv();
+    const kv = fakeKvSpace({ 'tickets.alfa': '42' });
 
     // El responder de la consulta queda ACTIVO: su `count() === 0` es lo que hace CA-5 afirmable
     // sobre el tick cableado. Sin el contador, el resultado observable seria identico.
@@ -398,7 +392,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
       BASE_CONFIG,
       logger,
       bus.client,
-      threads.kv,
+      kv.space,
     );
 
     // CERO consultas: la rama del alta invoca `procesarAdjuntosDelMail()` con TRES argumentos, y
@@ -416,8 +410,8 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
   // TS-21 sobre el tick cableado
   it('TS-21: un adjunto rechazado por la politica local no gasta la consulta', async () => {
     const { logger, capture } = testLoggerWithCapture();
-    const threads = fakeThreadsKv();
-    threads.seed(sha256hex(REFERENCE_ID), String(REQUIREMENT_ID));
+    const kv = fakeKvSpace({ 'tickets.alfa': '42' });
+    kv.seed(threadKey(REFERENCE_ID), String(REQUIREMENT_ID));
 
     responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, conMatch(1000));
     responderUpload = await respondTo(bus.connection, UPLOAD_COMMAND, {
@@ -436,7 +430,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
       BASE_CONFIG,
       logger,
       bus.client,
-      threads.kv,
+      kv.space,
     );
 
     // UNA sola consulta, la de `captura.png`. El `virus.exe` quedo afuera de `aceptados` ANTES de
@@ -457,8 +451,8 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
   // TS-22 sobre el tick cableado
   it('TS-22: un vinculo borrado / archivo no retenido produce items vacio y el archivo se sube de nuevo', async () => {
     const { logger, capture } = testLoggerWithCapture();
-    const threads = fakeThreadsKv();
-    threads.seed(sha256hex(REFERENCE_ID), String(REQUIREMENT_ID));
+    const kv = fakeKvSpace({ 'tickets.alfa': '42' });
+    kv.seed(threadKey(REFERENCE_ID), String(REQUIREMENT_ID));
 
     // Las DOS EXCLUSIONES PERMANENTES del predicado fijo del recurso llegan como `items: []`,
     // indistinguibles de "nunca estuvo". El conector no puede reusar un vinculo borrado NI
@@ -481,7 +475,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
       BASE_CONFIG,
       logger,
       bus.client,
-      threads.kv,
+      kv.space,
     );
 
     expect(responderQuery.count()).toBe(1);
@@ -512,8 +506,8 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
   // CA-12
   it('CA-12: el fallo del PUT de un adjunto nuevo no cancela el comentario del reusado', async () => {
     const { logger, capture } = testLoggerWithCapture();
-    const threads = fakeThreadsKv();
-    threads.seed(sha256hex(REFERENCE_ID), String(REQUIREMENT_ID));
+    const kv = fakeKvSpace({ 'tickets.alfa': '42' });
+    kv.seed(threadKey(REFERENCE_ID), String(REQUIREMENT_ID));
 
     // El primero (`captura.png`) reusa; el segundo (`nuevo.pdf`) no tiene match y su `PUT` falla.
     responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, [
@@ -538,7 +532,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
       BASE_CONFIG,
       logger,
       bus.client,
-      threads.kv,
+      kv.space,
     );
 
     // DOS consultas: una por cada checksum sobreviviente (los dos bytes son distintos).
@@ -557,8 +551,8 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
     const tick = capture.lines().find((line) => line['msg'] === 'tick completado');
     expect(tick).toMatchObject({ comentados: 1, fallidos: 0 });
     // Y el ciclo del hilo se cerro: el comentario fue un `success`.
-    expect(threads.puts).toEqual([
-      { key: sha256hex(REPLY_MESSAGE_ID), value: String(REQUIREMENT_ID) },
+    expect(kv.puts).toEqual([
+      { key: threadKey(REPLY_MESSAGE_ID), value: String(REQUIREMENT_ID) },
     ]);
   });
 });

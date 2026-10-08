@@ -1,20 +1,23 @@
+import { JikuError, JikuKVPermissionDenied, JikuNoBucket, requiredKVPermissions } from '@gravadigital/jiku';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AppConfig } from '#config/index.js';
 import { ConfigValidationError } from '#config/errors.js';
 import { BusConnectError, KeyLoadError } from '#infra/bus/errors.js';
-import { KvBucketMissingError } from '#infra/kv/errors.js';
+import { KvSpaceUnavailableError, diagnoseKvFailure } from '#infra/kv/errors.js';
 import { createLogger } from '#shared/logger.js';
 
 import { createLogCapture, type LogCapture } from '../../shared/log-capture.js';
 
 /**
- * TS-27 a TS-30 del Story Plan de S-024: la rama de `reportStartupFailure()` para el KV.
+ * TS-66 a TS-70 del Story Plan de S-032 (las ramas de S-024, TS-27 a TS-30, sobre el Espacio KV): la
+ * rama de `reportStartupFailure()` para el KV.
  *
- * La rama del KV es SUYA y no la del bus, y la diferencia es el punto entero: cuando falta un
- * bucket, la conexion al bus funciono perfectamente. Reportarlo como "el conector no pudo
+ * La rama del KV es SUYA y no la del bus, y la diferencia es el punto entero: cuando el espacio no
+ * esta usable, la conexion al bus funciono perfectamente. Reportarlo como "el conector no pudo
  * conectarse al bus" mandaria al operador a revisar Zitadel, la red y los montajes de credenciales
- * cuando el arreglo es un `nats kv add` — el diagnostico equivocado que ADR-006 existe para evitar.
+ * cuando el arreglo es el bucket o los grants del rol — el diagnostico equivocado que ADR-006
+ * existe para evitar.
  *
  * # POR QUE SE MOCKEA `getLogger()`
  *
@@ -29,6 +32,11 @@ const BASE_CONFIG = {
   nodeEnv: 'production',
   instance: 'dev',
 } as unknown as AppConfig;
+
+const FATAL_MESSAGE = 'el arranque fallo: el espacio KV no esta usable';
+const STREAM_INFO_SUBJECT = '$JS.API.STREAM.INFO.KV_JIKU_KV';
+const NO_BUCKET_MESSAGE =
+  'jiku: kv: binding the bucket: the bucket JIKU_KV does not exist on this deployment.';
 
 let capture: LogCapture;
 
@@ -47,18 +55,23 @@ vi.mock('#shared/logger.js', async (importOriginal) => {
 // Se importa DESPUES del `vi.mock` para que `startup.ts` resuelva el `getLogger()` mockeado.
 const { reportStartupFailure } = await import('../../../src/startup.js');
 
-const kvError = (bucket = 'TICKETS'): KvBucketMissingError =>
-  new KvBucketMissingError({
-    diagnosis: 'bucket_inexistente',
-    bucket,
-    operation: 'status',
-    cause: Object.assign(new Error('stream not found'), {
-      name: 'StreamNotFoundError',
-      code: 10059,
-    }),
-  });
+/** El error del arranque, con el diagnostico que decide `diagnoseKvFailure()` (como en produccion). */
+function spaceError(cause: unknown): KvSpaceUnavailableError {
+  return new KvSpaceUnavailableError({ diagnosis: diagnoseKvFailure(cause), cause });
+}
 
-describe('reportStartupFailure con un bucket del KV faltante', () => {
+function permissionDenied(): JikuKVPermissionDenied {
+  return new JikuKVPermissionDenied(
+    `jiku: kv: the bus refused binding the bucket (${STREAM_INFO_SUBJECT})\n\n` + requiredKVPermissions('dev'),
+    STREAM_INFO_SUBJECT,
+  );
+}
+
+function fatals(): Record<string, unknown>[] {
+  return capture.lines().filter((line) => line['level'] === 'fatal');
+}
+
+describe('reportStartupFailure con el Espacio KV no usable', () => {
   let stderr: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -70,31 +83,63 @@ describe('reportStartupFailure con un bucket del KV faltante', () => {
     vi.restoreAllMocks();
   });
 
-  // TS-27
-  it('sale por logger.fatal con el diagnostico y el bucket en el contexto', () => {
-    reportStartupFailure(kvError('TICKETS'));
+  // TS-66 (S-024 TS-27)
+  it('TS-66: el bucket no usable sale por su rama fatal, sin sugerir grants', () => {
+    reportStartupFailure(spaceError(new JikuNoBucket(NO_BUCKET_MESSAGE)));
 
-    const fatals = capture.lines().filter((line) => line['level'] === 'fatal');
-    expect(fatals).toHaveLength(1);
-
-    const line = fatals[0];
-    expect(line?.['code']).toBe('KV_BUCKET_MISSING_ERROR');
-    expect(line?.['diagnosis']).toBe('bucket_inexistente');
-    expect(line?.['bucket']).toBe('TICKETS');
-    expect(line?.['operation']).toBe('status');
+    const lines = fatals();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      code: 'KV_SPACE_UNAVAILABLE_ERROR',
+      diagnosis: 'bucket_no_usable',
+      bucket: 'JIKU_KV',
+      errorClass: 'JikuNoBucket',
+      causes: [NO_BUCKET_MESSAGE],
+      msg: FATAL_MESSAGE,
+    });
+    expect(lines[0]).not.toHaveProperty('subject');
 
     // El mensaje NO dice que no se pudo conectar al bus: la conexion funciono.
-    expect(String(line?.['msg'])).not.toMatch(/conectar|conexion/i);
+    expect(String(lines[0]?.['msg'])).not.toMatch(/conectar|conexion/i);
+    // Y no manda a pedir grants: con el bucket roto, ese seria el arreglo equivocado (CA-4).
+    for (const raw of capture.raw()) expect(raw).not.toMatch(/grant|permis/i);
 
-    // Y NADA sale por stderr: este fallo ocurre con el logger ya construido.
+    // NADA sale por stderr: este fallo ocurre con el logger ya construido.
     expect(stderr).not.toHaveBeenCalled();
   });
 
-  // TS-28
-  it('el contexto es PLANO: un solo nivel, sin objetos anidados', () => {
-    reportStartupFailure(kvError('MAIL_THREADS'));
+  // TS-67
+  it('TS-67: sin permisos sale con el subject y los grants en causes', () => {
+    reportStartupFailure(spaceError(permissionDenied()));
 
-    const line = capture.lines().find((entry) => entry['level'] === 'fatal');
+    const line = fatals()[0];
+    expect(line).toMatchObject({
+      diagnosis: 'kv_sin_permisos',
+      subject: STREAM_INFO_SUBJECT,
+      errorClass: 'JikuKVPermissionDenied',
+      msg: FATAL_MESSAGE,
+    });
+    expect((line?.['causes'] as string[])[0]).toContain('$KV.JIKU_KV.dev.{{user_id}}.>');
+  });
+
+  // TS-68
+  it('TS-68: un timeout sale como desconocido, sin mapearse a otra causa', () => {
+    reportStartupFailure(
+      spaceError(new JikuError('jiku: kv: binding the bucket: JetStream did not answer within 15000ms.')),
+    );
+
+    expect(fatals()[0]).toMatchObject({ diagnosis: 'desconocido', errorClass: 'JikuError', msg: FATAL_MESSAGE });
+  });
+
+  // TS-69 (S-024 TS-28)
+  it.each([
+    ['bucket_no_usable', (): unknown => new JikuNoBucket(NO_BUCKET_MESSAGE)],
+    ['kv_sin_permisos', (): unknown => permissionDenied()],
+    ['desconocido', (): unknown => new JikuError('timeout')],
+  ])('TS-69: el contexto del fatal es PLANO (%s)', (_diagnosis, cause) => {
+    reportStartupFailure(spaceError(cause()));
+
+    const line = fatals()[0];
     expect(line).toBeDefined();
 
     for (const [key, value] of Object.entries(line ?? {})) {
@@ -102,28 +147,23 @@ describe('reportStartupFailure con un bucket del KV faltante', () => {
         // `causes` es un array de STRINGS, no de objetos: la redaccion de pino no tiene comodin
         // profundo, asi que un objeto anidado podria dejar un valor sin redactar.
         expect(Array.isArray(value)).toBe(true);
-        for (const cause of value as unknown[]) {
-          expect(typeof cause).toBe('string');
+        for (const item of value as unknown[]) {
+          expect(typeof item).toBe('string');
         }
         continue;
       }
       expect(typeof value).not.toBe('object');
     }
 
-    // Y no viaja el AppConfig ni el bloque kv completo por ningun nombre.
+    // Y no viaja el AppConfig, ningun bloque kv ni el error entero por ningun nombre.
     expect(line).not.toHaveProperty('config');
     expect(line).not.toHaveProperty('appConfig');
     expect(line).not.toHaveProperty('kv');
-  });
-
-  it('el bucket que nombra es el que fallo', () => {
-    reportStartupFailure(kvError('MAIL_THREADS'));
-
-    const line = capture.lines().find((entry) => entry['level'] === 'fatal');
-    expect(line?.['bucket']).toBe('MAIL_THREADS');
+    expect(line).not.toHaveProperty('err');
   });
 });
 
+// TS-70 (S-024 TS-29 y TS-30)
 describe('reportStartupFailure: las ramas preexistentes no cambian', () => {
   let stderr: ReturnType<typeof vi.spyOn>;
 

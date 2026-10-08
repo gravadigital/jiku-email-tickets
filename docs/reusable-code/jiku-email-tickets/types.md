@@ -115,7 +115,6 @@ interface PollConfig {
 }
 
 interface RuteoConfig {
-  ticketMap: ReadonlyMap<string, number>;
   subaddressPrefix: string;
   placeholderTitle: string;
   placeholderBody: string;
@@ -137,17 +136,15 @@ parameters because it must not read `process.env` itself.
 receives its whole configuration: with loose fields every new signature would enumerate four
 parameters and every consumer would have to recompose its own subset.
 
-`RuteoConfig.ticketMap` arrives **already normalized and validated** — `loadAppConfig()` transforms
-nothing, it only composes; all the loading lives in the schema. Its type is `ReadonlyMap` and not
-`Map`, and that is the whole guarantee: the Map the schema builds is mutable, and `Object.freeze`
-would not freeze it anyway. What stops a consumer from calling `.set()` is the type of the contract,
-not the runtime — so loosening it to `Map` is a real regression, and `tsc` is where it gets caught.
+**`RuteoConfig` has no Ticket Map since S-032 (REQ-008).** Until then it carried `ticketMap`, the
+in-memory copy the `watch()` kept live; now the map lives in the connector's KV Space (`tickets.<slug>`
+keys) and the tick queries it once per new mail with `lookupTicket()`. With it went `AppConfig.kv`
+(`KvConfig`, the four `KV_*` variables) and `withTicketMap()`. A leftover `KV_*` variable in the
+environment is ignored.
 
 **Fields that must never reach a log line:** `credsFile` and `keyFile` (paths to secrets — where a
 secret lives is information about the secret), `zitadelProjectId` and `servers` (deployment topology),
-the whole `imap` block, `imap.password` above all, and the whole `ruteo` block — `ticketMap` is the
-deployment's **commercial topology**, the `projectId` of every enabled client, and has no business in
-stdout. The startup line in `src/startup.ts`
+the whole `imap` block, `imap.password` above all, and the whole `ruteo` block. The startup line in `src/startup.ts`
 deliberately carries only `instance`, `logLevel` and `timeoutMs`.
 
 **The nesting carries a hazard, and it is closed by a rule rather than by a redaction path.**
@@ -668,12 +665,11 @@ full sequence in that case: no task to stop, but the bus still needs to close.
 
 **Location:** `src/shared/motivo-descarte.ts`
 
-**Description:** The closed catalog of the five discard reasons ADR-006 defines, as a string-literal
-union — never a TypeScript `enum` — so the runtime values are exactly the lowercase strings the log
-line must carry, with no indirection. Lives in `shared`, not in `domain/ruteo`: `ingesta/normalize.ts`
-already produces two of the five (`no_parseable`, `sin_message_id`) and cannot import from `ruteo`
-without inverting the dependency direction CA-1 protects, so both modules import this one instead of
-either importing the other.
+**Description:** The closed catalog of the discard reasons, as a string-literal union — never a
+TypeScript `enum` — so the runtime values are exactly the lowercase strings the log line must carry,
+with no indirection. Lives in `shared`, not in `domain/ruteo`: `ingesta/normalize.ts` produces two of
+them (`no_parseable`, `sin_message_id`) and cannot import from `ruteo` without inverting the
+dependency direction, so both modules import this one instead of either importing the other.
 
 **Interface:**
 
@@ -683,12 +679,19 @@ type MotivoDescarte =
   | 'sin_message_id'
   | 'es_respuesta'
   | 'sin_slug'
-  | 'slug_no_mapeado';
+  | 'slug_no_mapeado'
+  | 'hilo_desconocido'      // S-026: a reply whose thread is not in the Thread Map
+  | 'slug_no_consultable';  // S-032 (REQ-008): the slug query could NOT be made
 ```
 
-**Notes:** Only the type is created here; `ingesta/normalize.ts`'s existing `'sin_message_id'`
-literal is left as-is (it is already a compatible string). Wiring every producer to this type
-explicitly is S-014's job, once the tick composes `ingesta` and `ruteo` together.
+**Notes:**
+
+- **Seven literals since S-032.** `slug_no_consultable` is a declared deviation from ADR-006 (the ADR
+  text is amended by S-034), with the same argument as `hilo_desconocido` vs `es_respuesta`: the
+  fixes differ. `slug_no_mapeado` means *"load the slug"*; `slug_no_consultable` means *"fix the KV"*.
+  A slug that cannot be a KV key, or an entry with a malformed value, is `slug_no_mapeado` — it will
+  never resolve.
+- Both slug motives travel with the `slug` in the discard line, and both count in `descartados`.
 
 ---
 
@@ -771,20 +774,24 @@ describes why one *attachment* inside a mail that IS processed is rejected.
 
 **Location:** `src/shared/motivo-descarte.ts`
 
-**Description:** The return type of `routeMail()`: either the resolved project, or the discard
-reason. The discard branch's `slug` is **optional** (`slug?`), not `string | undefined` — that
-distinction is what lets a test assert `'slug' in result === false` instead of trusting that nobody
-logs an `undefined` value. Present only when `motivo === 'slug_no_mapeado'` (the one case that needs
-the slug to load it into the map). No field is ever named `key`: `REDACT_PATHS` includes `'key'` and
-`'*.key'`, and a field called `key` would silently redact to `[REDACTED]` in the log.
+**Description:** The return type of `routeMail()`: an **intent** (create, or comment) or a discard
+reason. Since S-032 there is no resolved variant: `routeMail()` returns `{ ok: false, intencion:
+'alta', slug }` and the tick resolves it against the KV with `lookupTicket()` — the same shape REQ-005
+used for the thread (`intencion: 'comentario'`, resolved with `lookupThread()`). The discard branch's
+`slug` is **optional** (`slug?`), not `string | undefined`, so a test can assert `'slug' in result ===
+false`. No field is ever named `key`: `REDACT_PATHS` includes `'key'` and `'*.key'`.
 
 **Interface:**
 
 ```ts
 type RouteResult =
-  | { readonly ok: true; readonly projectId: number; readonly slug: string }
+  | { readonly ok: false; readonly intencion: 'alta'; readonly slug: string }
+  | { readonly ok: false; readonly intencion: 'comentario' }
   | { readonly ok: false; readonly motivo: MotivoDescarte; readonly slug?: string };
 ```
+
+**Notes:** Discriminate with `'intencion' in route && route.intencion === 'alta'` for the create
+branch and `'intencion' in route` for the reply; today the motive variant only carries `sin_slug`.
 
 ---
 
@@ -892,74 +899,71 @@ need to inspect it.
 
 ---
 
-## KvBucketMissingError / KvDiagnosis / diagnoseKvFailure()
+## KvSpaceUnavailableError / KvDiagnosis / diagnoseKvFailure()
 
 **Location:** `src/infra/kv/errors.ts`
 
-**Description:** The KV startup error and its **structural** classification. Modelled on
-`BusConnectError`/`diagnoseConnectFailure()`, for the same reason: the log has to say **what to fix**,
-because the fixes live in different places. "The KV failed" alone forces checking the bucket name,
-whether the bucket exists, whether JetStream is on, and whether the account has KV permissions — four
-systems.
-
-**Why the classification is structural and not `instanceof`:** the KV error classes are **not
-importable**. `@gravadigital/jiku/nats` re-exports `@nats-io/kv`, which exposes `Kvm`, `Bucket` and
-`KvWatchInclude` — but not its errors. `StreamNotFoundError`, `JetStreamNotEnabled` and
-`JetStreamApiError` live in `@nats-io/jetstream`, which this project does **not** declare and must not
-(ADR-002 / S-023: the KV enters through the SDK subpath so there is one copy of `nats-core` in the
-tree). Importing them from `@nats-io/jetstream` would be a **phantom dependency** — present only by
-npm hoisting, broken silently by any de-hoisting — and could pull a second `nats-core`, at which point
-the `instanceof` being sought would return `false` against the copy that threw.
-
-So it classifies by `name` and by `code` (`10059`), which are **structured** fields. It **never**
-compares the message text: the library's own `Kvm.create()` does (`err.message === "stream not
-found"`), and that is a latent bug — the day the server changes that string, or it arrives localized,
-the comparison fails in silence.
+**Description:** The KV startup error and its classification **by the SDK's error class**. When
+`client.kv()` rejects, `openKvSpace()` throws a `KvSpaceUnavailableError` whose `diagnosis` comes from
+an `instanceof` against the classes the SDK exports from its **main entry** (`JikuNoBucket`,
+`JikuKVPermissionDenied`) — never by parsing the message, comparing `name` or reading a `code`
+(ADR-002: *"MUST manejarse por las clases del SDK"*). Renamed in S-032 from `KvBucketMissingError` /
+`KV_BUCKET_MISSING_ERROR`, which classified the raw `@nats-io/kv` failures by `name`/`code` because
+those classes were not importable.
 
 **Signature:**
 
 ```ts
-type KvDiagnosis =
-  | 'bucket_inexistente'
-  | 'kv_no_disponible'
-  | 'nombre_de_bucket_invalido'
-  | 'desconocido';
+type KvDiagnosis = 'bucket_no_usable' | 'kv_sin_permisos' | 'desconocido';
 
 function diagnoseKvFailure(error: unknown): KvDiagnosis;
-function isValidBucketName(name: string): boolean;
+//  JikuNoBucket           → 'bucket_no_usable'  (no bucket, no allow_direct, or JetStream off)
+//  JikuKVPermissionDenied → 'kv_sin_permisos'
+//  anything else          → 'desconocido'       (a JikuError timeout, JikuNotConnected, …)
 
-class KvBucketMissingError extends AppError {
-  readonly code = 'KV_BUCKET_MISSING_ERROR';
+function errorClassOf(error: unknown): string;   // constructor name, or typeof for non-Errors
+
+interface KvSpaceUnavailableErrorInput {
+  readonly diagnosis: KvDiagnosis;
+  readonly cause: unknown;
+}
+
+class KvSpaceUnavailableError extends AppError {
+  readonly code = 'KV_SPACE_UNAVAILABLE_ERROR';
   readonly httpStatus = 500;
   readonly diagnosis: KvDiagnosis;
-  readonly bucket: string;      // WHICH bucket — what makes the failure actionable
-  readonly operation: string;   // 'validate' | 'open' | 'status'
+  readonly bucket: string;               // always KV_BUCKET ('JIKU_KV')
+  readonly subject: string | undefined;  // only with JikuKVPermissionDenied: the refused subject
   readonly errorClass: string;
-  readonly causes: string[];
+  readonly causes: string[];             // FULL messages of causeChain(cause)
+  constructor(input: KvSpaceUnavailableErrorInput);
+}
+```
+
+**Usage example:**
+
+```ts
+import { KvSpaceUnavailableError, diagnoseKvFailure } from '#infra/kv/errors.js';
+
+try {
+  space = await client.kv();
+} catch (error) {
+  throw new KvSpaceUnavailableError({ diagnosis: diagnoseKvFailure(error), cause: error });
 }
 ```
 
 **Notes:**
 
-- **`bucket` is the field that matters.** With two buckets, "a bucket is missing" does not say where
-  the fix is. It travels as a **field** for querying structured logs and inside the `message` for
-  whoever reads a terminal at 3am.
-- **`'kv_no_disponible'` deliberately covers two scenarios**, because they are indistinguishable from
-  the client: a permission violation on `$JS.API.>` arrives as an **asynchronous** `-ERR` on the
-  connection's status stream and the in-flight request dies by timeout, so the client wraps it exactly
-  as it wraps a server without JetStream. Separating them would mean correlating the async error with
-  the request. Its remedy names **both** things to check — which is all the operator needs.
-- **`'desconocido'` is a legitimate result and is never mapped to another by elimination** (ADR-006):
-  a wrong diagnosis is **worse** than an absent one, because it sends you to the wrong system.
-- **`'nombre_de_bucket_invalido'` is decided before any I/O**, by `isValidBucketName()`. Reaching the
-  classifier with an invalid name is impossible by construction, which is why no branch guesses it.
-- **`causes` reuses `causeChain()`** from `src/infra/bus/errors.ts` rather than reimplementing the
-  walk — it already has the depth cap and the cycle guard. It is an array of **strings** (first line
-  of each message) and not `Error`s, because the log context must be **flat**: Pino's redaction has no
-  deep wildcard, so a nested object could leave a value unredacted.
-- **It has its own branch in `reportStartupFailure()`.** Reporting it through the bus branch would say
-  *"the connector could not connect to the bus"* when the connection worked perfectly, sending the
-  operator to Zitadel, the network and the credential mounts when the fix is a `nats kv add`.
+- **`causes` carries the FULL messages, not the first line.** `JikuKVPermissionDenied`'s message is
+  multi-line and the missing grants (`requiredKVPermissions()`) come **after** the first line; they
+  hold only subjects and the `{{user_id}}` placeholder, never credentials.
+- **The `bucket_no_usable` remedy never mentions grants**: with the bucket broken, adding grants
+  would be the wrong fix. The `kv_sin_permisos` one says the grants go in `causes` and that the bus
+  connection worked.
+- **`'desconocido'` is legitimate and is never mapped to another cause** (ADR-006).
+- **It has its own branch in `reportStartupFailure()`**, separate from `BusConnectError`'s: the
+  connection worked. The `fatal` line is flat — `{ code, diagnosis, bucket, subject?, errorClass,
+  causes }` — with the message `'el arranque fallo: el espacio KV no esta usable'`.
 
 ---
 
@@ -977,17 +981,17 @@ export type ThreadLookupResult =
   | { readonly found: true; readonly requirementId: number }
   /** Queried successfully, no reference matched. Degrades to `hilo_desconocido`. */
   | { readonly found: false; readonly consultable: true }
-  /** Could NOT query (bucket unreachable). Degrades to `es_respuesta`. */
+  /** Could NOT query (KV unreachable). Degrades to `es_respuesta`. */
   | { readonly found: false; readonly consultable: false };
 ```
 
 **Usage example:**
 
 ```ts
-const hilo = await lookupThread({ threads, referenceIds: mail.referenceIds, logger });
+const hilo = await lookupThread({ space, referenceIds: mail.referenceIds, logger });
 
 if (hilo.found) {
-  // hilo.requirementId is narrowed to number here — S-027 comments on it
+  // hilo.requirementId is narrowed to number here — the tick comments on it
 } else if (hilo.consultable) {
   motivo = 'hilo_desconocido';  // queried, nothing matched
 } else {
@@ -999,9 +1003,65 @@ if (hilo.found) {
 
 - **Why three states and not `number | undefined`.** Two states would collapse "it isn't there" with
   "I couldn't ask", which is the exact distinction the discard motive depends on. The two failures
-  have different fixes and different owners: *"load the thread"* versus *"fix the bucket"*.
-- **All three are typed return values; none is an exception.** Throwing would force the tick to wrap
-  every call in a `try/catch`, reintroducing the decision in the wrong place.
-- **It follows the service's idiom for closed outcomes** — a discriminated union, the same shape as
-  `RouteResult` in `#shared/motivo-descarte.js`. The discriminants are checkable by the typechecker,
-  which is what makes an unhandled state a compile error rather than a silent fallthrough.
+  have different fixes and different owners: *"load the thread"* versus *"fix the KV"*.
+- **All three are typed return values; none is an exception.**
+- **It is the direct precedent of `TicketLookupResult`** (below), the same shape for the Ticket Map.
+
+---
+
+## TicketLookupResult
+
+**Location:** `src/infra/kv/tickets.ts`
+
+**Description:** The outcome of `lookupTicket()` (S-032), as a discriminated union of **three**
+states, on the model of `ThreadLookupResult`.
+
+**Interface:**
+
+```ts
+export type TicketLookupResult =
+  | { readonly found: true; readonly projectId: number }
+  | { readonly found: false; readonly consultable: true }    // not there → slug_no_mapeado
+  | { readonly found: false; readonly consultable: false };  // could not ask → slug_no_consultable
+```
+
+**Usage example:**
+
+```ts
+const destino = await lookupTicket({ space, slug: route.slug, logger });
+const motivo: MotivoDescarte | undefined = destino.found
+  ? undefined
+  : destino.consultable ? 'slug_no_mapeado' : 'slug_no_consultable';
+```
+
+**Notes:** `consultable: true` covers three "it will never resolve" cases — never loaded or deleted
+(`get()` returns `undefined`), a malformed value, and a slug that cannot be a KV key — and
+`consultable: false` the one "fix the KV" case: a rejected `get()`.
+
+---
+
+## KvSpace
+
+**Location:** `src/infra/kv/space.ts`
+
+**Description:** The type of the KV Space handle that `openKvSpace()` returns and that travels by
+parameter to the tick, `lookupTicket()`, `recordThreadEntry()` and `lookupThread()`.
+
+**Interface:**
+
+```ts
+import type { KV } from '@gravadigital/jiku';
+
+export type KvSpace = Pick<KV, 'get' | 'put'>;
+```
+
+**Notes:**
+
+- **Why a `Pick` and not `KV`.** The SDK's `KV` is a class with private ES fields (`#host`,
+  `#prefix`) and a private constructor, so TypeScript treats it nominally: an object literal (a test
+  double such as `fakeKvSpace()`) is not assignable to it without `as unknown as KV`. The `Pick` is
+  satisfied structurally.
+- **And it leaves `delete()` out on purpose**: the connector never deletes an entry (deletions are
+  U-02's), so the handle does not even offer the verb.
+- `get(key)` resolves `KVEntry | undefined` (`value: Uint8Array`); keys are the **right-hand part**
+  only (`tickets.alfa`, `hilos.<sha256>`) — the SDK adds and strips `{instance}.{userId}.`.

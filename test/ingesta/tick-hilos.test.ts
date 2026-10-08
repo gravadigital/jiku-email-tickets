@@ -1,17 +1,19 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import type { KV } from '@gravadigital/jiku/nats';
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import type { AppConfig } from '#config/index.js';
 import type { MailSource, RawMessage } from '#domain/ingesta/ports.js';
 import { runTick } from '#domain/ingesta/tick.js';
-import { sha256hex } from '#infra/kv/threads.js';
+import { threadKey } from '#infra/kv/keys.js';
+import type { KvSpace } from '#infra/kv/space.js';
 
 import { setupTestBus, type TestBusContext } from '../bus/helpers.js';
 import { type CoreResponder, respondTo } from '../bus/responder.js';
 import { startJetStreamNats, type JetStreamNats } from '../infra/kv/helpers.js';
+import { spyOnSpace, withFailingGet, withFailingPut } from '../infra/kv/space-doubles.js';
 import { testLoggerWithCapture } from './test-logger.js';
 
 /**
@@ -20,16 +22,37 @@ import { testLoggerWithCapture } from './test-logger.js';
  * Corre contra los DOS sistemas reales que participan, sin mockear ninguno (convencion `testing`):
  *
  * - El bus del contenedor compartido, con el doble de `core` respondiendo `requirements.new`.
- * - Un NATS PROPIO con `-js` para el KV, porque el compartido arranca sin JetStream y por lo tanto
- *   sin buckets. Ver la cabecera de `test/infra/kv/helpers.ts`: no se le agrega `-js` al compartido.
+ * - Un NATS PROPIO con `-js` y `JIKU_KV` para el KV, porque el compartido arranca sin JetStream y
+ *   por lo tanto sin bucket. Ver la cabecera de `test/infra/kv/helpers.ts`: no se le agrega `-js`
+ *   al compartido.
  *
- * Lo unico que se dobla es `MailSource` (el borde IMAP) y, en los dos escenarios que lo necesitan,
- * un `KV` cuyo `put()`/`get()` RECHAZA — el bucket inaccesible en caliente no se puede provocar
- * contra un contenedor sano sin tirarlo abajo, que seria lento y no determinista.
+ * Desde S-032 el Mapa de Hilos vive en el Espacio KV del conector (claves `hilos.<sha256>`), junto
+ * al Mapa de Tickets (`tickets.<slug>`). Cada test usa un espacio FRESCO de una identidad propia
+ * (`nats.spaceFor(...)`): el bucket es uno solo, y lo que aisla un test del otro es el prefijo
+ * `{instance}.{userId}.` que agrega el SDK. Cada espacio se siembra con `tickets.alfa` → `42`, el
+ * mismo mapa que hasta S-032 viajaba en `config.ruteo.ticketMap`, para que los mails nuevos de este
+ * archivo resuelvan igual que antes.
  *
- * El `KV` ESPIA envuelve el handle REAL y solo registra las claves antes de delegar: la asercion de
- * "el lookup SI se ejecuto" tiene que valer contra el KV de verdad.
+ * Lo unico que se dobla es `MailSource` (el borde IMAP) y, en los escenarios que lo necesitan, un
+ * espacio cuyo `put()`/`get()` RECHAZA (`space-doubles.ts`) — el KV inaccesible en caliente no se
+ * puede provocar contra un contenedor sano sin tirarlo abajo, que seria lento y no determinista.
+ *
+ * El espacio ESPIA envuelve el handle REAL y solo registra las claves antes de delegar: la asercion
+ * de "el lookup SI se ejecuto" tiene que valer contra el KV de verdad. Y como el `KV` del SDK no
+ * lista claves, "el bucket quedo con N entradas" se afirma con un `get()` dirigido a cada clave
+ * esperada y con lo que el espia registro que se ESCRIBIO.
  */
+
+/** El hash calculado INDEPENDIENTEMENTE en el test, nunca importado de `src/`. */
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+/** El valor de una entrada del espacio como texto, o `undefined` si no esta. */
+async function valueOf(space: KvSpace, key: string): Promise<string | undefined> {
+  const entry = await space.get(key);
+  return entry === undefined ? undefined : new TextDecoder().decode(entry.value);
+}
 
 const FIXTURES_DIR = fileURLToPath(new URL('../fixtures/mails/', import.meta.url));
 
@@ -56,7 +79,6 @@ const BASE_CONFIG: AppConfig = {
   },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
   ruteo: {
-    ticketMap: new Map([['alfa', 42]]),
     subaddressPrefix: 'tickets',
     placeholderTitle: 'Ticket recibido por mail',
     placeholderBody: '(mail sin contenido)',
@@ -66,12 +88,6 @@ const BASE_CONFIG: AppConfig = {
     allowedMimeTypes: ['image/png', 'application/pdf'],
     maxSizeBytes: 10_485_760,
     putTimeoutMs: 30_000,
-  },
-  kv: {
-    ticketsBucket: 'TICKETS',
-    threadsBucket: 'MAIL_THREADS',
-    threadsTtlDays: 90,
-    watchRetryMs: 30_000,
   },
 };
 
@@ -120,70 +136,21 @@ function sourceWith(mails: Map<number, Buffer>): MailSource & { markSeenCalls: n
   };
 }
 
-/** Envuelve el handle REAL y registra las claves de cada `get()`/`put()`, en orden. */
-function spyOn(real: KV): { kv: KV; gets: string[]; puts: string[] } {
-  const gets: string[] = [];
-  const puts: string[] = [];
-  const kv = new Proxy(real, {
-    get(target, prop, receiver) {
-      if (prop === 'get') {
-        return async (key: string) => {
-          gets.push(key);
-          return target.get(key);
-        };
-      }
-      if (prop === 'put') {
-        return async (key: string, value: string) => {
-          puts.push(key);
-          return target.put(key, value);
-        };
-      }
-      const value = Reflect.get(target, prop, receiver) as unknown;
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  }) as KV;
-  return { kv, gets, puts };
-}
-
-/** Un `KV` cuyo `put()` rechaza siempre; el `get()` sigue funcionando contra el real. */
-function withFailingPut(real: KV): KV {
-  return new Proxy(real, {
-    get(target, prop, receiver) {
-      if (prop === 'put') return () => Promise.reject(new Error('bucket inaccesible'));
-      const value = Reflect.get(target, prop, receiver) as unknown;
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  }) as KV;
-}
-
-/** Un `KV` cuyo `get()` rechaza siempre. */
-function withFailingGet(real: KV): KV {
-  return new Proxy(real, {
-    get(target, prop, receiver) {
-      if (prop === 'get') return () => Promise.reject(new Error('bucket inaccesible'));
-      const value = Reflect.get(target, prop, receiver) as unknown;
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  }) as KV;
-}
-
 let bus: TestBusContext;
 let nats: JetStreamNats;
-let bucketCounter = 0;
+let spaceCounter = 0;
 let responder: CoreResponder | undefined;
 
-/** Un bucket VACIO propio por test: sin aislamiento, el conteo de entradas de un test ve el del otro. */
-async function freshThreads(): Promise<KV> {
-  bucketCounter += 1;
-  const name = `TICK_THREADS_T${String(bucketCounter)}`;
-  await nats.seedBucket(name);
-  return nats.openBucket(name);
-}
-
-async function countKeys(threads: KV): Promise<number> {
-  let count = 0;
-  for await (const _key of await threads.keys()) count += 1;
-  return count;
+/**
+ * Un espacio FRESCO propio por test (S-032: hasta entonces, un bucket propio por test), con
+ * `tickets.alfa` → `42` ya cargado. Sin aislamiento, las entradas que escribe un test las veria el
+ * siguiente.
+ */
+async function freshSpace(): Promise<KvSpace> {
+  spaceCounter += 1;
+  const space = await nats.spaceFor(`tick-hilos-t${String(spaceCounter)}`);
+  await space.put('tickets.alfa', '42');
+  return space;
 }
 
 beforeAll(async () => {
@@ -213,39 +180,42 @@ async function coreRespondeExito(ids: number[]): Promise<void> {
 describe('runTick — el write al Mapa de Hilos despues del alta (TS-19 a TS-23)', () => {
   // TS-19
   it('TS-19: escribe la entrada del hilo tras un alta exitosa', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([500]);
 
-    await runTick(sourceWith(new Map([[1, mailNuevo(1)]])), BASE_CONFIG, logger, bus.client, threads);
+    await runTick(sourceWith(new Map([[1, mailNuevo(1)]])), BASE_CONFIG, logger, bus.client, space);
 
     const tick = capture.lines().find((l) => l['msg'] === 'tick completado');
     expect(tick).toMatchObject({ creados: 1, comentados: 0 });
 
-    const entry = await threads.get(sha256hex('<uid-1@fixtures.local>'));
-    expect(entry).not.toBeNull();
-    expect(Number.parseInt(entry?.string() ?? '', 10)).toBe(500);
+    // La clave es `hilos.` + el sha256 del `Message-Id` crudo (S-032: el prefijo del espacio).
+    expect(threadKey('<uid-1@fixtures.local>')).toBe(`hilos.${sha256('<uid-1@fixtures.local>')}`);
+    expect(await valueOf(space, threadKey('<uid-1@fixtures.local>'))).toBe('500');
   });
 
   // TS-20
   it('TS-20: el write NO ocurre si el alta fallo', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     responder = await respondTo(bus.connection, 'requirements.new', [
       { status: 'failure', errorCode: 'project_not_found' },
     ]);
+    const spy = spyOnSpace(space);
 
-    await runTick(sourceWith(new Map([[1, mailNuevo(1)]])), BASE_CONFIG, logger, bus.client, threads);
+    await runTick(sourceWith(new Map([[1, mailNuevo(1)]])), BASE_CONFIG, logger, bus.client, spy.space);
 
     const tick = capture.lines().find((l) => l['msg'] === 'tick completado');
     expect(tick).toMatchObject({ creados: 0, fallidos: 1 });
-    expect(await threads.get(sha256hex('<uid-1@fixtures.local>'))).toBeNull();
-    expect(await countKeys(threads)).toBe(0);
+    expect(await space.get(threadKey('<uid-1@fixtures.local>'))).toBeUndefined();
+    // Ningun write en todo el tick: el `KV` del SDK no lista claves, asi que el "cero entradas" de
+    // antes se afirma sobre lo que el codigo PIDIO escribir.
+    expect(spy.puts).toEqual([]);
   });
 
   // TS-21
   it('TS-21: un put() que falla NO cancela el alta ni revierte el contador', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([500]);
 
@@ -254,7 +224,7 @@ describe('runTick — el write al Mapa de Hilos despues del alta (TS-19 a TS-23)
       BASE_CONFIG,
       logger,
       bus.client,
-      withFailingPut(threads),
+      withFailingPut(space),
     );
 
     const lines = capture.lines();
@@ -268,29 +238,27 @@ describe('runTick — el write al Mapa de Hilos despues del alta (TS-19 a TS-23)
     );
     expect(warn).toBeDefined();
     expect(warn?.['messageId']).toBe('<uid-1@fixtures.local>');
+    // S-032: el `warn` nombra la CLASE del error del SDK (el timeout es un `JikuError`).
+    expect(warn?.['errorClass']).toBe('JikuError');
   });
 
   // TS-22
   it('TS-22: un put() que falla no interrumpe el resto del lote', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([501, 502, 503]);
 
-    // Solo el SEGUNDO `put()` rechaza. Los otros dos escriben contra el bucket real.
+    // Solo el SEGUNDO `put()` rechaza. Los otros dos escriben contra el espacio real. Objeto plano
+    // que delega, y no un `Proxy`: ver la cabecera de `space-doubles.ts`.
     let putCount = 0;
-    const flaky = new Proxy(threads, {
-      get(target, prop, receiver) {
-        if (prop === 'put') {
-          return async (key: string, value: string) => {
-            putCount += 1;
-            if (putCount === 2) throw new Error('bucket inaccesible');
-            return target.put(key, value);
-          };
-        }
-        const value = Reflect.get(target, prop, receiver) as unknown;
-        return typeof value === 'function' ? value.bind(target) : value;
+    const flaky: KvSpace = {
+      get: (key, options) => space.get(key, options),
+      put: (key, value, options) => {
+        putCount += 1;
+        if (putCount === 2) return Promise.reject(new Error('bucket inaccesible'));
+        return space.put(key, value, options);
       },
-    }) as KV;
+    };
 
     const source = sourceWith(
       new Map([
@@ -305,21 +273,25 @@ describe('runTick — el write al Mapa de Hilos despues del alta (TS-19 a TS-23)
     const tick = capture.lines().find((l) => l['msg'] === 'tick completado');
     expect(tick).toMatchObject({ ingestados: 3, creados: 3, fallidos: 0 });
     expect(source.markSeenCalls).toEqual([3, 2, 1]);
-    expect(await countKeys(threads)).toBe(2);
+    // Quedan DOS entradas, y se sabe cuales: el lote va en orden de UID descendente, asi que el
+    // uid 3 es el alta 501, el 2 la 502 (su write fallo) y el 1 la 503.
+    expect(await valueOf(space, threadKey('<uid-3@fixtures.local>'))).toBe('501');
+    expect(await valueOf(space, threadKey('<uid-2@fixtures.local>'))).toBeUndefined();
+    expect(await valueOf(space, threadKey('<uid-1@fixtures.local>'))).toBe('503');
   });
 
   // TS-23
   it('TS-23: un mail sin Message-Id no escribe nada (put() no se invoca ni una vez)', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
-    const spy = spyOn(threads);
+    const spy = spyOnSpace(space);
 
     await runTick(
       sourceWith(new Map([[1, fixture('no-message-id.eml')]])),
       BASE_CONFIG,
       logger,
       bus.client,
-      spy.kv,
+      spy.space,
     );
 
     const tick = capture.lines().find((l) => l['msg'] === 'tick completado');
@@ -328,26 +300,32 @@ describe('runTick — el write al Mapa de Hilos despues del alta (TS-19 a TS-23)
       capture.lines().some((l) => l['motivo'] === 'sin_message_id'),
     ).toBe(true);
     expect(spy.puts).toEqual([]);
-    expect(await countKeys(threads)).toBe(0);
+    // Y tampoco se leyo nada: el mail se descarto antes de rutearse.
+    expect(spy.gets).toEqual([]);
   });
 
-  it('un mail NUEVO no paga ningun round-trip de LECTURA (CA-12)', async () => {
-    const threads = await freshThreads();
+  // S-032: desde que el Mapa de Tickets vive en el mismo espacio, un mail nuevo SI hace un `get()`
+  // —el de su slug—. Lo que se conserva es la propiedad de S-026: un mail nuevo NO lee el Mapa de
+  // Hilos.
+  it('un mail NUEVO no paga ningun round-trip de LECTURA al Mapa de Hilos (CA-12)', async () => {
+    const space = await freshSpace();
     const { logger } = testLoggerWithCapture();
     await coreRespondeExito([500]);
-    const spy = spyOn(threads);
+    const spy = spyOnSpace(space);
 
-    await runTick(sourceWith(new Map([[1, mailNuevo(1)]])), BASE_CONFIG, logger, bus.client, spy.kv);
+    await runTick(sourceWith(new Map([[1, mailNuevo(1)]])), BASE_CONFIG, logger, bus.client, spy.space);
 
-    expect(spy.gets).toEqual([]);
-    expect(spy.puts).toEqual([sha256hex('<uid-1@fixtures.local>')]);
+    // Su unica lectura es la consulta del slug; ninguna clave `hilos.*`.
+    expect(spy.gets).toEqual(['tickets.alfa']);
+    expect(spy.gets.filter((key) => key.startsWith('hilos.'))).toEqual([]);
+    expect(spy.puts.map((put) => put.key)).toEqual([`hilos.${sha256('<uid-1@fixtures.local>')}`]);
   });
 });
 
 describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () => {
   // TS-24
   it('TS-24: una respuesta sin match se descarta como hilo_desconocido', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([999]);
 
@@ -356,7 +334,7 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      space,
     );
 
     const lines = capture.lines();
@@ -374,7 +352,7 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
 
   // TS-25
   it('TS-25: un reenvio de hilo interno con slug mapeado tambien es hilo_desconocido', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([999]);
 
@@ -392,7 +370,7 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      space,
     );
 
     const lines = capture.lines();
@@ -406,34 +384,6 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
     expect(responder?.count()).toBe(0);
   });
 
-  // TS-26
-  it('TS-26: una entrada expirada por TTL es indistinguible de "nunca existio"', async () => {
-    const threads = await freshThreads();
-    const { logger, capture } = testLoggerWithCapture();
-    await coreRespondeExito([999]);
-
-    // El TTL de 90 dias no se puede esperar en un test. Lo que el `get()` ve al expirar una entrada
-    // es exactamente lo que ve tras un `delete()`: la clave no esta. Se siembra y se borra.
-    await threads.put(sha256hex('<r1@x>'), '77');
-    await threads.delete(sha256hex('<r1@x>'));
-
-    await runTick(
-      sourceWith(new Map([[1, mailRespuesta(1, { inReplyTo: '<r1@x>' })]])),
-      BASE_CONFIG,
-      logger,
-      bus.client,
-      threads,
-    );
-
-    const lines = capture.lines();
-    expect(lines.find((l) => l['msg'] === 'mail descartado')).toMatchObject({
-      motivo: 'hilo_desconocido',
-    });
-    // NO se crea un Requisito duplicado.
-    expect(lines.find((l) => l['msg'] === 'tick completado')).toMatchObject({ creados: 0 });
-    expect(responder?.count()).toBe(0);
-  });
-
   // TS-27, INVERTIDO EN S-027 — y esta inversion es el valor entero de REQ-005.
   //
   // Hasta S-026 este caso afirmaba que una respuesta CON match se descartaba igual como
@@ -441,21 +391,21 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
   // decia literalmente "TODAVIA NO HAY SALIDA POR COMENTARIO — estado intermedio desplegable y
   // deliberado". S-027 construye esa salida: ahora se comenta.
   it('TS-27: una respuesta CON match se publica como Comentario, no se descarta', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     const comentarios = await respondTo(bus.connection, 'requirements.*.comment', {
       status: 'success' as const,
       data: { id: 4242 },
     });
-    await threads.put(sha256hex('<r1@x>'), '77');
-    const spy = spyOn(threads);
+    await space.put(threadKey('<r1@x>'), '77');
+    const spy = spyOnSpace(space);
 
     await runTick(
       sourceWith(new Map([[1, mailRespuesta(1, { inReplyTo: '<r1@x>' })]])),
       BASE_CONFIG,
       logger,
       bus.client,
-      spy.kv,
+      spy.space,
     );
 
     const lines = capture.lines();
@@ -466,8 +416,9 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
     // Ninguna linea de descarte para este mail.
     expect(lines.find((l) => l['msg'] === 'mail descartado')).toBeUndefined();
 
-    // El lookup corrio y resolvio.
-    expect(spy.gets).toEqual([sha256hex('<r1@x>')]);
+    // El lookup corrio y resolvio — y el slug no se consulto: una respuesta con match se comenta
+    // sin evaluarlo (invariante 26).
+    expect(spy.gets).toEqual([`hilos.${sha256('<r1@x>')}`]);
 
     // Y el comentario viajo al subject del REQUISITO que el lookup resolvio (77), no a otro.
     expect(comentarios.count()).toBe(1);
@@ -478,7 +429,7 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
 
   // TS-28
   it('TS-28: el bucket inaccesible en caliente degrada a es_respuesta, no a hilo_desconocido', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([999]);
 
@@ -487,7 +438,7 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
       BASE_CONFIG,
       logger,
       bus.client,
-      withFailingGet(threads),
+      withFailingGet(space),
     );
 
     const lines = capture.lines();
@@ -498,9 +449,9 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
   });
 
   it('el lookup NO se paga en los otros motivos de descarte (sin_slug, slug_no_mapeado)', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger } = testLoggerWithCapture();
-    const spy = spyOn(threads);
+    const spy = spyOnSpace(space);
 
     const sinSlug = Buffer.from(
       'Message-Id: <sin-slug@fixtures.local>\r\n' +
@@ -527,10 +478,13 @@ describe('runTick — el lookup en la rama de la respuesta (TS-24 a TS-28)', () 
       BASE_CONFIG,
       logger,
       bus.client,
-      spy.kv,
+      spy.space,
     );
 
-    expect(spy.gets).toEqual([]);
+    // S-032: `sin_slug` no hace ningun `get()`; `slug_no_mapeado` hace UNO, el de su slug (`beta`),
+    // que es lo que decide que no esta mapeado. Ninguno de los dos lee el Mapa de Hilos.
+    expect(spy.gets).toEqual(['tickets.beta']);
+    expect(spy.gets.filter((key) => key.startsWith('hilos.'))).toEqual([]);
     expect(spy.puts).toEqual([]);
   });
 });
@@ -556,7 +510,7 @@ describe('runTick — los seis contadores de la linea del tick (TS-29, TS-30, TS
 
   // TS-29
   it('TS-29: un tick con 3 mails nuevos resolubles emite EXACTAMENTE las seis claves', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([801, 802, 803]);
 
@@ -571,7 +525,7 @@ describe('runTick — los seis contadores de la linea del tick (TS-29, TS-30, TS
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      space,
     );
 
     const tick = capture.lines().find((l) => l['msg'] === 'tick completado');
@@ -588,7 +542,7 @@ describe('runTick — los seis contadores de la linea del tick (TS-29, TS-30, TS
   // entre si: un comentario NO es un alta, y sumarlos borraria la distincion en la unica linea de
   // metricas que el tick emite (ADR-006, no hay healthcheck ni exportador).
   it('TS-31: 2 mails nuevos + 1 respuesta con match dan creados:2, comentados:1, descartados:0', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     // Solo DOS ids para `requirements.new`: si el tick publicara un ALTA por la respuesta, el
     // responder se quedaria sin respuestas y el fallo se veria en los contadores.
@@ -598,7 +552,7 @@ describe('runTick — los seis contadores de la linea del tick (TS-29, TS-30, TS
       data: { id: 900 },
     });
 
-    await threads.put(sha256hex('<viejo@x>'), '77');
+    await space.put(threadKey('<viejo@x>'), '77');
 
     await runTick(
       sourceWith(
@@ -611,7 +565,7 @@ describe('runTick — los seis contadores de la linea del tick (TS-29, TS-30, TS
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      space,
     );
 
     const tick = capture.lines().find((l) => l['msg'] === 'tick completado');
@@ -643,15 +597,15 @@ describe('runTick — los seis contadores de la linea del tick (TS-29, TS-30, TS
  */
 describe('runTick — el Mapa de Hilos NO participa de la idempotencia (TS-37)', () => {
   it('un mail cuyo hash YA esta en el bucket se procesa igual, sin saltearse', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([600]);
 
     // La entrada ya existe: si el conector usara el bucket para deduplicar, este mail se saltearia.
-    await threads.put(sha256hex('<uid-1@fixtures.local>'), '77');
+    await space.put(threadKey('<uid-1@fixtures.local>'), '77');
 
     const source = sourceWith(new Map([[1, mailNuevo(1)]]));
-    await runTick(source, BASE_CONFIG, logger, bus.client, threads);
+    await runTick(source, BASE_CONFIG, logger, bus.client, space);
 
     // Se procesa IGUAL: se crea el requisito, se cuenta, y el UID queda \Seen. El `\Seen` sigue
     // siendo la unica marca de idempotencia (ADR-001).
@@ -665,8 +619,7 @@ describe('runTick — el Mapa de Hilos NO participa de la idempotencia (TS-37)',
 
     // Y el write posterior PISA la entrada con el requisito nuevo: es la ultima escritura la que
     // vale, sin ninguna rama de "ya existia".
-    const entry = await threads.get(sha256hex('<uid-1@fixtures.local>'));
-    expect(Number.parseInt(entry?.string() ?? '', 10)).toBe(600);
+    expect(await valueOf(space, threadKey('<uid-1@fixtures.local>'))).toBe('600');
   });
 });
 
@@ -682,7 +635,7 @@ describe('runTick — el ciclo completo de punta a punta (TS-40)', () => {
   // INVERTIDO EN S-027: el mismo tick mixto, ahora con la salida por comentario construida. Los
   // cuatro mails ejercitan los cuatro caminos que el tick puede tomar, en un solo lote.
   it('TS-40: un tick mixto deja los seis contadores exactos, el bucket coherente y los 4 UIDs \\Seen', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     // Un solo id disponible para el ALTA: si el tick publicara un alta de mas, el responder se
     // quedaria sin respuestas y el fallo seria visible en los contadores.
@@ -692,8 +645,8 @@ describe('runTick — el ciclo completo de punta a punta (TS-40)', () => {
       data: { id: 901 },
     });
 
-    await threads.put(sha256hex('<viejo@x>'), '77');
-    const spy = spyOn(threads);
+    await space.put(threadKey('<viejo@x>'), '77');
+    const spy = spyOnSpace(space);
 
     const slugNoMapeado = Buffer.from(
       'Message-Id: <no-mapeado@fixtures.local>\r\n' +
@@ -712,7 +665,7 @@ describe('runTick — el ciclo completo de punta a punta (TS-40)', () => {
       ]),
     );
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, spy.kv);
+    await runTick(source, BASE_CONFIG, logger, bus.client, spy.space);
 
     const lines = capture.lines();
     const tick = lines.find((l) => l['msg'] === 'tick completado');
@@ -727,22 +680,35 @@ describe('runTick — el ciclo completo de punta a punta (TS-40)', () => {
       fallidos: 0,
     });
 
-    // El bucket termina con TRES entradas: la sembrada, la del mail nuevo, y —la que cierra el
-    // ciclo— la de la RESPUESTA que se comento. Esa ultima es la que hace que una respuesta a la
-    // respuesta rutee aunque el cliente recorte `References`.
-    expect(await countKeys(threads)).toBe(3);
-    // El del alta (mail nuevo, uid 4) y el de LA RESPUESTA que se comento (uid 3). El segundo usa
-    // el Message-Id de la RESPUESTA y no el de la referencia que matcheo: es lo que hace que una
-    // respuesta a la respuesta rutee.
-    expect(spy.puts.sort()).toEqual(
-      [sha256hex('<uid-4@fixtures.local>'), sha256hex('<reply-3@fixtures.local>')].sort(),
+    // El Mapa de Hilos termina con TRES entradas: la sembrada, la del mail nuevo, y —la que cierra
+    // el ciclo— la de la RESPUESTA que se comento. Esa ultima es la que hace que una respuesta a la
+    // respuesta rutee aunque el cliente recorte `References`. El `KV` del SDK no lista claves
+    // (S-032), asi que se leen las tres por su clave.
+    expect(await valueOf(space, threadKey('<viejo@x>'))).toBe('77');
+    expect(await valueOf(space, threadKey('<uid-4@fixtures.local>'))).toBe('500');
+    expect(await valueOf(space, threadKey('<reply-3@fixtures.local>'))).toBe('77');
+    // Y se escribieron EXACTAMENTE dos: la del alta (mail nuevo, uid 4) y la de LA RESPUESTA que se
+    // comento (uid 3). La segunda usa el Message-Id de la RESPUESTA y no el de la referencia que
+    // matcheo: es lo que hace que una respuesta a la respuesta rutee.
+    expect(spy.puts.map((put) => put.key).sort()).toEqual(
+      [`hilos.${sha256('<uid-4@fixtures.local>')}`, `hilos.${sha256('<reply-3@fixtures.local>')}`].sort(),
     );
 
     // Los cuatro UIDs quedan \Seen: el Mapa de Hilos NO participa de la idempotencia (CA-14).
     expect(source.markSeenCalls).toEqual([4, 3, 2, 1]);
 
-    // El lookup corrio SOLO en las dos respuestas, en el orden del lote.
-    expect(spy.gets).toEqual([sha256hex('<viejo@x>'), sha256hex('<nadie@x>')]);
+    // El lookup del hilo corrio SOLO en las dos respuestas, en el orden del lote. Las otras dos
+    // lecturas son las consultas del slug de los dos mails nuevos (S-032).
+    expect(spy.gets.filter((key) => key.startsWith('hilos.'))).toEqual([
+      `hilos.${sha256('<viejo@x>')}`,
+      `hilos.${sha256('<nadie@x>')}`,
+    ]);
+    expect(spy.gets).toEqual([
+      'tickets.alfa',
+      `hilos.${sha256('<viejo@x>')}`,
+      `hilos.${sha256('<nadie@x>')}`,
+      'tickets.beta',
+    ]);
 
     // UN alta y UN comentario, cada uno por su subject. Los dos efectos coexisten sin mezclarse.
     expect(responder?.count()).toBe(1);
@@ -772,7 +738,7 @@ describe('runTick — el ciclo completo de punta a punta (TS-40)', () => {
 describe('runTick — el messageIdHash se puede loguear; el contenido no (TS-38, TS-39)', () => {
   // TS-38
   it('TS-38: ninguna linea filtra el cuerpo del mail; el Message-Id SI aparece en claro', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([700]);
 
@@ -792,7 +758,7 @@ describe('runTick — el messageIdHash se puede loguear; el contenido no (TS-38,
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      space,
     );
 
     const raw = capture.raw().join('\n');
@@ -808,7 +774,7 @@ describe('runTick — el messageIdHash se puede loguear; el contenido no (TS-38,
 
   // TS-39
   it('TS-39: el messageIdHash sale LITERAL, no [REDACTED] — por eso el campo no se llama key', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await coreRespondeExito([701]);
 
@@ -818,10 +784,11 @@ describe('runTick — el messageIdHash se puede loguear; el contenido no (TS-38,
       BASE_CONFIG,
       logger,
       bus.client,
-      withFailingPut(threads),
+      withFailingPut(space),
     );
 
-    const hash = sha256hex('<uid-1@fixtures.local>');
+    // El hash SOLO, sin el prefijo `hilos.` de la clave: es lo que el `warn` nombra.
+    const hash = sha256('<uid-1@fixtures.local>');
     const warn = capture.lines().find((l) => l['messageIdHash'] !== undefined);
 
     expect(warn?.['messageIdHash']).toBe(hash);

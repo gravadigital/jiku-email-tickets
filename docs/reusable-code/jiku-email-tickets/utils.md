@@ -2,7 +2,8 @@
 
 ## sha256hex
 
-**Location:** `src/infra/kv/threads.ts`
+**Location:** `src/infra/kv/keys.ts` (moved from `threads.ts` in S-032, so `threadKey()` can use it
+without a circular import)
 
 **Description:** The sha256 of a string, hex-encoded — 64 chars of `[0-9a-f]` — over the value
 **exactly as given**. No `trim()`, no `toLowerCase()`, no normalization of any kind. Pure, never
@@ -11,13 +12,12 @@ throws.
 It is how the Thread Map's key is built from a raw `Message-Id` (with its brackets, as `mailparser`
 delivers it), and the reason is not convenience:
 
-- **Why hash at all.** `validKeyRe` in `@nats-io/kv` (`lib/kv.js:86`) is `/^[-/=.\w]+$/` and
-  therefore **rejects `<`, `>` and `@`** — all three present in a real `Message-Id`. An invalid key
-  makes the library throw a **plain** `Error`, with no distinctive `name` or `code`, so there is no
-  structural diagnosis to recover from it: the defence is never to produce one.
-- **Why no normalization instead.** Escaping or normalizing the `Message-Id` so it fits the regex
+- **Why hash at all.** The KV key rules —the SDK's `assertValidKVKey()`, which are NATS's— only admit
+  `[A-Za-z0-9\-/_=.]`, so they **reject `<`, `>` and `@`**, all three present in a real
+  `Message-Id`. The defence is never to produce an invalid key.
+- **Why no normalization instead.** Escaping or normalizing the `Message-Id` so it fits the rules
   would let **two distinct `Message-Id`s collapse onto the same key** and route a comment to the
-  **wrong requirement**. The accepted trade-off is that keys are not readable with `nats kv ls`.
+  **wrong requirement** (invariant 23). The accepted trade-off is that keys are not human-readable.
 
 **Signature:**
 
@@ -28,7 +28,7 @@ function sha256hex(value: string): string
 **Usage example:**
 
 ```ts
-import { sha256hex } from '#infra/kv/threads.js';
+import { sha256hex } from '#infra/kv/keys.js';
 
 sha256hex('<abc@cliente.com>'); // '7482ad61…' (64 hex chars)
 
@@ -36,6 +36,47 @@ sha256hex('<abc@cliente.com>'); // '7482ad61…' (64 hex chars)
 sha256hex('<ABC@cliente.com>') !== sha256hex('<abc@cliente.com>'); // true
 ```
 
+**Notes:** The Thread Map key is `threadKey(messageId)` (`hilos.` + this hash). The log field
+`messageIdHash` carries the bare hash.
+
+---
+
+## ticketKey / threadKey / isStorableSlug
+
+**Location:** `src/infra/kv/keys.ts`
+
+**Description:** The single module that builds the connector's KV keys (S-032). The connector handles
+**only the right-hand part** of a key: the `{instance}.{userId}.` prefix is added and stripped by the
+SDK. The two map prefixes are code constants (`TICKETS_KEY_PREFIX`, `THREADS_KEY_PREFIX`), never
+configuration.
+
+- `ticketKey(slug)` → `'tickets.' + slug` (the slug arrives already lowercased by `routeMail()`).
+- `threadKey(messageId)` → `'hilos.' + sha256hex(messageId)`, over the **raw** `Message-Id`.
+- `isStorableSlug(slug)` → whether `ticketKey(slug)` is a valid KV key, delegating to the SDK's
+  `assertValidKVKey()` instead of copying NATS's rules into the connector. **Never throws.**
+
+**Signature:**
+
+```ts
+function ticketKey(slug: string): string;
+function threadKey(messageId: string): string;
+function isStorableSlug(slug: string): boolean;
+```
+
+**Usage example:**
+
+```ts
+import { isStorableSlug, threadKey, ticketKey } from '#infra/kv/keys.js';
+
+ticketKey('alfa');                 // 'tickets.alfa'
+threadKey('<abc@cliente.com>');    // 'hilos.7482ad61…'
+isStorableSlug('al.fa-1');         // true
+isStorableSlug('a+b');             // false — `lookupTicket()` answers slug_no_mapeado with no round-trip
+```
+
+**Notes:** A slug that is not storable can never have been loaded, so `lookupTicket()` treats it as
+**not mapped** (`consultable: true`), not as a failure. `keys.ts` imports nothing from `#config/` and
+does no I/O.
 ---
 
 ## parsePositiveId
@@ -52,9 +93,9 @@ through `double` is not an id, it is a corrupt value. And the comparison
 `String(parsed) === raw.trim()` is what rejects `'4.5'`, `'42abc'` and `'0x2a'` — a value that does
 not **re-serialize identically** was not an integer, it was something else that started with one.
 
-Shared by both KV buckets — the Ticket Map's `projectId` (`ticket-map.ts`) and the Thread Map's
-`requirementId` (`threads.ts`). It lives extracted precisely so there is one copy: two would diverge
-on the first change, and the one that would diverge silently is the bucket read less often.
+Shared by both maps of the KV Space — the Ticket Map's `projectId` (`tickets.ts`) and the Thread
+Map's `requirementId` (`threads.ts`). It lives extracted precisely so there is one copy: two would
+diverge on the first change, and the one that would diverge silently is the map read less often.
 
 **Signature:**
 

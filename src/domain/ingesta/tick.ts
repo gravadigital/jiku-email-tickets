@@ -1,7 +1,4 @@
 import type { Client } from '@gravadigital/jiku';
-// Solo el TIPO del handle. El bucket lo abre `openKvStores()` en el arranque y viaja hasta aca por
-// parametro: este archivo no construye ningun `Kvm` ni abre ninguna conexion (ADR-002).
-import type { KV } from '@gravadigital/jiku/nats';
 import type { Logger } from 'pino';
 
 import type { AppConfig } from '#config/index.js';
@@ -16,7 +13,11 @@ import { PublishError } from '#domain/publicacion/publish-errors.js';
 import { publishRequirementFromMail } from '#domain/publicacion/publish-requirement.js';
 import { routeMail } from '#domain/ruteo/route-mail.js';
 import { type ImapFlowCtor, withMailSource } from '#infra/imap/client.js';
+// Solo el TIPO del handle. El espacio lo abre `openKvSpace()` en el arranque y viaja hasta aca por
+// parametro: este archivo no llama a `client.kv()` ni abre ninguna conexion (ADR-002).
+import type { KvSpace } from '#infra/kv/space.js';
 import { lookupThread, recordThreadEntry } from '#infra/kv/threads.js';
+import { lookupTicket } from '#infra/kv/tickets.js';
 import type { MotivoDescarte } from '#shared/motivo-descarte.js';
 
 /**
@@ -34,10 +35,14 @@ import type { MotivoDescarte } from '#shared/motivo-descarte.js';
  *
  * `creados` cuenta las altas que `publishRequirementFromMail()` (S-015) confirma con exito;
  * `fallidos` cuenta tanto un alta que esa funcion relanza como (desde S-010) un fallo de parseo
- * generico (`no_parseable`). `descartados` cuenta los motivos reales (S-014): los tres que decide
- * `routeMail()` (`es_respuesta`, `sin_slug`, `slug_no_mapeado`), mas `sin_message_id` (via
- * `MissingMessageIdError`, distinguido por CLASE en el `catch` de `normalize()`, nunca por texto —
- * ADR-002), mas `hilo_desconocido` desde S-026.
+ * generico (`no_parseable`). `descartados` cuenta los motivos reales (S-014): `sin_slug`, que
+ * decide `routeMail()`; `slug_no_mapeado` y `slug_no_consultable` (S-032), que decide
+ * `lookupTicket()`; `es_respuesta` y `hilo_desconocido` (S-026), que decide `lookupThread()`; y
+ * `sin_message_id` (via `MissingMessageIdError`, distinguido por CLASE en el `catch` de
+ * `normalize()`, nunca por texto — ADR-002).
+ *
+ * `slug_no_consultable` (REQ-008) es un descarte mas: suma en `descartados` y la linea conserva sus
+ * SEIS contadores.
  *
  * DESVIACION DECLARADA DE ADR-006, introducida por S-026 (REQ-005): la linea pasa de CINCO
  * contadores a SEIS con `comentados`. La ADR quedo al dia en la misma story.
@@ -100,10 +105,9 @@ function extractMessageIdIfAny(): string | undefined {
  * linea de metricas igual (Riesgo 4, CA-11) y el error se propaga hacia `runIngestaTick`, que es
  * quien lo loguea `error` sin credenciales.
  *
- * `threads` es el handle del bucket de HILOS, y se recibe suelto en vez del `KvStores` entero
- * (S-026): el tick necesita ese bucket y no el de tickets, que ya le llega por otro camino
- * —`config.ruteo.ticketMap`, la copia viva del watch— y no le corresponde tocar. Un parametro
- * `threads: KV` nombra la dependencia real. Va ANTES de `normalize` para no romper la inyeccion
+ * `space` es el Espacio KV de la identidad (REQ-008 / S-032), abierto UNA vez en el arranque por
+ * `openKvSpace()`: guarda los DOS mapas, el de tickets (`lookupTicket()`) y el de hilos
+ * (`lookupThread()` / `recordThreadEntry()`). Va ANTES de `normalize` para no romper la inyeccion
  * posicional del doble de tests.
  */
 export async function runTick(
@@ -111,7 +115,7 @@ export async function runTick(
   config: AppConfig,
   logger: Logger,
   client: Client,
-  threads: KV,
+  space: KvSpace,
   normalize: Normalize = normalizeMail,
 ): Promise<void> {
   const counters: TickCounters = {
@@ -160,83 +164,113 @@ export async function runTick(
         // que el ruteo ya decidio.
         const route = routeMail(mail, config.ruteo);
 
-        if (route.ok) {
-          // El procesamiento COMPLETO de adjuntos (S-021) corre ACA, dentro de la MISMA iteracion
-          // del mail, ANTES del armado del payload (CA-1). `procesarAdjuntosDelMail()` NUNCA lanza
-          // para un resultado de negocio (rechazo, fallo de archivo) -- siempre devuelve, asi que
-          // esta invocacion no necesita su propio try/catch: el unico try/catch de esta rama seguia
-          // siendo el de la publicacion de abajo. `mail.attachments` es el UNICO punto de esta
-          // iteracion que retiene los `Buffer` de los adjuntos, y deja de tener referencias vivas en
-          // cuanto termina esta iteracion del `for` (CA-11, S-016).
-          const adjuntos = await procesarAdjuntosDelMail(mail.attachments, config.adjuntos, {
-            client,
-            logger,
-          });
+        if ('intencion' in route && route.intencion === 'alta') {
+          // ==== LA RAMA DEL ALTA: EL SLUG SE RESUELVE CONTRA EL ESPACIO KV (S-032) ====
+          //
+          // `routeMail()` ya no resuelve el proyecto: devuelve la intencion con el slug en
+          // minusculas, y la consulta se hace ACA, UNA VEZ POR MAIL, sin cache y sin reintento
+          // (REQ-008). `lookupTicket()` NUNCA lanza: los tres resultados son valores tipados.
+          //
+          // VA ANTES DE LOS ADJUNTOS, y el orden no es estetico: subir los archivos de un mail que
+          // despues se descarta los dejaria huerfanos en el storage de Jiku, sin requisito que los
+          // referencie. Un test de propiedad afirma el orden sobre el codigo.
+          const destino = await lookupTicket({ space, slug: route.slug, logger });
 
-          // El cuerpoBase es EXACTAMENTE el mismo calculo que `buildRequirementPayload()` ya hacia
-          // internamente (recortar -> placeholder si vacio) -- `resolveCuerpoBase()` es la funcion
-          // compartida que evita duplicar esa logica en dos lugares (Task 4). La description final
-          // compuesta (S-020) SIEMPRE tiene al menos el cuerpoBase, nunca queda vacia.
-          const cuerpoBase = resolveCuerpoBase(mail.body, config.ruteo);
-          const description = componerDescripcion({
-            cuerpoBase,
-            avisosDeRechazo: adjuntos.avisosDeRechazo,
-            avisosDeFallo: adjuntos.avisosDeFallo,
-            placeholders: adjuntos.placeholders,
-          });
-
-          // El alta ocurre DENTRO de esta misma iteracion, antes de pasar al siguiente UID — nunca
-          // se acumula un array de mails ruteados para publicar al final (CA-22 de S-015). Un
-          // `try/catch` propio, anidado en el de normalizacion/ruteo, distingue un fallo de
-          // PUBLICACION (`fallidos`) de un fallo de NORMALIZACION (`descartados`/`fallidos` de
-          // arriba): son ejes distintos y no deben confundirse.
-          try {
-            const { requirementId } = await publishRequirementFromMail(
-              mail,
-              route.projectId,
-              config.ruteo,
-              { client, logger },
-              adjuntos.fileIds,
-              description,
-              adjuntos.avisosDeRechazo.length + adjuntos.avisosDeFallo.length,
-            );
-            counters.creados += 1;
-            // `publishRequirementFromMail()` ya logueo `'requisito creado en Jiku'` con los tres
-            // identificadores mas los dos conteos de archivos (CA-9, CA-14) — no se emite una
-            // segunda linea `'mail procesado'` aca: seria una linea de resultado duplicada para el
-            // mismo mail. Ningun fallo de archivo (rechazo o fallo de subida) cambia este camino:
-            // el requisito se crea igual, con sus avisos ya en la description (CA-6, CA-7).
-
-            // ==== EL WRITE AL MAPA DE HILOS (S-026) ====
-            //
-            // Va ACA: dentro del `try` de la publicacion, DESPUES de `counters.creados += 1`, y
-            // solo cuando el alta tuvo EXITO. Si el alta fallo, el `catch` de abajo cuenta
-            // `fallidos` y no se escribe nada — el bucket no debe apuntar a un requisito que no
-            // existe.
-            //
-            // El `messageId` va CRUDO, con sus brackets, tal como lo entrega `normalize()`:
-            // `recordThreadEntry()` lo hashea sin normalizarlo (ver la RAZON 1 de `threads.ts`).
-            //
-            // SIN try/catch propio, y no por descuido: `recordThreadEntry()` NO LANZA (absorbe su
-            // fallo con un `warn`), asi que envolverla seria redundante y —peor— sugeriria que
-            // puede lanzar, que es exactamente lo contrario de su contrato. El `catch` de abajo
-            // sigue viendo solo lo que veia: los `PublishError` de la publicacion.
-            //
-            // Y el fallo del write NO CANCELA EL ALTA: `counters.creados` no se revierte, no hay
-            // compensacion, y el `for` continua con el siguiente UID. El write es un efecto
-            // POSTERIOR y fuera del camino critico del alta.
-            await recordThreadEntry({
-              threads,
-              messageId: mail.messageId,
-              requirementId,
+          if (destino.found) {
+            // El procesamiento COMPLETO de adjuntos (S-021) corre ACA, dentro de la MISMA iteracion
+            // del mail, ANTES del armado del payload (CA-1). `procesarAdjuntosDelMail()` NUNCA
+            // lanza para un resultado de negocio (rechazo, fallo de archivo) -- siempre devuelve,
+            // asi que esta invocacion no necesita su propio try/catch: el unico try/catch de esta
+            // rama seguia siendo el de la publicacion de abajo. `mail.attachments` es el UNICO
+            // punto de esta iteracion que retiene los `Buffer` de los adjuntos, y deja de tener
+            // referencias vivas en cuanto termina esta iteracion del `for` (CA-11, S-016).
+            const adjuntos = await procesarAdjuntosDelMail(mail.attachments, config.adjuntos, {
+              client,
               logger,
             });
-          } catch (cause) {
-            // `publishRequirementFromMail()` ya logueo el fallo con su propio `catch` interno
-            // (Tarea 3, criterio 5) — este `catch` NO vuelve a loguear el error, solo cuenta y
-            // continua con el siguiente UID (CA-18): sin reintento, sin abortar el lote.
-            if (!(cause instanceof PublishError)) throw cause;
-            counters.fallidos += 1;
+
+            // El cuerpoBase es EXACTAMENTE el mismo calculo que `buildRequirementPayload()` ya
+            // hacia internamente (recortar -> placeholder si vacio) -- `resolveCuerpoBase()` es la
+            // funcion compartida que evita duplicar esa logica en dos lugares (Task 4). La
+            // description final compuesta (S-020) SIEMPRE tiene al menos el cuerpoBase, nunca queda
+            // vacia.
+            const cuerpoBase = resolveCuerpoBase(mail.body, config.ruteo);
+            const description = componerDescripcion({
+              cuerpoBase,
+              avisosDeRechazo: adjuntos.avisosDeRechazo,
+              avisosDeFallo: adjuntos.avisosDeFallo,
+              placeholders: adjuntos.placeholders,
+            });
+
+            // El alta ocurre DENTRO de esta misma iteracion, antes de pasar al siguiente UID —
+            // nunca se acumula un array de mails ruteados para publicar al final (CA-22 de S-015).
+            // Un `try/catch` propio, anidado en el de normalizacion/ruteo, distingue un fallo de
+            // PUBLICACION (`fallidos`) de un fallo de NORMALIZACION (`descartados`/`fallidos` de
+            // arriba): son ejes distintos y no deben confundirse.
+            try {
+              const { requirementId } = await publishRequirementFromMail(
+                mail,
+                destino.projectId,
+                config.ruteo,
+                { client, logger },
+                adjuntos.fileIds,
+                description,
+                adjuntos.avisosDeRechazo.length + adjuntos.avisosDeFallo.length,
+              );
+              counters.creados += 1;
+              // `publishRequirementFromMail()` ya logueo `'requisito creado en Jiku'` con los tres
+              // identificadores mas los dos conteos de archivos (CA-9, CA-14) — no se emite una
+              // segunda linea `'mail procesado'` aca: seria una linea de resultado duplicada para
+              // el mismo mail. Ningun fallo de archivo (rechazo o fallo de subida) cambia este
+              // camino: el requisito se crea igual, con sus avisos ya en la description (CA-6,
+              // CA-7).
+
+              // ==== EL WRITE AL MAPA DE HILOS (S-026) ====
+              //
+              // Va ACA: dentro del `try` de la publicacion, DESPUES de `counters.creados += 1`, y
+              // solo cuando el alta tuvo EXITO. Si el alta fallo, el `catch` de abajo cuenta
+              // `fallidos` y no se escribe nada — el bucket no debe apuntar a un requisito que no
+              // existe.
+              //
+              // El `messageId` va CRUDO, con sus brackets, tal como lo entrega `normalize()`:
+              // `recordThreadEntry()` lo hashea sin normalizarlo (ver la RAZON 1 de `threads.ts`).
+              //
+              // SIN try/catch propio, y no por descuido: `recordThreadEntry()` NO LANZA (absorbe su
+              // fallo con un `warn`), asi que envolverla seria redundante y —peor— sugeriria que
+              // puede lanzar, que es exactamente lo contrario de su contrato. El `catch` de abajo
+              // sigue viendo solo lo que veia: los `PublishError` de la publicacion.
+              //
+              // Y el fallo del write NO CANCELA EL ALTA: `counters.creados` no se revierte, no hay
+              // compensacion, y el `for` continua con el siguiente UID. El write es un efecto
+              // POSTERIOR y fuera del camino critico del alta.
+              await recordThreadEntry({
+                space,
+                messageId: mail.messageId,
+                requirementId,
+                logger,
+              });
+            } catch (cause) {
+              // `publishRequirementFromMail()` ya logueo el fallo con su propio `catch` interno
+              // (Tarea 3, criterio 5) — este `catch` NO vuelve a loguear el error, solo cuenta y
+              // continua con el siguiente UID (CA-18): sin reintento, sin abortar el lote.
+              if (!(cause instanceof PublishError)) throw cause;
+              counters.fallidos += 1;
+            }
+          } else {
+            // - CONSULTABLE: se pudo preguntar y el slug no esta (o nunca va a estar). El arreglo
+            //   es CARGAR EL SLUG -> `slug_no_mapeado`.
+            // - NO CONSULTABLE: el `get()` rechazo. El arreglo es ARREGLAR EL KV ->
+            //   `slug_no_consultable`. `lookupTicket()` ya emitio su `warn` con `errorClass`.
+            //
+            // Los dos llevan el `slug`: el primero es el dato que hace falta para cargarlo, y el
+            // segundo el que permite reconstruir el mail desde la casilla (REQ-008, Riesgo 3). Una
+            // sola linea `'mail descartado'` por mail (ADR-006), sin el cuerpo.
+            const motivo: MotivoDescarte = destino.consultable
+              ? 'slug_no_mapeado'
+              : 'slug_no_consultable';
+
+            logger.warn({ messageId: mail.messageId, motivo, slug: route.slug }, 'mail descartado');
+            counters.descartados += 1;
           }
         } else if ('intencion' in route) {
           // ==== LA RAMA DE LA RESPUESTA (S-027) ====
@@ -245,11 +279,11 @@ export async function runTick(
           // decide. El estrechamiento discrimina por `'intencion' in route` y no por `route.motivo`
           // porque esta variante NO TIENE `motivo` — no es un descarte.
           //
-          // Solo esta rama paga el round-trip del lookup. Los otros motivos (`sin_slug`,
-          // `slug_no_mapeado`) no tienen referencias que consultar, y un mail NUEVO nunca entra
-          // aca.
+          // Solo esta rama paga el round-trip del lookup del hilo. Un mail sin slug no tiene
+          // referencias que consultar, y un mail NUEVO nunca entra aca (paga solo su consulta del
+          // slug). Y una respuesta NUNCA consulta el slug (invariante 26).
           const hilo = await lookupThread({
-            threads,
+            space,
             referenceIds: mail.referenceIds,
             logger,
           });
@@ -284,8 +318,8 @@ export async function runTick(
               // `entityId` de la consulta de reuso. El Mapa de Hilos no cambia en nada — se lee
               // igual que antes.
               //
-              // La rama del alta (`if (route.ok)`) NO SE TOCA: sigue invocando con TRES
-              // argumentos, y esa ausencia ES el mecanismo de CA-5.
+              // La rama del alta NO SE TOCA: sigue invocando con TRES argumentos, y esa ausencia
+              // ES el mecanismo de CA-5.
               { requirementId: hilo.requirementId },
             );
 
@@ -319,7 +353,7 @@ export async function runTick(
               // Va ACA: dentro del `try`, DESPUES de `comentados += 1`, y solo tras el `success`.
               // Es la misma posicion que el write del alta ocupa respecto de `creados += 1`, y por
               // la misma razon — pero aca la consecuencia de equivocarse es peor: un write
-              // anticipado dejaria el bucket apuntando a un comentario QUE NO EXISTE, y la proxima
+              // anticipado dejaria el espacio apuntando a un comentario QUE NO EXISTE, y la proxima
               // respuesta rutearia a un hilo cuyo ultimo eslabon se perdio. Si el comentario lanza,
               // el `catch` cuenta `fallidos` y esta linea NUNCA se alcanza.
               //
@@ -331,7 +365,7 @@ export async function runTick(
               // SIN try/catch propio, por lo mismo que en la rama del alta: `recordThreadEntry()`
               // no lanza, y envolverla sugeriria lo contrario de su contrato.
               await recordThreadEntry({
-                threads,
+                space,
                 messageId: mail.messageId,
                 requirementId: hilo.requirementId,
                 logger,
@@ -347,24 +381,27 @@ export async function runTick(
             // ---- SIN MATCH: se descarta, y el motivo distingue los dos casos ----
             //
             // - CONSULTABLE: se pudo preguntar y ninguna referencia matcheo. "Esta respuesta apunta
-            //   a un hilo que no conozco" — un reenvio de hilo interno, una entrada expirada por el
-            //   TTL, o un hilo anterior al despliegue. Los tres son indistinguibles a proposito.
-            // - NO CONSULTABLE: el bucket no se pudo leer. "No pude averiguar a que hilo apunta".
+            //   a un hilo que no conozco" — un reenvio de hilo interno o un hilo anterior al
+            //   despliegue. Los dos son indistinguibles a proposito. (Hasta S-032 tambien "una
+            //   entrada expirada por el TTL": desde REQ-008 los hilos no expiran.)
+            // - NO CONSULTABLE: el espacio no se pudo leer. "No pude averiguar a que hilo apunta".
             //   La distincion importa porque uno se arregla cargando el hilo y el otro arreglando
-            //   el bucket.
+            //   el KV.
             const motivo: MotivoDescarte = hilo.consultable ? 'hilo_desconocido' : 'es_respuesta';
 
             logger.warn({ messageId: mail.messageId, motivo }, 'mail descartado');
             counters.descartados += 1;
           }
         } else {
-          // ==== EL DESCARTE POR RUTEO (`sin_slug`, `slug_no_mapeado`) ====
+          // ==== EL DESCARTE POR RUTEO (hoy solo `sin_slug`) ====
           //
           // Una sola linea `warn` agrupable por motivo (CA-3): mismo literal `'mail descartado'`
           // que ya emite `normalize()` para `sin_message_id`. El `slug` viaja SOLO cuando esta
-          // presente en el resultado (unicamente `slug_no_mapeado` lo lleva) — nunca
-          // `slug: undefined` a mano (CA-4). NO se emite tambien la linea `'mail procesado'`:
-          // CA-3 exige UNA sola linea por descarte.
+          // presente en el resultado — nunca `slug: undefined` a mano (CA-4). Desde S-032
+          // `routeMail()` no produce ningun motivo con slug (`slug_no_mapeado` lo decide
+          // `lookupTicket()` en la rama del alta), pero la forma condicional se conserva: es la
+          // del tipo. NO se emite tambien la linea `'mail procesado'`: CA-3 exige UNA sola linea
+          // por descarte.
           logger.warn(
             {
               messageId: mail.messageId,
@@ -446,7 +483,7 @@ export async function runIngestaTick(
   config: AppConfig,
   logger: Logger,
   client: Client,
-  threads: KV,
+  space: KvSpace,
   imapFlowCtor?: ImapFlowCtor,
 ): Promise<void> {
   let tickBodyStarted = false;
@@ -454,7 +491,7 @@ export async function runIngestaTick(
   try {
     await withMailSource({ config, logger, imapFlowCtor }, (mailSource) => {
       tickBodyStarted = true;
-      return runTick(mailSource, config, logger, client, threads);
+      return runTick(mailSource, config, logger, client, space);
     });
   } catch (err) {
     // El error puede ser un fallo de `withMailSource` ANTES de invocar el callback (`connect()`

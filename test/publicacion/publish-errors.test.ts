@@ -61,7 +61,6 @@ function configWith(overrides: Partial<AppConfig> = {}): AppConfig {
     },
     poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
     ruteo: {
-      ticketMap: new Map([['alfa', 42]]),
       subaddressPrefix: 'tickets',
       placeholderTitle: 'Ticket recibido por mail',
       placeholderBody: '(mail sin contenido)',
@@ -71,12 +70,6 @@ function configWith(overrides: Partial<AppConfig> = {}): AppConfig {
       allowedMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'application/pdf'],
       maxSizeBytes: 10_485_760,
       putTimeoutMs: 30_000,
-    },
-    kv: {
-      ticketsBucket: 'TICKETS',
-      threadsBucket: 'MAIL_THREADS',
-      threadsTtlDays: 90,
-      watchRetryMs: 30_000,
     },
     ...overrides,
   };

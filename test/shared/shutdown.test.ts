@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { createShutdownHandler } from '#shared/shutdown.js';
 
 /**
- * TS-11 a TS-15 (Tarea 3 del Story Plan de S-011): el apagado ordenado.
+ * TS-11 a TS-15 (Tarea 3 del Story Plan de S-011): el apagado ordenado. TS-72 de S-032: sin watch
+ * del Mapa de Tickets que bajar, la secuencia es `stop` -> `waitForCurrentTick` -> `closeBus` ->
+ * `exit(0)`.
  *
  * El handler se invoca DIRECTAMENTE como funcion — nunca enviando una senal real de sistema
  * operativo al proceso de test (CA-13). `cron.stop()`, `closeBus()` y `process.exit` se doblan
@@ -13,25 +15,16 @@ import { createShutdownHandler } from '#shared/shutdown.js';
 function buildDeps(overrides: {
   waitForCurrentTick?: () => Promise<void>;
   scheduledTask?: { stop: ReturnType<typeof vi.fn<() => void>> } | undefined;
-  // S-025: por default se inyecta un doble, para que los casos de abajo puedan afirmar el ORDEN
-  // relativo al cierre del bus sin fabricarlo cada uno. Se pasa `null` para el caso de "no hay
-  // watch", que es el del modo de verificacion.
-  stopTicketMapWatch?: ReturnType<typeof vi.fn<() => void>> | null;
 }) {
   const stop = overrides.scheduledTask?.stop ?? vi.fn<() => void>();
   const closeBus = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   const exit = vi.fn<(code: number) => void>();
   const waitForCurrentTick =
     overrides.waitForCurrentTick ?? vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
-  const stopTicketMapWatch =
-    overrides.stopTicketMapWatch === null
-      ? undefined
-      : (overrides.stopTicketMapWatch ?? vi.fn<() => void>());
 
   return {
     scheduledTask: overrides.scheduledTask === undefined ? undefined : { stop },
     waitForCurrentTick,
-    stopTicketMapWatch,
     closeBus,
     exit,
   };
@@ -135,60 +128,29 @@ describe('createShutdownHandler()', () => {
     expect(deps.closeBus).toHaveBeenCalledTimes(1);
   });
 
-  // S-025: el watch del Mapa de Tickets se baja en el apagado, y ANTES de cerrar el bus.
-  it('detiene el watch del Mapa de Tickets ANTES de cerrar el bus', async () => {
+  // TS-72 (S-032). Hasta REQ-008 habia un paso entre la espera del tick y el cierre del bus: bajar el
+  // watch del Mapa de Tickets. Ya no hay watch, y la secuencia completa se afirma aca en su orden.
+  it('TS-72: el orden es stop -> waitForCurrentTick -> closeBus -> exit(0), sin watch que bajar', async () => {
     const order: string[] = [];
-    const stopTicketMapWatch = vi.fn<() => void>(() => {
-      order.push('stopWatch');
+    const scheduledTask = {
+      stop: vi.fn<() => void>(() => {
+        order.push('stop');
+      }),
+    };
+    const waitForCurrentTick = vi.fn(async () => {
+      order.push('waitForCurrentTick');
     });
-    const deps = buildDeps({ stopTicketMapWatch, scheduledTask: { stop: vi.fn() } });
+    const deps = buildDeps({ waitForCurrentTick, scheduledTask });
     deps.closeBus.mockImplementation(async () => {
       order.push('closeBus');
+    });
+    deps.exit.mockImplementation((code) => {
+      order.push(`exit(${String(code)})`);
     });
 
     await createShutdownHandler(deps)();
 
-    expect(stopTicketMapWatch).toHaveBeenCalledTimes(1);
-    // El orden NO es cosmetico: el watch corre SOBRE la conexion al bus, asi que bajarlo despues
-    // del cierre le manifestaria el socket cerrado como una caida y programaria un reintento
-    // contra una conexion que ya no existe.
-    expect(order).toEqual(['stopWatch', 'closeBus']);
-  });
-
-  it('espera el tick en vuelo antes de detener el watch', async () => {
-    const order: string[] = [];
-    let resolveTick!: () => void;
-    const waitForCurrentTick = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveTick = (): void => {
-            order.push('tick');
-            resolve();
-          };
-        }),
-    );
-    const stopTicketMapWatch = vi.fn<() => void>(() => {
-      order.push('stopWatch');
-    });
-    const deps = buildDeps({ waitForCurrentTick, stopTicketMapWatch });
-
-    const call = createShutdownHandler(deps)();
-    await Promise.resolve();
-    expect(stopTicketMapWatch).not.toHaveBeenCalled();
-
-    resolveTick();
-    await call;
-
-    expect(order).toEqual(['tick', 'stopWatch']);
-  });
-
-  it('no explota si no hay watch que detener', async () => {
-    // El caso del modo de verificacion, que no queda vivo y por lo tanto no arranca ningun watch.
-    const deps = buildDeps({ stopTicketMapWatch: null });
-
-    await expect(createShutdownHandler(deps)()).resolves.toBeUndefined();
-
-    expect(deps.closeBus).toHaveBeenCalledTimes(1);
-    expect(deps.exit).toHaveBeenCalledWith(0);
+    expect(order).toEqual(['stop', 'waitForCurrentTick', 'closeBus', 'exit(0)']);
+    expect(Object.keys(deps).sort()).toEqual(['closeBus', 'exit', 'scheduledTask', 'waitForCurrentTick']);
   });
 });

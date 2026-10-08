@@ -627,6 +627,7 @@ function runTick(
   config: AppConfig,
   logger: Logger,
   client: Client, // the connected bus client; publishes requirements.new for resolved mails
+  space: KvSpace, // S-032: the KV Space (Ticket Map + Thread Map), opened once by openKvSpace()
   normalize?: typeof normalizeMail, // test-only, defaults to the real normalize()
 ): Promise<void>;
 ```
@@ -634,7 +635,7 @@ function runTick(
 **Usage example:**
 
 ```ts
-await withMailSource({ config, logger }, (mailSource) => runTick(mailSource, config, logger, client));
+await withMailSource({ config, logger }, (mailSource) => runTick(mailSource, config, logger, client, space));
 ```
 
 **Notes:**
@@ -645,9 +646,12 @@ await withMailSource({ config, logger }, (mailSource) => runTick(mailSource, con
   failure distinct from "no Message-Id". Same pattern as `imapFlowCtor` in `infra/imap/client.ts`.
 - A mail that fails to download is skipped with `warn` and never marked `\Seen` (retried next
   tick). A mail that downloads but fails to normalize stays `\Seen` and is lost — no compensation.
-- A mail that `routeMail()` discards never reaches publication: `descartados` covers the five
-  discard reasons (`routeMail()`'s three plus `MissingMessageIdError`), completely separate from
-  `creados`/`fallidos`, which only count a publication attempt's outcome.
+- A mail that is discarded never reaches publication: `descartados` covers every discard reason
+  (`sin_slug` from `routeMail()`, `slug_no_mapeado`/`slug_no_consultable` from `lookupTicket()`,
+  `es_respuesta`/`hilo_desconocido` from `lookupThread()`, and `MissingMessageIdError`), completely
+  separate from `creados`/`fallidos`, which only count a publication attempt's outcome.
+- Since S-032 the `intencion: 'alta'` branch calls `lookupTicket()` **before**
+  `procesarAdjuntosDelMail()`: one `get()` per new mail with a slug, no cache.
 - A publication failure (`PublishError`, already logged inside `publishRequirementFromMail()`) is
   caught locally: it increments `fallidos` and lets the loop continue with the next UID — it is
   never rethrown, never retried, and never re-logged by the tick itself.
@@ -675,6 +679,7 @@ function runIngestaTick(
   config: AppConfig,
   logger: Logger,
   client: Client,
+  space: KvSpace,
   imapFlowCtor?: ImapFlowCtor,
 ): Promise<void>;
 ```
@@ -682,7 +687,7 @@ function runIngestaTick(
 **Usage example:**
 
 ```ts
-await runIngestaTick(config, logger, client); // production; a scheduler (S-011) invokes this per cron tick
+await runIngestaTick(config, logger, client, space); // production; a scheduler (S-011) invokes this per cron tick
 ```
 
 **Notes:**
@@ -717,7 +722,8 @@ function triggerTick(
   config: AppConfig,
   logger: Logger,
   client: Client,
-  runTick?: (config: AppConfig, logger: Logger, client: Client) => Promise<void>, // defaults to runIngestaTick
+  space: KvSpace,
+  runTick?: (config: AppConfig, logger: Logger, client: Client, space: KvSpace) => Promise<void>, // defaults to runIngestaTick
 ): Promise<void>;
 ```
 
@@ -725,10 +731,10 @@ function triggerTick(
 
 ```ts
 // production, invoked once per cron.schedule() callback:
-cron.schedule(config.poll.cron, () => triggerTick(config, logger, client));
+cron.schedule(config.poll.cron, () => triggerTick(config, logger, client, space));
 
 // test, injecting a controllable double instead of the real tick:
-await triggerTick(config, logger, client, fakeTick);
+await triggerTick(config, logger, client, space, fakeTick);
 ```
 
 **Notes:**
@@ -775,7 +781,7 @@ await closeBus();
 **Location:** `src/domain/ingesta/scheduler.ts`
 
 **Description:** Decides between the two `POLL_ENABLED` branches (Step 8 of the startup flow).
-`true`: calls `cron.schedule(config.poll.cron, () => triggerTick(config, logger, client, runTick))`
+`true`: calls `cron.schedule(config.poll.cron, () => triggerTick(config, logger, client, space, runTick))`
 and returns the `ScheduledTask` — `config.poll.cron` arrives already validated by `cron.validate()`
 in the schema (S-007), so this function never repeats that validation. `false`: logs
 `'poll deshabilitado: no se schedula ningún tick'` and returns `undefined` without ever calling
@@ -789,7 +795,8 @@ function scheduleTick(
   config: AppConfig,
   logger: Logger,
   client: Client,
-  runTick?: (config: AppConfig, logger: Logger, client: Client) => Promise<void>, // defaults to runIngestaTick
+  space: KvSpace, // S-032: only propagated to the tick; the scheduler never touches it
+  runTick?: (config: AppConfig, logger: Logger, client: Client, space: KvSpace) => Promise<void>, // defaults to runIngestaTick
   cronScheduleFn?: typeof import('node-cron').schedule, // defaults to the real cron.schedule
 ): ScheduledTask | undefined;
 ```
@@ -797,7 +804,7 @@ function scheduleTick(
 **Usage example:**
 
 ```ts
-const scheduledTask = scheduleTick(config, logger, client); // production
+const scheduledTask = scheduleTick(config, logger, client, space); // production
 ```
 
 **Notes:**
@@ -857,15 +864,18 @@ process.on('SIGINT', () => void shutdown());
 
 **Location:** `src/domain/ruteo/route-mail.ts`
 
-**Description:** Resolves the project a mail routes to, or the reason it is discarded. Pure,
-synchronous, never throws and never logs — the caller (the tick, in S-014) decides what to log from
-the `RouteResult` it gets back. Evaluates cheapest-first: `referenceIds.length > 0` short-circuits to
-`es_respuesta` before touching the slug at all (a reply never spends the regex or the map lookup);
-then isolates the address from `recipient` with `extractAddress()`, applies the case-insensitive
-`^<prefix>\+([^@]+)@` pattern (prefix built dynamically from config and escaped), lowercases the
-captured slug, and looks it up in `ticketMap` (already normalized to lowercase since S-012). A known,
+**Description:** Decides what a mail is: a reply, a new mail with a slug (an **intent** to create),
+or a discard. Pure, synchronous, never throws and never logs — the caller (the tick) decides what to
+log and what to query from the `RouteResult` it gets back. Evaluates cheapest-first:
+`referenceIds.length > 0` short-circuits to `{ ok: false, intencion: 'comentario' }` before touching
+the slug at all; then isolates the address from `recipient` with `extractAddress()`, applies the
+case-insensitive `^<prefix>\+([^@]+)@` pattern (prefix built dynamically from config and escaped),
+and returns `{ ok: false, intencion: 'alta', slug }` with the captured slug **lowercased**
+(invariant 4). **Since S-032 (REQ-008) it no longer resolves the project**: the Ticket Map lives in
+the KV Space and the tick resolves the intent with `lookupTicket()` — the same shape REQ-005 used to
+take the thread lookup out of here. `slug_no_mapeado` is therefore no longer produced here. A known,
 accepted false positive: a forwarded mail with a populated `References` and a legitimate new request
-still discards as `es_respuesta` — a deliberate degrade-to-discard decision (PRD decision 9, G-04),
+still goes down the reply branch — a deliberate degrade-to-discard decision (PRD decision 9, G-04),
 not a bug.
 
 **Signature:**
@@ -873,7 +883,7 @@ not a bug.
 ```ts
 function routeMail(
   mail: Pick<IncomingMail, 'referenceIds' | 'recipient'>,
-  config: Pick<RuteoConfig, 'ticketMap' | 'subaddressPrefix'>,
+  config: Pick<RuteoConfig, 'subaddressPrefix'>,
 ): RouteResult;
 ```
 
@@ -882,19 +892,23 @@ function routeMail(
 ```ts
 import { routeMail } from '#domain/ruteo/route-mail.js';
 
-routeMail(
-  { referenceIds: [], recipient: 'tickets+alfa@grava.io' },
-  { ticketMap: new Map([['alfa', 42]]), subaddressPrefix: 'tickets' },
-); // { ok: true, projectId: 42, slug: 'alfa' }
+routeMail({ referenceIds: [], recipient: 'tickets+Alfa@grava.io' }, { subaddressPrefix: 'tickets' });
+// { ok: false, intencion: 'alta', slug: 'alfa' }  — the tick then calls lookupTicket()
+
+routeMail({ referenceIds: ['<r1@x>'], recipient: 'tickets+alfa@grava.io' }, { subaddressPrefix: 'tickets' });
+// { ok: false, intencion: 'comentario' }          — the tick then calls lookupThread()
+
+routeMail({ referenceIds: [], recipient: 'soporte@grava.io' }, { subaddressPrefix: 'tickets' });
+// { ok: false, motivo: 'sin_slug' }
 ```
 
 **Notes:**
 
 - Does not import anything from `#domain/ingesta/*` besides `extractAddress` (value) and
-  `IncomingMail` (type-only), and nothing from `#domain/publicacion/*` — the module is a pure leaf
-  the tick composes, never the other way around.
-- The `slug` field is present in the discard result only when `motivo === 'slug_no_mapeado'`
-  (`'slug' in result`, not `result.slug !== undefined`) — see `RouteResult` in types.md.
+  `IncomingMail` (type-only), nothing from `#domain/publicacion/*` and nothing from `#infra/*` — the
+  module is a pure leaf the tick composes, never the other way around. It receives no KV handle.
+- A slug that is not loaded is **still** an `intencion: 'alta'`: whether it is mapped is a question
+  only the KV can answer, and `routeMail()` does no I/O.
 
 ---
 
@@ -1336,67 +1350,115 @@ if (reuso.tipo === 'reusado') {
 
 ---
 
-## openKvStores()
+## openKvSpace()
 
-**Location:** `src/infra/kv/stores.ts`
+**Location:** `src/infra/kv/space.ts`
 
-**Description:** Opens the connector's two NATS KV buckets over the process's **single** connection
-and **verifies they exist**. It is the startup step that turns "a bucket is missing" from a silent,
-undiagnosable runtime symptom into a fail-fast that names the bucket.
-
-**The load-bearing detail, verified against the installed package:** `open()` does **not** check that
-the bucket exists. Its docstring — *"If the KV doesn't exist, this API will fail on accessing the
-KV"* — reads like "`open()` throws", but it sets `bindOnly: true` (`lib/kv.js:158-160`) and delegates
-to `Bucket.bind()` (`lib/kv.js:228-246`), which validates the name, builds the object, and **never
-calls `streams.info`**. The failure is deferred to first real access. **The verification is
-`status()`**, which does query (`lib/kv.js:812`). Without it, the connector would start happily
-against a deployment with no buckets and discard every mail in silence — the exact failure mode this
-step closes. **Do not remove the `status()` as "redundant after `open()`".**
+**Description:** Opens the connector's **KV Space** —its per-identity space inside the shared
+`JIKU_KV` bucket, keys prefixed `{instance}.{userId}.` by the SDK— with `await client.kv()`, **once**,
+over the process's single connection. Startup step 5.5: after `connectToBus()` (the space travels
+over `client.connection`) and before `scheduleTick()` (an unusable space must stop the startup, not
+be discovered on the first mail). It is the **only** place in `src/` that calls `client.kv()`; the
+returned handle travels by parameter down to the tick.
 
 **Signature:**
 
 ```ts
-function openKvStores(opts: {
-  client: Client;
-  config: AppConfig;
-  logger: Logger;
-}): Promise<KvStores>;
+/** The handle that travels by parameter. No delete(): the connector never deletes. */
+type KvSpace = Pick<KV, 'get' | 'put'>;
+
+interface OpenKvSpaceOptions {
+  readonly client: Client;
+  readonly logger: Logger;
+}
+
+function openKvSpace(options: OpenKvSpaceOptions): Promise<KvSpace>;
+```
+
+**Usage example:**
+
+```ts
+import { openKvSpace } from '#infra/kv/space.js';
+
+const client = await connectToBus({ config, auth, logger });
+const space = await openKvSpace({ client, logger });
+// info 'espacio KV abierto' { bucket: 'JIKU_KV', kvPrefix: 'prod.387842544790142978.' }
+scheduleTick(config, logger, client, space);
 ```
 
 **Notes:**
 
-- **The `Kvm` is built on `client.connection`**, the raw `NatsConnection` the SDK exposes — never a
-  new connection. ADR-002 (one connection per process) stays intact: the KV pays neither the Zitadel
-  round-trip nor the auth-callout handshake, because it travels over the socket that is already open
-  and already authorized as this identity.
-- **Sequential, never `Promise.all`.** The tickets bucket is verified **first** and the function stops
-  there: without the Ticket Map nothing can be routed, whereas without the threads bucket only
-  replies degrade. They are not equivalent, and the error has to name **one** bucket so the operator
-  knows which to create. With `Promise.all` both would fail at once and the diagnosis would be
-  ambiguous.
-- **Never calls `kvm.create()`.** A typo in the bucket name would create an **empty** bucket in
-  silence, and the symptom would be a connector that discards everything without saying why — far
-  worse than a startup that fails naming the missing bucket. A property test scans `src/` to assert
-  no `create()` exists.
-- **Never sets the TTL** (`ttl:` is absent from every options object, also asserted by a scan).
-  Setting it would need the stream write permission that the no-create decision exists to avoid. It
-  **compares** the threads bucket's TTL against `KV_THREADS_TTL_DAYS` and emits exactly one `warn` if
-  they differ, then starts anyway: a different TTL only changes the window, and an expired entry
-  degrades to `hilo_desconocido`, which is a **safe** failure.
-- **`status().ttl` is in milliseconds** (`millis(si.config.max_age)`, `lib/kv.js:835-837`) and `0`
-  means "no TTL"; the config is in **days**, because that is the unit the operator creates the bucket
-  with (`nats kv add --ttl=90d`). Hence the explicit `MS_PER_DAY` conversion.
-- **The TTL is only compared on the threads bucket.** The slugs bucket is human-administered
-  configuration with no reason to expire; whatever TTL it has is irrelevant and is compared against
-  nothing.
-- **`status()` is called once per bucket.** The verification returns the status alongside the handle
-  so the TTL comparison reuses the response it already fetched, instead of paying a second
-  round-trip.
-- **The bucket name is validated before any I/O**, against the same `/^[-\w]+$/` the library uses, so
-  the `nombre_de_bucket_invalido` diagnosis is positive rather than depending on recognizing the
-  plain `Error` that `validateBucket()` throws (which would mean reading message text).
-- **`logger` comes by parameter**, not via `getLogger()` — same as `connection.ts` — so tests inject a
-  capture logger without touching the process singleton.
+- **It never creates the bucket.** The SDK does the `$JS.API.STREAM.INFO.KV_JIKU_KV` and rejects a
+  bucket without `allow_direct`; the deploy of Jiku creates `JIKU_KV`. A failure is rethrown as
+  `KvSpaceUnavailableError`, diagnosed by the SDK's **class** (`diagnoseKvFailure()`), and
+  `reportStartupFailure()` logs it through its own `fatal` branch.
+- **`KvSpace = Pick<KV, 'get' | 'put'>`, not `KV`.** The SDK's `KV` is a class with private ES fields
+  and a private constructor, so TypeScript treats it nominally and an object literal (a test double)
+  is not assignable to it. The `Pick` is satisfied structurally — and leaves `delete()` uncallable on
+  the handle at compile time.
+- **The log field is `kvPrefix`, never `key`** (`REDACT_PATHS` would censor it silently). Its value is
+  `kvKey(client.instance, client.userId, '')`, built with the SDK's own function so it cannot diverge
+  from the real prefix — it is the value U-02 copies to load a slug.
+- **No `timeoutMs` and no `signal`**: the client's timeout (15 s, ADR-002) applies.
+
+---
+
+## lookupTicket()
+
+**Location:** `src/infra/kv/tickets.ts`
+
+**Description:** Resolves a slug (already lowercased by `routeMail()`) to its Jiku `projectId` with
+**one** `get('tickets.<slug>')` on the KV Space, **one attempt, no cache**. Called by the tick in the
+`intencion: 'alta'` branch, **before** `procesarAdjuntosDelMail()` — uploading attachments for a mail
+that is then discarded would orphan them. **Never throws.**
+
+**Signature:**
+
+```ts
+type TicketLookupResult =
+  | { readonly found: true; readonly projectId: number }
+  | { readonly found: false; readonly consultable: true }    // not there → slug_no_mapeado
+  | { readonly found: false; readonly consultable: false };  // could not ask → slug_no_consultable
+
+interface LookupTicketOptions {
+  readonly space: KvSpace;
+  readonly slug: string;   // already lowercase
+  readonly logger: Logger;
+}
+
+function lookupTicket(options: LookupTicketOptions): Promise<TicketLookupResult>;
+```
+
+**Usage example:**
+
+```ts
+import { lookupTicket } from '#infra/kv/tickets.js';
+
+const destino = await lookupTicket({ space, slug: route.slug, logger });
+if (destino.found) {
+  // procesarAdjuntosDelMail → publishRequirementFromMail(mail, destino.projectId, …)
+} else {
+  const motivo = destino.consultable ? 'slug_no_mapeado' : 'slug_no_consultable';
+  logger.warn({ messageId: mail.messageId, motivo, slug: route.slug }, 'mail descartado');
+}
+```
+
+**Notes:**
+
+- **Four situations, three results.** A positive integer → `found`. `get()` returning `undefined`
+  (never loaded, or deleted) → `consultable: true`, no log. A malformed value → `consultable: true`
+  with a `warn` that names the **slug, never the raw value**. A slug that cannot be a KV key
+  (`isStorableSlug()` false) → `consultable: true` **without a round-trip** — it can never have been
+  loaded, so it is "not mapped", not a failure. A rejected (or synchronously throwing) `get()` →
+  `consultable: false` with a `warn` `{ slug, errorClass }`.
+- **No cache, by design.** A `put` or a delete by U-02 takes effect from the **next mail**, with no
+  redeploy. A source scan asserts no module-level `Map`/`Set`/`let`/`Record` in `tickets.ts` and a
+  single `lookupTicket(` call in `tick.ts`.
+- **No retry** (ADR-001) and **no timeout of its own**: under a KV outage each query waits for the
+  client's timeout, and every new mail of the tick is discarded as `slug_no_consultable` — the
+  accepted safe failure; the log names the slug so the mails can be rebuilt from the mailbox.
+- The `projectId` is parsed with the shared `parsePositiveId()` over
+  `new TextDecoder().decode(entry.value)`; it is **not** validated against Jiku.
 
 ---
 
@@ -1404,16 +1466,17 @@ function openKvStores(opts: {
 
 **Location:** `src/infra/kv/threads.ts`
 
-**Description:** Writes the Thread Map entry `sha256(raw Message-Id) → requirementId` over the
-handle `openKvStores()` already opened and verified. Called from the tick's `for`, inside the
-publication's `try`, **after** `counters.creados += 1` and **only** when the create succeeded.
+**Description:** Writes the Thread Map entry `hilos.<sha256(raw Message-Id)> → requirementId` on the
+KV Space `openKvSpace()` opened. Called from the tick's `for` in two places: after a requirement is
+created (inside the publication's `try`, **after** `counters.creados += 1`) and after a comment
+succeeds (with the **reply's** own `Message-Id`).
 
 **Signature:**
 
 ```ts
 interface RecordThreadEntryOptions {
-  readonly threads: KV;        // the handle openKvStores() opened; no new connection
-  readonly messageId: string;  // RAW, with its brackets, as normalize() delivers it
+  readonly space: KvSpace;      // the handle openKvSpace() opened; no new connection
+  readonly messageId: string;   // RAW, with its brackets, as normalize() delivers it
   readonly requirementId: number;
   readonly logger: Logger;
 }
@@ -1430,31 +1493,25 @@ const { requirementId } = await publishRequirementFromMail(/* … */);
 counters.creados += 1;
 
 // No try/catch: this never throws. Wrapping it would suggest otherwise.
-await recordThreadEntry({ threads, messageId: mail.messageId, requirementId, logger });
+await recordThreadEntry({ space, messageId: mail.messageId, requirementId, logger });
 ```
 
 **Notes:**
 
-- **It never throws, and that is the contract.** A rejected `put()` is absorbed with a **single**
-  `warn` carrying the flat context `{ messageId, messageIdHash, requirementId }`, and the function
-  resolves normally. The requirement already exists in Jiku and there is no compensating command
-  (invariant 9), so the write is a **posterior** effect, outside the create's critical path:
-  `counters.creados` is **not** reverted and the `for` moves on to the next UID. **Do not wrap the
-  call in a `try/catch`** — it is redundant and misrepresents the contract.
+- **It never throws, and that is the contract.** A rejected `put()` —including `JikuBucketFull`, since
+  `JIKU_KV` is shared by every identity and has no per-identity quota— is absorbed with a **single**
+  `warn` carrying the flat context `{ messageId, messageIdHash, requirementId, errorClass }`, and the
+  function resolves normally. The requirement already exists in Jiku and there is no compensating
+  command (invariant 9), so `counters.creados` is **not** reverted. **Do not wrap the call in a
+  `try/catch`.**
 - **The accepted consequence of a failed write** is that the thread will not route later: a reply to
   that mail will be discarded as `hilo_desconocido`, which is the safe failure.
-- **The value is the integer as text** (`String(requirementId)`), same criterion as the slugs
-  bucket, so `nats kv get` shows something readable and `parsePositiveId()` reads it back. **Not
-  JSON**: `entry.json<T>()` **throws** on an unparseable payload, and one bad key cannot be a failure
-  mode here.
-- **The `put()` takes no options object.** The TTL belongs to the **bucket** and the operator sets it
-  (`nats kv add MAIL_THREADS --ttl=90d`); a source scan asserts no file under `src/infra/kv/` passes
-  a `ttl:`.
-- **The log field is `messageIdHash`, never `key`.** `REDACT_PATHS` covers `'key'` and `'*.key'` (it
-  protects the machine user's private RSA key), so a field named `key` would come out `[REDACTED]`
-  without failing and without warning.
-- **It writes only.** No `create()`, no `Kvm`, no new connection — its only bus import is the **type**
-  `KV` from `@gravadigital/jiku/nats`.
+- **The key is `threadKey(messageId)`** (`hilos.` + `sha256hex()` of the raw `Message-Id`); the value
+  is the integer as **text** (`String(requirementId)`), read back with `parsePositiveId()`.
+- **The `put()` takes no options**: no TTL (entries never expire, invariant 32) and no timeout of its
+  own.
+- **The log field `messageIdHash` is the bare hash** (64 hex, without the `hilos.` prefix), and
+  **never** a field named `key` — `REDACT_PATHS` covers `'key'` and `'*.key'`.
 
 ---
 
@@ -1463,9 +1520,9 @@ await recordThreadEntry({ threads, messageId: mail.messageId, requirementId, log
 **Location:** `src/infra/kv/threads.ts`
 
 **Description:** Resolves which requirement a reply's thread belongs to, by walking the mail's
-`referenceIds` **in the order received** and querying `get(sha256hex(refId))` on each until the
-first valid hit. Called from the tick's discard branch, only when
-`route.motivo === 'es_respuesta'`.
+`referenceIds` **in the order received** and querying `space.get(threadKey(refId))` on each until
+the first valid hit. Called from the tick's reply branch (`intencion: 'comentario'`), which never
+evaluates the slug (invariant 26).
 
 **Signature:**
 
@@ -1476,7 +1533,7 @@ type ThreadLookupResult =
   | { readonly found: false; readonly consultable: false };  // could not query
 
 interface LookupThreadOptions {
-  readonly threads: KV;
+  readonly space: KvSpace;
   readonly referenceIds: readonly string[];  // already ordered and deduped by normalize()
   readonly logger: Logger;
 }
@@ -1489,39 +1546,30 @@ function lookupThread(options: LookupThreadOptions): Promise<ThreadLookupResult>
 ```ts
 import { lookupThread } from '#infra/kv/threads.js';
 
-let motivo: MotivoDescarte = route.motivo;
-
-if (route.motivo === 'es_respuesta') {
-  const hilo = await lookupThread({ threads, referenceIds: mail.referenceIds, logger });
-  if (!hilo.found && hilo.consultable) motivo = 'hilo_desconocido';
-  // found === true  → the thread IS known; hilo.requirementId is the target
-  // consultable === false → could not query; the older motive still applies
+const hilo = await lookupThread({ space, referenceIds: mail.referenceIds, logger });
+if (hilo.found) {
+  // comment on hilo.requirementId, then recordThreadEntry() with the REPLY's Message-Id
+} else {
+  const motivo = hilo.consultable ? 'hilo_desconocido' : 'es_respuesta';
+  logger.warn({ messageId: mail.messageId, motivo }, 'mail descartado');
 }
-
-logger.warn({ messageId: mail.messageId, motivo }, 'mail descartado');
 ```
 
 **Notes:**
 
 - **Three states, not two.** `number | undefined` would collapse "it isn't there" with "I couldn't
-  ask", and that is precisely the distinction the caller needs: *"this reply points at a thread I
-  don't know"* (`hilo_desconocido`) versus *"I couldn't find out which thread it points at"*
-  (`es_respuesta`). One is fixed by loading the thread, the other by fixing the bucket.
+  ask": *"this reply points at a thread I don't know"* (`hilo_desconocido`) versus *"I couldn't find
+  out which thread it points at"* (`es_respuesta`). One is fixed by loading the thread, the other by
+  fixing the KV.
 - **It never throws.** All three outcomes are typed return values.
-- **It stops at the first valid hit.** Later references are not queried at all.
-- **NEVER `Promise.all` over the references.** It erases two things at once: the **cutoff** (N round
-  trips where the design pays 1) and the **ordering**, which is what makes the `In-Reply-To`
-  reference win. The loop is sequential on purpose, in line with ADR-001.
-- **The order is not recomputed here.** `normalize()` (via `mergeReferenceIds()`) already delivers
-  the deduplicated union of `In-Reply-To` and `References`, in order of appearance, with
-  `In-Reply-To` first. This function iterates the array as received: no sorting, no deduping, no
-  filtering.
-- **A malformed value is not a hit, and iteration continues.** It is skipped with a `warn` naming the
-  `messageIdHash` — a bad value on one key cannot hide the real thread on the next. A rejected
-  `get()`, by contrast, **stops**: an unreachable bucket does not become reachable on the next
-  reference.
-- **An empty `referenceIds` costs zero round-trips.** A new mail never pays for a read.
-- **`get()` puntual, no `watch()`, no in-memory copy.** This is high-cardinality state that changes on
-  every mail; a copy would be an unbounded, stale map. The contrast with `ticket-map.ts` is
-  deliberate — that bucket holds dozens of human-administered entries, this one holds one per mail.
-  A source scan asserts the absence of both `watch(` and any module-level `Map`.
+- **`undefined` from `get()` means "not there"** (never written, or deleted) and the walk continues
+  with the next reference. Nothing reads `entry.created`: an entry of any age matches.
+- **It stops at the first valid hit** and **NEVER uses `Promise.all`** over the references — that
+  would erase the cutoff and the ordering that makes the `In-Reply-To` reference win (ADR-001).
+- **A malformed value is not a hit, and iteration continues**, with a `warn` naming the
+  `messageIdHash`. A rejected `get()`, by contrast, **stops**: an unreachable KV does not become
+  reachable on the next reference.
+- **An empty `referenceIds` costs zero round-trips.**
+- **`get()` puntual, no `watch()`, no in-memory copy** — since S-032 the same is true of the Ticket
+  Map (`lookupTicket()`). A source scan asserts the absence of `watch(` and of any module-level
+  `Map`.

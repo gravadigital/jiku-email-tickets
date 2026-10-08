@@ -1,20 +1,26 @@
+import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
-import type { KV } from '@gravadigital/jiku/nats';
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import type { AppConfig } from '#config/index.js';
 import type { MailSource, RawMessage } from '#domain/ingesta/ports.js';
 import { runTick } from '#domain/ingesta/tick.js';
-import { startTicketMapWatch, type TicketMapWatch } from '#infra/kv/ticket-map.js';
-import { sha256hex } from '#infra/kv/threads.js';
+import { threadKey } from '#infra/kv/keys.js';
+import type { KvSpace } from '#infra/kv/space.js';
 
 import { setupTestBus, type TestBusContext } from '../bus/helpers.js';
 import { type CoreResponder, MUTE, respondTo } from '../bus/responder.js';
 import { startJetStreamNats, type JetStreamNats } from '../infra/kv/helpers.js';
+import {
+  spyOnSpace,
+  withFailingGet,
+  withFailingPut,
+  type SpaceSpy,
+} from '../infra/kv/space-doubles.js';
 import { readSource } from '../shared/source-scan.js';
 import { testLoggerWithCapture } from './test-logger.js';
 
@@ -27,7 +33,7 @@ import { testLoggerWithCapture } from './test-logger.js';
  *
  * # POR QUE UN ARCHIVO NUEVO Y NO UNA EXTENSION
  *
- * `tick-redaction.test.ts` corre con `fakeThreadsKv()` (el doble EN MEMORIA) y sin la rama del
+ * `tick-redaction.test.ts` corre con `fakeKvSpace()` (el doble EN MEMORIA) y sin la rama del
  * comentario: extenderlo obligaria a cambiarle la infraestructura a una suite que ya esta bien.
  * `tick-hilos.test.ts` ya tiene 834 lineas. Es el mismo criterio con el que S-022 creo
  * `tick-adjuntos-propiedades.test.ts`.
@@ -36,14 +42,14 @@ import { testLoggerWithCapture } from './test-logger.js';
  *
  * Esta suite NO reescribe lo que ya esta afirmado. La linea de base es:
  *
- * - `tick-hilos.test.ts` (S-026/S-027): el write tras el alta, el reenvio interno, el TTL expirado,
- *   el bucket inaccesible, los seis contadores, el hash logueable. **Lo que falta y se agrega aca:**
+ * - `tick-hilos.test.ts` (S-026/S-027): el write tras el alta, el reenvio interno, el bucket
+ *   inaccesible, los seis contadores, el hash logueable. **Lo que falta y se agrega aca:**
  *   el TERCER caso de `hilo_desconocido` (bucket vacio = hilo anterior al despliegue), la
  *   INDISTINGUIBILIDAD de los tres como propiedad afirmada, y el ORDEN del write respecto del
  *   `success`.
  * - `tick-memory.test.ts` (S-016/S-022): la propiedad de memoria por inspeccion de `tick.ts`. **NO
- *   SE MODIFICA** — es la linea de base de CA-3, y aca solo se EXTIENDE a la rama del comentario, a
- *   `threads.ts` y al tamaño de la copia del mapa de slugs.
+ *   SE MODIFICA** — es la linea de base de CA-3, y aca solo se EXTIENDE a la rama del comentario y a
+ *   `threads.ts`.
  * - `tick-redaction.test.ts` (S-016/S-022): la redaccion con el doble en memoria. Aca la propiedad
  *   se afirma con el KV REAL y con el texto del comentario que EFECTIVAMENTE VIAJO AL BUS.
  * - `infra/kv/source-properties.test.ts` (S-024/S-026): el `create()` ausente, el `watch()` ausente
@@ -52,12 +58,19 @@ import { testLoggerWithCapture } from './test-logger.js';
  * # LOS DOBLES
  *
  * Sistemas REALES: el bus (contenedor compartido, con responders de `core`) y el KV (contenedor
- * PROPIO con `-js`, porque el compartido arranca sin JetStream — ver la cabecera de
+ * PROPIO con `-js` y `JIKU_KV`, porque el compartido arranca sin JetStream — ver la cabecera de
  * `test/infra/kv/helpers.ts`; NO se le agrega `-js` al compartido y NO se unifican los tags).
  *
+ * Desde S-032 el KV es el Espacio KV del conector: cada escenario usa un espacio FRESCO de una
+ * identidad propia (el prefijo `{instance}.{userId}.` los aisla dentro del unico bucket), sembrado
+ * con `tickets.alfa` → `42`, el mismo mapa que hasta S-032 viajaba en `config.ruteo.ticketMap`. El
+ * `KV` del SDK no lista claves, asi que "el bucket quedo exactamente como estaba" se afirma con un
+ * `get()` dirigido a cada clave en juego y con lo que el espia registro que se ESCRIBIO.
+ *
  * Doblados solo en el BORDE: `MailSource` (IMAP) y el `PUT` prefirmado (servidor HTTP local). Y, en
- * los escenarios que lo exigen, un `KV` cuyo `put()`/`get()` RECHAZA envolviendo el handle REAL: un
- * bucket inaccesible en caliente no se puede provocar contra un contenedor sano sin tirarlo abajo.
+ * los escenarios que lo exigen, un espacio cuyo `put()`/`get()` RECHAZA envolviendo el handle REAL
+ * (`space-doubles.ts`): un KV inaccesible en caliente no se puede provocar contra un contenedor sano
+ * sin tirarlo abajo.
  */
 
 const FIXTURES_DIR = fileURLToPath(new URL('../fixtures/mails/', import.meta.url));
@@ -73,13 +86,25 @@ const SECRETO_RESPUESTA = 'RESPUESTA-SECRETA-DEL-CLIENTE';
 /** El byte sensible canonico de un adjunto. */
 const SECRETO_ADJUNTO = 'BYTES-SECRETOS-DEL-ADJUNTO';
 
-/** La referencia que se siembra en el bucket para que una respuesta tenga match. */
+/** La referencia que se siembra en el Mapa de Hilos para que una respuesta tenga match. */
 const REFERENCIA_CON_MATCH = '<abc@cliente.com>';
+
+/** El hash calculado INDEPENDIENTEMENTE en el test, nunca importado de `src/`. */
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+/** El valor de una entrada del espacio como texto, o `undefined` si no esta. */
+async function valueOf(space: KvSpace, key: string): Promise<string | undefined> {
+  const entry = await space.get(key);
+  return entry === undefined ? undefined : new TextDecoder().decode(entry.value);
+}
 
 /**
  * El `AppConfig` de los escenarios. Deliberadamente NO se reusa el `BASE_CONFIG` privado de
  * `test-logger.ts` (no se exporta) pero se le copia el bloque exacto que el Story Plan fija:
- * `ticketMap = { alfa: 42 }`, `subaddressPrefix = 'tickets'`, `maxPerTick = 50`, y el bloque `kv`.
+ * `subaddressPrefix = 'tickets'` y `maxPerTick = 50`. El mapa `{ alfa: 42 }` vive desde S-032 en el
+ * Espacio KV de cada escenario (`freshSpace()`), no en la configuracion.
  */
 const BASE_CONFIG: AppConfig = {
   servers: 'nats://localhost:4222',
@@ -100,7 +125,6 @@ const BASE_CONFIG: AppConfig = {
   },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
   ruteo: {
-    ticketMap: new Map([['alfa', 42]]),
     subaddressPrefix: 'tickets',
     placeholderTitle: 'Ticket recibido por mail',
     placeholderBody: '(mail sin contenido)',
@@ -110,12 +134,6 @@ const BASE_CONFIG: AppConfig = {
     allowedMimeTypes: ['image/png', 'image/jpeg', 'application/pdf', 'text/plain'],
     maxSizeBytes: 10_485_760,
     putTimeoutMs: 30_000,
-  },
-  kv: {
-    ticketsBucket: 'TICKETS',
-    threadsBucket: 'MAIL_THREADS',
-    threadsTtlDays: 90,
-    watchRetryMs: 30_000,
   },
 };
 
@@ -225,20 +243,13 @@ function sourceWith(mails: Map<number, Buffer>): MailSource & { markSeenCalls: n
 }
 
 /**
- * Envuelve el handle REAL y registra la clave y el INSTANTE de cada `get()`/`put()`.
+ * `spyOnSpace()` con un RELOJ: ademas de las claves, registra el INSTANTE de cada `put()`.
  *
  * El instante (un contador monotonico propio, no el reloj) es lo que hace afirmable el ORDEN del
- * write respecto del `success` del comentario (TS-26) sin ningun sleep.
+ * write respecto del `success` del comentario (TS-26) sin ningun sleep. Compone el espia de
+ * `space-doubles.ts` sobre un objeto plano que delega (no un `Proxy`: ver su cabecera).
  */
-function spyOn(real: KV): {
-  kv: KV;
-  gets: string[];
-  puts: string[];
-  putTicks: number[];
-  tick: () => number;
-} {
-  const gets: string[] = [];
-  const puts: string[] = [];
+function spyOnSpaceWithClock(space: KvSpace): SpaceSpy & { putTicks: number[]; tick: () => number } {
   const putTicks: number[] = [];
   let counter = 0;
   const tick = (): number => {
@@ -246,49 +257,15 @@ function spyOn(real: KV): {
     return counter;
   };
 
-  const kv = new Proxy(real, {
-    get(target, prop, receiver) {
-      if (prop === 'get') {
-        return async (key: string) => {
-          gets.push(key);
-          return target.get(key);
-        };
-      }
-      if (prop === 'put') {
-        return async (key: string, value: string) => {
-          puts.push(key);
-          putTicks.push(tick());
-          return target.put(key, value);
-        };
-      }
-      const value = Reflect.get(target, prop, receiver) as unknown;
-      return typeof value === 'function' ? value.bind(target) : value;
+  const spy = spyOnSpace({
+    get: (key, options) => space.get(key, options),
+    put: (key, value, options) => {
+      putTicks.push(tick());
+      return space.put(key, value, options);
     },
-  }) as KV;
+  });
 
-  return { kv, gets, puts, putTicks, tick };
-}
-
-/** Un `KV` cuyo `put()` rechaza siempre; el `get()` sigue contra el real. */
-function withFailingPut(real: KV): KV {
-  return new Proxy(real, {
-    get(target, prop, receiver) {
-      if (prop === 'put') return () => Promise.reject(new Error('bucket inaccesible'));
-      const value = Reflect.get(target, prop, receiver) as unknown;
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  }) as KV;
-}
-
-/** Un `KV` cuyo `get()` rechaza siempre. */
-function withFailingGet(real: KV): KV {
-  return new Proxy(real, {
-    get(target, prop, receiver) {
-      if (prop === 'get') return () => Promise.reject(new Error('bucket inaccesible'));
-      const value = Reflect.get(target, prop, receiver) as unknown;
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  }) as KV;
+  return { ...spy, putTicks, tick };
 }
 
 /** Levanta un servidor HTTP local para el `PUT` prefirmado; el status lo decide el llamador. */
@@ -316,34 +293,21 @@ async function startHttpServer(
 
 let bus: TestBusContext;
 let nats: JetStreamNats;
-let bucketCounter = 0;
+let spaceCounter = 0;
 const openResponders: CoreResponder[] = [];
-const openWatches: TicketMapWatch[] = [];
 
 /**
- * Un bucket de hilos VACIO y propio por escenario.
+ * Un espacio FRESCO y propio por escenario (S-032: hasta entonces, un bucket de hilos propio), con
+ * `tickets.alfa` → `42` ya cargado.
  *
- * Sin aislamiento, el conteo de claves de un escenario ve las del anterior — y "el bucket tiene
- * exactamente las claves que tenia antes" (TS-20) seria inafirmable. Es el patron de
- * `tick-hilos.test.ts`.
+ * Sin aislamiento, las entradas de un escenario las veria el siguiente — y "el Mapa de Hilos no
+ * tiene la entrada de esta respuesta" seria inafirmable. Es el patron de `tick-hilos.test.ts`.
  */
-async function freshThreads(): Promise<KV> {
-  bucketCounter += 1;
-  const name = `S028_THREADS_${String(bucketCounter)}`;
-  await nats.seedBucket(name);
-  return nats.openBucket(name);
-}
-
-async function countKeys(threads: KV): Promise<number> {
-  let count = 0;
-  for await (const _key of await threads.keys()) count += 1;
-  return count;
-}
-
-async function keysOf(threads: KV): Promise<string[]> {
-  const keys: string[] = [];
-  for await (const key of await threads.keys()) keys.push(key);
-  return keys.sort();
+async function freshSpace(): Promise<KvSpace> {
+  spaceCounter += 1;
+  const space = await nats.spaceFor(`s028-t${String(spaceCounter)}`);
+  await space.put('tickets.alfa', '42');
+  return space;
 }
 
 /** Da de alta un responder y lo registra para el teardown del escenario. */
@@ -370,9 +334,6 @@ beforeAll(async () => {
 afterEach(async () => {
   while (openResponders.length > 0) {
     await openResponders.pop()?.stop();
-  }
-  while (openWatches.length > 0) {
-    openWatches.pop()?.stop();
   }
 });
 
@@ -405,12 +366,12 @@ describe('runTick — ninguna linea de log filtra contenido del cliente, con el 
     capture: ReturnType<typeof testLoggerWithCapture>['capture'];
     comentarios: CoreResponder;
     altas: CoreResponder;
-    threads: KV;
+    space: KvSpace;
   }> {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
 
-    await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
+    await space.put(threadKey(REFERENCIA_CON_MATCH), '500');
 
     // Dos ids para `requirements.new`: el mail nuevo y `sensitive-body`. Si el tick publicara un
     // alta de mas (por ejemplo si un `hilo_desconocido` cayera de vuelta al alta), el responder
@@ -443,10 +404,10 @@ describe('runTick — ninguna linea de log filtra contenido del cliente, con el 
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      space,
     );
 
-    return { capture, comentarios, altas, threads };
+    return { capture, comentarios, altas, space };
   }
 
   // TS-1
@@ -485,7 +446,7 @@ describe('runTick — ninguna linea de log filtra contenido del cliente, con el 
 
   // TS-3
   it('TS-3: ninguna linea filtra el contenido de un adjunto ni la uploadUrl', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     const http = await startHttpServer(() => 200);
 
@@ -508,7 +469,7 @@ describe('runTick — ninguna linea de log filtra contenido del cliente, con el 
     });
 
     try {
-      await runTick(sourceWith(new Map([[1, mail]])), BASE_CONFIG, logger, bus.client, threads);
+      await runTick(sourceWith(new Map([[1, mail]])), BASE_CONFIG, logger, bus.client, space);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
       // El `PUT` se hizo: la propiedad se afirma sobre un camino que de verdad subio el byte.
@@ -574,7 +535,7 @@ describe('runTick — ninguna linea de log filtra contenido del cliente, con el 
 
   // TS-7 (CA-2)
   it('TS-7: el messageIdHash sale LITERAL, sin censurar, y el campo NO se llama key', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await responderFor('requirements.new', { status: 'success' as const, data: { id: 620 } });
 
@@ -584,10 +545,11 @@ describe('runTick — ninguna linea de log filtra contenido del cliente, con el 
       BASE_CONFIG,
       logger,
       bus.client,
-      withFailingPut(threads),
+      withFailingPut(space),
     );
 
-    const hash = sha256hex('<uid-1@fixtures.local>');
+    // El hash SOLO, sin el prefijo `hilos.` de la clave: es lo que el `warn` nombra.
+    const hash = sha256('<uid-1@fixtures.local>');
     const warn = capture.lines().find((line) => line['messageIdHash'] !== undefined);
 
     expect(warn).toBeDefined();
@@ -627,8 +589,10 @@ describe('runTick — ninguna linea de log filtra contenido del cliente, con el 
  * TAREA 2 (CA-3) — EL PICO DE MEMORIA DE UN MAIL A LA VEZ
  *
  * `test/ingesta/tick-memory.test.ts` es la LINEA DE BASE de S-016/S-022 y NO SE MODIFICA. Este
- * bloque la EXTIENDE a las tres piezas que REQ-005 agrego y que su escaneo no cubre: la rama del
- * comentario, el lookup del Mapa de Hilos, y el tamaño de la copia del mapa de slugs.
+ * bloque la EXTIENDE a las piezas que REQ-005 agrego y que su escaneo no cubre: la rama del
+ * comentario y el lookup del Mapa de Hilos. (Hasta S-032 tambien afirmaba el tamaño de la copia del
+ * mapa de slugs; desde REQ-008 esa copia no existe —el slug se consulta una vez por mail— y que la
+ * consulta no se guarde lo afirma `test/infra/kv/source-properties.test.ts`.)
  *
  * # POR QUE POR INSPECCION Y NO MIDIENDO EL HEAP (TS-14)
  *
@@ -638,9 +602,8 @@ describe('runTick — ninguna linea de log filtra contenido del cliente, con el 
  * no tenerlo: el primero que lo vea rojo sin causa lo va a marcar `skip`, y ahi se pierde tambien
  * la cobertura que si servia.
  *
- * Asi que TS-14 se resuelve por INSPECCION (TS-10 a TS-13), que es exactamente lo que S-016 y S-022
- * ya hacen para la misma propiedad, mas la asercion de COMPORTAMIENTO de TS-13 —el tamaño de la
- * copia del mapa no depende del lote—, que si es determinista.
+ * Asi que TS-14 se resuelve por INSPECCION (TS-10 a TS-12), que es exactamente lo que S-016 y S-022
+ * ya hacen para la misma propiedad.
  * ========================================================================================== */
 describe('la propiedad de memoria se EXTIENDE a la rama del comentario y al KV (CA-3)', () => {
   const TICK = readSource('domain/ingesta/tick.ts');
@@ -660,7 +623,9 @@ describe('la propiedad de memoria se EXTIENDE a la rama del comentario y al KV (
 
   // TS-10
   it('TS-10: la rama del comentario no declara ningun acumulador y corre DENTRO del for del lote', () => {
-    const ramaIdx = TICK.indexOf("'intencion' in route");
+    // S-032: `'intencion' in route` aparece DOS veces —la rama del alta tambien es una intencion
+    // desde REQ-008—, asi que el ancla es el `else if` que abre la rama del comentario.
+    const ramaIdx = TICK.indexOf("else if ('intencion' in route)");
     const publishIdx = TICK.indexOf('publishCommentFromMail(');
     const lookupIdx = TICK.indexOf('lookupThread(');
     const adjuntosIdx = TICK.indexOf('procesarAdjuntosDelMail(');
@@ -726,10 +691,10 @@ describe('la propiedad de memoria se EXTIENDE a la rama del comentario y al KV (
     );
     expect(moduleLevelDeclarations).toEqual([]);
 
-    // Y no hay `watch(` en ninguna forma: es `get()` puntual, deliberadamente distinto del Mapa de
-    // Tickets, que si tiene copia porque son decenas de entradas que administra un humano.
+    // Y no hay `watch(` en ninguna forma: es `get()` puntual sobre el espacio que llega por
+    // parametro. Desde S-032 el Mapa de Tickets tambien lo es: ninguno de los dos mapas tiene copia.
     expect(THREADS).not.toMatch(/watch\s*\(/);
-    expect(THREADS).toMatch(/threads\s*\.\s*get\s*\(/);
+    expect(THREADS).toMatch(/space\s*\.\s*get\s*\(/);
   });
 
   // TS-15
@@ -744,86 +709,34 @@ describe('la propiedad de memoria se EXTIENDE a la rama del comentario y al KV (
     }
   });
 
-  // TS-13 — la mitad de COMPORTAMIENTO, y la unica medicion de esta seccion que es determinista.
-  it('TS-13: la copia del mapa de slugs es del tamaño del MAPA, no del lote (30 mails, mapa de 3)', async () => {
-    bucketCounter += 1;
-    const bucket = `S028_TICKETS_${String(bucketCounter)}`;
-    await nats.seedBucket(bucket);
-    const tickets = await nats.openBucket(bucket);
-    for (const [slug, projectId] of [
-      ['alfa', '42'],
-      ['beta', '7'],
-      ['gamma', '13'],
-    ] as const) {
-      await tickets.put(slug, new TextEncoder().encode(projectId));
-    }
-
-    const threads = await freshThreads();
-    const { logger, capture } = testLoggerWithCapture();
-
-    const watch = await startTicketMapWatch({
-      tickets,
-      config: { kv: { ...BASE_CONFIG.kv, ticketsBucket: bucket } },
-      logger,
-    });
-    openWatches.push(watch);
-
-    // El `config` FINAL, cuyo `ruteo.ticketMap` ES el `Map` vivo del watch.
-    const config: AppConfig = {
-      ...BASE_CONFIG,
-      ruteo: { ...BASE_CONFIG.ruteo, ticketMap: watch.ticketMap },
-    };
-
-    expect(watch.ticketMap.size).toBe(3);
-    await responderFor('requirements.new', { status: 'success' as const, data: { id: 630 } });
-
-    // 30 mails: diez veces el tamaño del mapa. Si el tick copiara algo por mail al mapa, o si el
-    // mapa fuera del tamaño del lote, esto se veria.
-    const lote = new Map<number, Buffer>();
-    for (let uid = 30; uid >= 1; uid -= 1) lote.set(uid, mailNuevo(uid));
-
-    await runTick(sourceWith(lote), config, logger, bus.client, threads);
-
-    expect(tickLine(capture)).toMatchObject({ ingestados: 30, parseados: 30, creados: 30 });
-
-    // El tamaño del mapa NO cambio: el tick no agrega ni saca entradas. La unica mutacion del mapa
-    // es la del watch, y aca no llego ninguna.
-    expect(watch.ticketMap.size).toBe(3);
-    expect(config.ruteo.ticketMap.size).toBe(3);
-    // Y es EL MISMO objeto: si el tick lo hubiera reemplazado por una copia, la propiedad de
-    // ADR-004 (la copia se muta, nunca se reemplaza) estaria rota y el ruteo en caliente muerto.
-    expect(config.ruteo.ticketMap).toBe(watch.ticketMap);
-  }, 60_000);
 });
 
 /* ==========================================================================================
- * TAREA 3 (CA-4) — `hilo_desconocido` NO CREA NADA, EN LOS TRES CASOS QUE LO PRODUCEN
+ * TAREA 3 (CA-4) — `hilo_desconocido` NO CREA NADA, EN LOS CASOS QUE LO PRODUCEN
  *
- * Los tres son INDISTINGUIBLES A PROPOSITO: un reenvio de hilo interno, una entrada expirada por
- * el TTL, y un hilo anterior al despliegue significan lo mismo operativamente —"esta respuesta
- * apunta a un hilo que no conozco"— y el arreglo es el mismo.
+ * Son INDISTINGUIBLES A PROPOSITO: un reenvio de hilo interno y un hilo anterior al despliegue
+ * significan lo mismo operativamente —"esta respuesta apunta a un hilo que no conozco"— y el arreglo
+ * es el mismo.
  *
- * `tick-hilos.test.ts` ya cubre los DOS primeros por separado (TS-25 y TS-26 de S-026). Lo que se
- * agrega aca: el TERCERO (bucket vacio = despliegue nuevo), la afirmacion de que ninguno de los
- * tres CREA ni ESCRIBE nada, y la INDISTINGUIBILIDAD como propiedad afirmada comparando las tres
- * lineas entre si.
+ * Hasta S-032 habia un TERCER caso, la entrada expirada por el TTL de 90 dias. Desde REQ-008 los
+ * hilos no expiran (invariante 32), y sus escenarios se borraron con el TTL.
+ *
+ * `tick-hilos.test.ts` ya cubre el reenvio por separado (TS-25 de S-026). Lo que se agrega aca: el
+ * hilo anterior al despliegue (espacio sin la entrada = despliegue nuevo), la afirmacion de que
+ * ninguno CREA ni ESCRIBE nada, y la INDISTINGUIBILIDAD como propiedad afirmada comparando las lineas
+ * entre si.
  * ========================================================================================== */
-describe('runTick — los TRES casos de hilo_desconocido no crean nada (CA-4)', () => {
-  /** El resultado observable de un tick de un solo mail contra un bucket dado. */
-  async function correrUnMail(
-    mail: Buffer,
-    prepararBucket?: (threads: KV) => Promise<void>,
-  ): Promise<{
+describe('runTick — los casos de hilo_desconocido no crean nada (CA-4)', () => {
+  /** El resultado observable de un tick de un solo mail contra un espacio fresco. */
+  async function correrUnMail(mail: Buffer): Promise<{
     line: Record<string, unknown> | undefined;
     tick: Record<string, unknown> | undefined;
     altas: CoreResponder;
     comentarios: CoreResponder;
     puts: string[];
-    clavesAntes: string[];
-    clavesDespues: string[];
+    space: KvSpace;
   }> {
-    const threads = await freshThreads();
-    await prepararBucket?.(threads);
+    const space = await freshSpace();
 
     const { logger, capture } = testLoggerWithCapture();
     // Los DOS responders con exito disponible: si el tick publicara algo, se veria. Afirmar
@@ -837,19 +750,17 @@ describe('runTick — los TRES casos de hilo_desconocido no crean nada (CA-4)', 
       data: { id: 998 },
     });
 
-    const clavesAntes = await keysOf(threads);
-    const spy = spyOn(threads);
+    const spy = spyOnSpace(space);
 
-    await runTick(sourceWith(new Map([[1, mail]])), BASE_CONFIG, logger, bus.client, spy.kv);
+    await runTick(sourceWith(new Map([[1, mail]])), BASE_CONFIG, logger, bus.client, spy.space);
 
     return {
       line: discardLines(capture)[0],
       tick: tickLine(capture),
       altas,
       comentarios,
-      puts: spy.puts,
-      clavesAntes,
-      clavesDespues: await keysOf(threads),
+      puts: spy.puts.map((put) => put.key),
+      space,
     };
   }
 
@@ -884,34 +795,13 @@ describe('runTick — los TRES casos de hilo_desconocido no crean nada (CA-4)', 
     expect(result.comentarios.count()).toBe(0);
   });
 
-  // TS-17 — CASO 2: la entrada expiro por el TTL. Y NO crea un Requisito duplicado.
-  it('TS-17: caso 2 — la entrada expiro por el TTL, y NO crea un Requisito duplicado', async () => {
-    const result = await correrUnMail(
-      mailRespuesta(1, { inReplyTo: REFERENCIA_CON_MATCH }),
-      async (threads) => {
-        // El TTL de 90 dias no se puede esperar en un test. Lo que el `get()` ve al expirar una
-        // entrada es EXACTAMENTE lo que ve tras un `delete()`: la clave no esta. Se siembra y se
-        // borra, que es la unica forma honesta de expresarlo.
-        await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
-        await threads.delete(sha256hex(REFERENCIA_CON_MATCH));
-      },
-    );
-
-    expect(result.line).toMatchObject({ motivo: 'hilo_desconocido' });
-    expect(result.tick).toMatchObject({ descartados: 1, creados: 0, comentados: 0 });
-    // LA ASERCION CENTRAL DEL CASO: un `hilo_desconocido` NO cae de vuelta al alta. Si lo hiciera,
-    // cada respuesta a un hilo viejo crearia un requisito DUPLICADO, que es el modo de falla que
-    // el motivo propio existe para evitar.
-    expect(result.altas.count()).toBe(0);
-    expect(result.comentarios.count()).toBe(0);
-  });
-
   // TS-18 — CASO 3: un hilo anterior al despliegue. Es el caso que faltaba.
-  it('TS-18: caso 3 — un hilo anterior al despliegue (bucket VACIO, el estado de todo despliegue nuevo)', async () => {
+  it('TS-18: caso 3 — un hilo anterior al despliegue (espacio SIN la entrada, el estado de todo despliegue nuevo)', async () => {
     const result = await correrUnMail(mailRespuesta(1, { inReplyTo: '<viejo@cliente.com>' }));
 
-    // El bucket vacio ES el estado de un despliegue nuevo: no hace falta simular nada mas.
-    expect(result.clavesAntes).toEqual([]);
+    // El espacio fresco sin la entrada ES el estado de un despliegue nuevo: no hace falta simular
+    // nada mas.
+    expect(await result.space.get(threadKey('<viejo@cliente.com>'))).toBeUndefined();
     expect(result.line).toMatchObject({ motivo: 'hilo_desconocido' });
     expect(result.tick).toMatchObject({ descartados: 1, creados: 0, comentados: 0, fallidos: 0 });
     expect(result.altas.count()).toBe(0);
@@ -919,7 +809,7 @@ describe('runTick — los TRES casos de hilo_desconocido no crean nada (CA-4)', 
   });
 
   // TS-19 — LA INDISTINGUIBILIDAD, afirmada comparando las tres lineas ENTRE SI.
-  it('TS-19: los tres casos son INDISTINGUIBLES — mismo msg, mismo motivo, ningun campo diferenciador', async () => {
+  it('TS-19: los casos son INDISTINGUIBLES — mismo msg, mismo motivo, ningun campo diferenciador', async () => {
     const fwd = await correrUnMail(
       Buffer.from(
         'Message-Id: <fwd-2@grava.io>\r\n' +
@@ -931,47 +821,31 @@ describe('runTick — los TRES casos de hilo_desconocido no crean nada (CA-4)', 
           'Reenvio.\r\n',
       ),
     );
-    const expirada = await correrUnMail(
-      mailRespuesta(2, { inReplyTo: REFERENCIA_CON_MATCH }),
-      async (threads) => {
-        await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
-        await threads.delete(sha256hex(REFERENCIA_CON_MATCH));
-      },
-    );
     const anterior = await correrUnMail(mailRespuesta(3, { inReplyTo: '<viejo@cliente.com>' }));
 
-    const lineas = [fwd.line, expirada.line, anterior.line];
+    const lineas = [fwd.line, anterior.line];
     for (const line of lineas) expect(line).toBeDefined();
 
-    // El mismo `msg` y el mismo `motivo` en los tres.
-    expect(lineas.map((l) => l?.['msg'])).toEqual([
-      'mail descartado',
-      'mail descartado',
-      'mail descartado',
-    ]);
-    expect(lineas.map((l) => l?.['motivo'])).toEqual([
-      'hilo_desconocido',
-      'hilo_desconocido',
-      'hilo_desconocido',
-    ]);
+    // El mismo `msg` y el mismo `motivo` en los dos.
+    expect(lineas.map((l) => l?.['msg'])).toEqual(['mail descartado', 'mail descartado']);
+    expect(lineas.map((l) => l?.['motivo'])).toEqual(['hilo_desconocido', 'hilo_desconocido']);
 
     // Y NINGUN campo diferenciador: la FORMA de la linea es identica, salvo el `messageId` (que es
     // del mail, no del caso) y el `time` de pino. Se compara el juego de claves entre si, no cada
     // uno contra una constante: es lo que detecta que alguien agregue un campo "para ayudar al
     // diagnostico" y rompa la propiedad sin querer.
     //
-    // ES DELIBERADO. Los tres significan lo mismo operativamente y el arreglo es el mismo; un
+    // ES DELIBERADO. Los dos significan lo mismo operativamente y el arreglo es el mismo; un
     // campo que los distinga invitaria a tratarlos distinto, y no hay nada distinto que hacer.
     const shape = (line: Record<string, unknown> | undefined): string[] =>
       Object.keys(line ?? {})
         .filter((key) => key !== 'time' && key !== 'messageId')
         .sort();
-    expect(shape(expirada.line)).toEqual(shape(fwd.line));
     expect(shape(anterior.line)).toEqual(shape(fwd.line));
   });
 
-  // TS-20 — ninguno de los tres deja NADA escrito.
-  it('TS-20: los tres casos no dejan nada escrito — put() no se invoca ni una vez', async () => {
+  // TS-20 — ninguno deja NADA escrito.
+  it('TS-20: los casos no dejan nada escrito — put() no se invoca ni una vez', async () => {
     const fwd = await correrUnMail(
       Buffer.from(
         'Message-Id: <fwd-3@grava.io>\r\n' +
@@ -982,25 +856,23 @@ describe('runTick — los TRES casos de hilo_desconocido no crean nada (CA-4)', 
           'Reenvio.\r\n',
       ),
     );
-    const expirada = await correrUnMail(
-      mailRespuesta(4, { inReplyTo: REFERENCIA_CON_MATCH }),
-      async (threads) => {
-        await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
-        await threads.delete(sha256hex(REFERENCIA_CON_MATCH));
-      },
-    );
     const anterior = await correrUnMail(mailRespuesta(5, { inReplyTo: '<viejo@cliente.com>' }));
 
-    for (const result of [fwd, expirada, anterior]) {
-      // El bucket queda EXACTAMENTE como estaba.
-      expect(result.clavesDespues).toEqual(result.clavesAntes);
-      // Y el `put()` no se llamo: la asercion sobre el KV espia que envuelve el handle REAL, no
-      // sobre un doble. Sin esto, un `put()` que escribiera y borrara pasaria inadvertido.
+    for (const result of [fwd, anterior]) {
+      // El `put()` no se llamo: la asercion sobre el KV espia que envuelve el handle REAL, no sobre
+      // un doble. El `KV` del SDK no lista claves (S-032), asi que "el espacio queda EXACTAMENTE
+      // como estaba" se afirma sobre lo que el codigo PIDIO escribir.
       expect(result.puts).toEqual([]);
     }
 
-    // Y el caso del despliegue nuevo termina con el bucket vacio, como empezo.
-    expect(anterior.clavesDespues).toEqual([]);
+    // Y ninguna de las claves en juego aparecio: ni la del propio mail ni las de sus referencias.
+    for (const messageId of ['<fwd-3@grava.io>', '<interno-4@grava.io>']) {
+      expect(await fwd.space.get(threadKey(messageId))).toBeUndefined();
+    }
+    // El caso del despliegue nuevo termina sin la entrada, como empezo.
+    for (const messageId of ['<reply-5@fixtures.local>', '<viejo@cliente.com>']) {
+      expect(await anterior.space.get(threadKey(messageId))).toBeUndefined();
+    }
   });
 });
 
@@ -1009,8 +881,8 @@ describe('runTick — los TRES casos de hilo_desconocido no crean nada (CA-4)', 
  * ========================================================================================== */
 describe('runTick — el write que falla NO cancela el alta (CA-10)', () => {
   // TS-21
-  it('TS-21: creados NO se revierte, y el warn nombra messageId, messageIdHash y requirementId', async () => {
-    const threads = await freshThreads();
+  it('TS-21: creados NO se revierte, y el warn nombra messageId, messageIdHash, requirementId y errorClass', async () => {
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await responderFor('requirements.new', { status: 'success' as const, data: { id: 600 } });
 
@@ -1019,7 +891,7 @@ describe('runTick — el write que falla NO cancela el alta (CA-10)', () => {
       BASE_CONFIG,
       logger,
       bus.client,
-      withFailingPut(threads),
+      withFailingPut(space),
     );
 
     // El requisito YA EXISTE en Jiku y no hay comando de compensacion (invariante 9): revertir el
@@ -1031,13 +903,15 @@ describe('runTick — el write que falla NO cancela el alta (CA-10)', () => {
       .find((line) => line['level'] === 'warn' && line['requirementId'] === 600);
     expect(warn).toBeDefined();
     expect(warn?.['messageId']).toBe('<uid-1@fixtures.local>');
-    expect(warn?.['messageIdHash']).toBe(sha256hex('<uid-1@fixtures.local>'));
+    expect(warn?.['messageIdHash']).toBe(sha256('<uid-1@fixtures.local>'));
+    // S-032: la CLASE del error del SDK (el timeout de `withFailingPut()` es un `JikuError`).
+    expect(warn?.['errorClass']).toBe('JikuError');
     expect(String(warn?.['msg'])).toContain('no se pudo escribir la entrada del Mapa de Hilos');
   });
 
   // TS-22
   it('TS-22: el tick sigue con el resto del lote — tres altas, tres warns, tres publicaciones', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     const altas = await responderFor('requirements.new', [
       { status: 'success' as const, data: { id: 601 } },
@@ -1053,7 +927,7 @@ describe('runTick — el write que falla NO cancela el alta (CA-10)', () => {
       ]),
     );
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, withFailingPut(threads));
+    await runTick(source, BASE_CONFIG, logger, bus.client, withFailingPut(space));
 
     expect(tickLine(capture)).toMatchObject({
       ingestados: 3,
@@ -1070,13 +944,15 @@ describe('runTick — el write que falla NO cancela el alta (CA-10)', () => {
     ).toHaveLength(3);
     expect(altas.count()).toBe(3);
     expect(source.markSeenCalls).toEqual([3, 2, 1]);
-    // Y el bucket quedo vacio: los tres writes fallaron.
-    expect(await countKeys(threads)).toBe(0);
+    // Y el Mapa de Hilos quedo sin ninguna de las tres entradas: los tres writes fallaron.
+    for (const uid of [3, 2, 1]) {
+      expect(await space.get(threadKey(`<uid-${String(uid)}@fixtures.local>`))).toBeUndefined();
+    }
   });
 
   // TS-23
   it('TS-23: con el bucket inaccesible una RESPUESTA es es_respuesta, NO hilo_desconocido', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     const altas = await responderFor('requirements.new', {
       status: 'success' as const,
@@ -1092,7 +968,7 @@ describe('runTick — el write que falla NO cancela el alta (CA-10)', () => {
       BASE_CONFIG,
       logger,
       bus.client,
-      withFailingGet(threads),
+      withFailingGet(space),
     );
 
     // LA DISTINCION IMPORTA, y es la razon de que `ThreadLookupResult` tenga TRES estados y no
@@ -1127,9 +1003,10 @@ describe('runTick — el write que falla NO cancela el alta (CA-10)', () => {
 describe('runTick — el write del comentario esta condicionado al success (CA-11)', () => {
   // TS-24
   it('TS-24: si el comentario FALLA, la entrada del Message-Id de la respuesta NO existe', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
-    await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
+    await space.put(threadKey(REFERENCIA_CON_MATCH), '500');
+    const spy = spyOnSpace(space);
 
     await responderFor('requirements.new', { status: 'success' as const, data: { id: 999 } });
     const comentarios = await responderFor('requirements.*.comment', {
@@ -1142,13 +1019,14 @@ describe('runTick — el write del comentario esta condicionado al success (CA-1
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      spy.space,
     );
 
     // NO existe la entrada de la respuesta.
-    expect(await threads.get(sha256hex('<reply-1@fixtures.local>'))).toBeNull();
-    // Y el bucket sigue teniendo SOLO la sembrada.
-    expect(await keysOf(threads)).toEqual([sha256hex(REFERENCIA_CON_MATCH)]);
+    expect(await space.get(threadKey('<reply-1@fixtures.local>'))).toBeUndefined();
+    // Y el Mapa de Hilos sigue teniendo SOLO la sembrada: intacta, y ningun write en todo el tick.
+    expect(await valueOf(space, threadKey(REFERENCIA_CON_MATCH))).toBe('500');
+    expect(spy.puts).toEqual([]);
 
     expect(tickLine(capture)).toMatchObject({ fallidos: 1, comentados: 0, creados: 0 });
     expect(comentarios.count()).toBe(1);
@@ -1162,9 +1040,10 @@ describe('runTick — el write del comentario esta condicionado al success (CA-1
 
   // TS-25
   it('TS-25: y el tick continua con los mails restantes del lote', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
-    await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
+    await space.put(threadKey(REFERENCIA_CON_MATCH), '500');
+    const spy = spyOnSpace(space);
 
     const altas = await responderFor('requirements.new', {
       status: 'success' as const,
@@ -1185,7 +1064,7 @@ describe('runTick — el write del comentario esta condicionado al success (CA-1
       ]),
     );
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, threads);
+    await runTick(source, BASE_CONFIG, logger, bus.client, spy.space);
 
     expect(tickLine(capture)).toMatchObject({
       ingestados: 3,
@@ -1201,23 +1080,24 @@ describe('runTick — el write del comentario esta condicionado al success (CA-1
     // fallido no lo revierte (no hay forma de revertirlo, y ADR-001 lo asume).
     expect(source.markSeenCalls).toEqual([3, 2, 1]);
 
-    // El bucket tiene la sembrada, la del alta y la de LA RESPUESTA QUE SI COMENTO. La de la que
-    // fallo no esta: son tres, no cuatro.
-    expect(await keysOf(threads)).toEqual(
-      [
-        sha256hex(REFERENCIA_CON_MATCH),
-        sha256hex('<uid-2@fixtures.local>'),
-        sha256hex('<reply-1@fixtures.local>'),
-      ].sort(),
+    // El Mapa de Hilos tiene la sembrada, la del alta y la de LA RESPUESTA QUE SI COMENTO. La de la
+    // que fallo no esta: son tres, no cuatro. El `KV` del SDK no lista claves (S-032): se leen por
+    // su clave, y se afirma que se escribieron EXACTAMENTE las dos nuevas.
+    expect(await valueOf(space, threadKey(REFERENCIA_CON_MATCH))).toBe('500');
+    expect(await valueOf(space, threadKey('<uid-2@fixtures.local>'))).toBe('604');
+    expect(await valueOf(space, threadKey('<reply-1@fixtures.local>'))).toBe('500');
+    expect(await space.get(threadKey('<reply-3@fixtures.local>'))).toBeUndefined();
+    expect(spy.puts.map((put) => put.key).sort()).toEqual(
+      [`hilos.${sha256('<uid-2@fixtures.local>')}`, `hilos.${sha256('<reply-1@fixtures.local>')}`].sort(),
     );
   });
 
   // TS-26 — EL ORDEN, sin sleeps: un contador monotonico en el espia y en el handler.
   it('TS-26: el put() ocurre DESPUES de que el responder contesto; con el responder mudo no hay put()', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger } = testLoggerWithCapture();
-    await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
-    const spy = spyOn(threads);
+    await space.put(threadKey(REFERENCIA_CON_MATCH), '500');
+    const spy = spyOnSpaceWithClock(space);
 
     // El instante de la recepcion se toma del MISMO contador monotonico que el espia del `put()`.
     //
@@ -1248,11 +1128,11 @@ describe('runTick — el write del comentario esta condicionado al success (CA-1
         BASE_CONFIG,
         logger,
         bus.client,
-        spy.kv,
+        spy.space,
       );
 
       // El `put()` de la RESPUESTA ocurrio, y DESPUES de que el responder recibio y contesto.
-      expect(spy.puts).toEqual([sha256hex('<reply-1@fixtures.local>')]);
+      expect(spy.puts).toEqual([{ key: `hilos.${sha256('<reply-1@fixtures.local>')}`, value: '500' }]);
       expect(recepcionTick).toBeDefined();
       expect(spy.putTicks[0]).toBeGreaterThan(Number(recepcionTick));
     } finally {
@@ -1262,9 +1142,9 @@ describe('runTick — el write del comentario esta condicionado al success (CA-1
     // Y la contracara: con el responder MUDO (recibe y no contesta) no hay NINGUN put() de la
     // clave de la respuesta. Es lo que prueba que el write depende del `success` y no de haber
     // llegado a publicar.
-    const threads2 = await freshThreads();
-    await threads2.put(sha256hex(REFERENCIA_CON_MATCH), '500');
-    const spy2 = spyOn(threads2);
+    const space2 = await freshSpace();
+    await space2.put(threadKey(REFERENCIA_CON_MATCH), '500');
+    const spy2 = spyOnSpace(space2);
     const { logger: logger2, capture: capture2 } = testLoggerWithCapture();
 
     const mudo = await responderFor('requirements.*.comment', MUTE);
@@ -1276,12 +1156,12 @@ describe('runTick — el write del comentario esta condicionado al success (CA-1
       { ...BASE_CONFIG, timeoutMs: 1_500 },
       logger2,
       bus.client,
-      spy2.kv,
+      spy2.space,
     );
 
     expect(mudo.count()).toBe(1);
     expect(spy2.puts).toEqual([]);
-    expect(await threads2.get(sha256hex('<reply-2@fixtures.local>'))).toBeNull();
+    expect(await space2.get(threadKey('<reply-2@fixtures.local>'))).toBeUndefined();
     expect(tickLine(capture2)).toMatchObject({ fallidos: 1, comentados: 0 });
   }, 60_000);
 });
@@ -1304,9 +1184,9 @@ describe('runTick — los seis contadores distinguen altas de comentarios (CA-12
 
   // TS-27
   it('TS-27: 2 altas + 1 comentario + 1 descarte dan creados:2 y comentados:1 — NO se suman', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
-    await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
+    await space.put(threadKey(REFERENCIA_CON_MATCH), '500');
 
     // SOLO DOS ids para el alta: si el tick publicara un alta de mas, el responder repetiria la
     // ultima y el exceso se veria en `count()`.
@@ -1331,7 +1211,7 @@ describe('runTick — los seis contadores distinguen altas de comentarios (CA-12
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      space,
     );
 
     expect(tickLine(capture)).toMatchObject({
@@ -1355,7 +1235,7 @@ describe('runTick — los seis contadores distinguen altas de comentarios (CA-12
 
   // TS-28
   it('TS-28: descartados absorbe hilo_desconocido junto con los otros tres motivos', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     const altas = await responderFor('requirements.new', {
       status: 'success' as const,
@@ -1374,7 +1254,7 @@ describe('runTick — los seis contadores distinguen altas de comentarios (CA-12
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      space,
     );
 
     expect(tickLine(capture)).toMatchObject({
@@ -1400,16 +1280,16 @@ describe('runTick — los seis contadores distinguen altas de comentarios (CA-12
     ]);
 
     // Y la de `slug_no_mapeado` incluye EL SLUG BUSCADO: es el dato que hace falta para cargarlo
-    // (ADR-006). Sin el, el operador sabe que algo se descarto pero no que poner en el bucket.
+    // (ADR-006). Sin el, el operador sabe que algo se descarto pero no que cargar en el espacio.
     const noMapeado = capture.lines().find((line) => line['motivo'] === 'slug_no_mapeado');
     expect(noMapeado?.['slug']).toBe('beta');
   });
 
   // TS-29
   it('TS-29: la linea trae EXACTAMENTE las seis claves, ni una mas ni una menos', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
-    await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
+    await space.put(threadKey(REFERENCIA_CON_MATCH), '500');
     await responderFor('requirements.new', { status: 'success' as const, data: { id: 612 } });
     await responderFor('requirements.*.comment', {
       status: 'success' as const,
@@ -1426,7 +1306,7 @@ describe('runTick — los seis contadores distinguen altas de comentarios (CA-12
       BASE_CONFIG,
       logger,
       bus.client,
-      threads,
+      space,
     );
 
     expect(counterKeys(tickLine(capture))).toEqual([
@@ -1441,7 +1321,7 @@ describe('runTick — los seis contadores distinguen altas de comentarios (CA-12
 
   // TS-30
   it('TS-30: la linea se emite igual cuando el tick FALLA, con los seis en 0', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
 
     const source: MailSource = {
@@ -1454,7 +1334,7 @@ describe('runTick — los seis contadores distinguen altas de comentarios (CA-12
 
     // Los contadores se declaran FUERA del `try`, y la linea sale en el `finally`: es lo que
     // permite que la unica señal operativa del tick exista incluso cuando el tick no hizo nada.
-    await expect(runTick(source, BASE_CONFIG, logger, bus.client, threads)).rejects.toThrow();
+    await expect(runTick(source, BASE_CONFIG, logger, bus.client, space)).rejects.toThrow();
 
     expect(tickLine(capture)).toMatchObject({
       ingestados: 0,
@@ -1481,55 +1361,60 @@ describe('runTick — los seis contadores distinguen altas de comentarios (CA-12
 describe('runTick — el KV NO participa de la idempotencia (CA-13)', () => {
   // TS-51
   it('TS-51: un mail ya \\Seen NO se reprocesa, aunque su entrada del hilo nunca se haya escrito', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     await responderFor('requirements.new', { status: 'success' as const, data: { id: 640 } });
 
     // TICK 1: el mail se procesa, queda \Seen, y el write FALLA — que es exactamente el estado que
     // deja "el proceso murio antes de escribir la entrada".
     const { logger: l1, capture: c1 } = testLoggerWithCapture();
     const source1 = sourceWith(new Map([[1, mailNuevo(1)]]));
-    await runTick(source1, BASE_CONFIG, l1, bus.client, withFailingPut(threads));
+    await runTick(source1, BASE_CONFIG, l1, bus.client, withFailingPut(space));
 
     expect(tickLine(c1)).toMatchObject({ ingestados: 1, creados: 1 });
     expect(source1.markSeenCalls).toEqual([1]);
     // La entrada NO esta: el hilo quedo sin ruteo.
-    expect(await threads.get(sha256hex('<uid-1@fixtures.local>'))).toBeNull();
+    expect(await space.get(threadKey('<uid-1@fixtures.local>'))).toBeUndefined();
 
     // TICK 2: el mail esta \Seen, asi que `searchUnseen()` no lo devuelve.
     const { logger: l2, capture: c2 } = testLoggerWithCapture();
-    await runTick(sourceWith(new Map()), BASE_CONFIG, l2, bus.client, threads);
+    const spy2 = spyOnSpace(space);
+    await runTick(sourceWith(new Map()), BASE_CONFIG, l2, bus.client, spy2.space);
 
     // LA ASERCION CENTRAL ES NEGATIVA: no se reprocesa. Y lo que lo evito fue el `\Seen`, NO el KV
-    // —el bucket no tiene su entrada, asi que si el conector consultara el bucket para decidir,
-    // este mail se habria reprocesado y habria creado un requisito DUPLICADO.
+    // —el espacio no tiene su entrada, asi que si el conector consultara el KV para decidir, este
+    // mail se habria reprocesado y habria creado un requisito DUPLICADO.
     expect(tickLine(c2)).toMatchObject({ ingestados: 0, parseados: 0, creados: 0 });
-    expect(await countKeys(threads)).toBe(0);
+    // El tick 2 no toco el KV en absoluto, y la entrada sigue sin estar.
+    expect(spy2.gets).toEqual([]);
+    expect(spy2.puts).toEqual([]);
+    expect(await space.get(threadKey('<uid-1@fixtures.local>'))).toBeUndefined();
   });
 
   // TS-52
-  it('TS-52: un mail cuyo hash YA esta en el bucket se procesa igual, y un mail nuevo paga CERO get()', async () => {
-    const threads = await freshThreads();
+  it('TS-52: un mail cuyo hash YA esta en el espacio se procesa igual, y un mail nuevo paga CERO get() al Mapa de Hilos', async () => {
+    const space = await freshSpace();
     const { logger, capture } = testLoggerWithCapture();
     await responderFor('requirements.new', { status: 'success' as const, data: { id: 641 } });
 
-    // La entrada ya existe: si el conector usara el bucket para deduplicar, este mail se saltearia.
-    await threads.put(sha256hex('<uid-1@fixtures.local>'), '999');
-    const spy = spyOn(threads);
+    // La entrada ya existe: si el conector usara el KV para deduplicar, este mail se saltearia.
+    await space.put(threadKey('<uid-1@fixtures.local>'), '999');
+    const spy = spyOnSpace(space);
 
     const source = sourceWith(new Map([[1, mailNuevo(1)]]));
-    await runTick(source, BASE_CONFIG, logger, bus.client, spy.kv);
+    await runTick(source, BASE_CONFIG, logger, bus.client, spy.space);
 
     expect(tickLine(capture)).toMatchObject({ ingestados: 1, creados: 1, descartados: 0 });
     expect(source.markSeenCalls).toEqual([1]);
 
-    // CERO `get()`: un mail NUEVO no paga NINGUN round-trip de lectura. Es la mitad de la propiedad
-    // que hace que el KV no sea un costo por mail sino por RESPUESTA.
-    expect(spy.gets).toEqual([]);
+    // CERO `get()` al Mapa de Hilos: un mail NUEVO no paga ningun round-trip de lectura del hilo. Es
+    // la mitad de la propiedad que hace que el Mapa de Hilos no sea un costo por mail sino por
+    // RESPUESTA. Su UNICA lectura es la consulta de su slug, una sola (S-032).
+    expect(spy.gets.filter((key) => key.startsWith('hilos.'))).toEqual([]);
+    expect(spy.gets).toEqual(['tickets.alfa']);
     // Y el write PISA la entrada con el requisito nuevo: la ultima escritura vale, sin ninguna
     // rama de "ya existia".
-    expect(spy.puts).toEqual([sha256hex('<uid-1@fixtures.local>')]);
-    const entry = await threads.get(sha256hex('<uid-1@fixtures.local>'));
-    expect(Number.parseInt(entry?.string() ?? '', 10)).toBe(641);
+    expect(spy.puts).toEqual([{ key: `hilos.${sha256('<uid-1@fixtures.local>')}`, value: '641' }]);
+    expect(await valueOf(space, threadKey('<uid-1@fixtures.local>'))).toBe('641');
   });
 
   // TS-53 — la propiedad de CODIGO. El complemento del TS-37 de
@@ -1543,14 +1428,20 @@ describe('runTick — el KV NO participa de la idempotencia (CA-13)', () => {
     expect(invocaciones).toHaveLength(1);
 
     const markSeenIdx = code.indexOf('mailSource.markSeen(uid)');
-    const ramaIdx = code.indexOf("'intencion' in route");
+    // S-032: desde REQ-008 el alta TAMBIEN es una intencion (`route.intencion === 'alta'`), asi que
+    // las anclas son las dos ramas: la del alta abre con su discriminante, la de la respuesta con el
+    // `else if` que la sigue.
+    const altaIdx = code.indexOf("route.intencion === 'alta'");
+    const ramaIdx = code.indexOf("else if ('intencion' in route)");
     const lookupIdx = code.indexOf('lookupThread(');
     const publishRequirementIdx = code.indexOf('publishRequirementFromMail(');
 
     expect(markSeenIdx).toBeGreaterThan(-1);
+    expect(altaIdx).toBeGreaterThan(-1);
     // DESPUES del markSeen: ninguna consulta al KV puede saltear un mail.
     expect(lookupIdx).toBeGreaterThan(markSeenIdx);
-    // Y DENTRO de la rama de la respuesta, que empieza despues del alta.
+    // Y DENTRO de la rama de la respuesta, que empieza despues de la del alta (y de su publicacion).
+    expect(publishRequirementIdx).toBeGreaterThan(altaIdx);
     expect(ramaIdx).toBeGreaterThan(publishRequirementIdx);
     expect(lookupIdx).toBeGreaterThan(ramaIdx);
   });
@@ -1574,7 +1465,7 @@ describe('runTick — el dedup contra el hilo NO existe, y es DELIBERADO (CA-14)
 
   // TS-54 y TS-55: el escenario, con el porque escrito en el nombre y en el bloque de arriba.
   it('TS-54/TS-55: el mismo adjunto del alta se sube DE NUEVO en la respuesta, sin consultar el hilo', async () => {
-    const threads = await freshThreads();
+    const space = await freshSpace();
     const http = await startHttpServer(() => 200);
 
     const uploads = await responderFor('files.request-upload', [
@@ -1608,7 +1499,7 @@ describe('runTick — el dedup contra el hilo NO existe, y es DELIBERADO (CA-14)
         BASE_CONFIG,
         l1,
         bus.client,
-        threads,
+        space,
       );
 
       expect(tickLine(c1)).toMatchObject({ creados: 1, fallidos: 0 });
@@ -1618,7 +1509,7 @@ describe('runTick — el dedup contra el hilo NO existe, y es DELIBERADO (CA-14)
 
       // TICK 2: la respuesta arrastra EL MISMO pdf (mismo checksum), que es lo que hace Gmail.
       const { logger: l2, capture: c2 } = testLoggerWithCapture();
-      const spy = spyOn(threads);
+      const spy = spyOnSpace(space);
       await runTick(
         sourceWith(
           new Map([
@@ -1635,7 +1526,7 @@ describe('runTick — el dedup contra el hilo NO existe, y es DELIBERADO (CA-14)
         BASE_CONFIG,
         l2,
         bus.client,
-        spy.kv,
+        spy.space,
       );
 
       expect(tickLine(c2)).toMatchObject({ comentados: 1, creados: 0, fallidos: 0 });
@@ -1648,10 +1539,11 @@ describe('runTick — el dedup contra el hilo NO existe, y es DELIBERADO (CA-14)
       expect(comentario['fileIds']).toEqual([8]);
 
       // NO SE CONSULTA NADA AL HILO ANTES DE SUBIR: el unico `get()` del tick es el del LOOKUP del
-      // hilo, no uno por adjunto. Si hubiera dedup contra el hilo, aca habria dos o mas.
-      expect(spy.gets).toEqual([sha256hex('<orig-pdf@cliente.com>')]);
+      // hilo, no uno por adjunto. Si hubiera dedup contra el hilo, aca habria dos o mas. (Y la
+      // respuesta tampoco consulta su slug: se comenta sin evaluarlo, invariante 26.)
+      expect(spy.gets).toEqual([`hilos.${sha256('<orig-pdf@cliente.com>')}`]);
       // El write de la respuesta si esta: cierra el ciclo del hilo.
-      expect(spy.puts).toEqual([sha256hex('<reply-pdf@cliente.com>')]);
+      expect(spy.puts).toEqual([{ key: `hilos.${sha256('<reply-pdf@cliente.com>')}`, value: '650' }]);
     } finally {
       await http.close();
     }
@@ -1660,8 +1552,8 @@ describe('runTick — el dedup contra el hilo NO existe, y es DELIBERADO (CA-14)
   // TS-56 — el dedup INTRA-mail sigue vigente. Es el que NO se toca: colapsa adjuntos identicos
   // del MISMO mail, sin ninguna consulta a ningun lado.
   it('TS-56: el dedup INTRA-mail sigue existiendo — 3 adjuntos, 2 iguales, dan 2 permisos y 2 PUT', async () => {
-    const threads = await freshThreads();
-    await threads.put(sha256hex(REFERENCIA_CON_MATCH), '500');
+    const space = await freshSpace();
+    await space.put(threadKey(REFERENCIA_CON_MATCH), '500');
     const http = await startHttpServer(() => 200);
 
     const uploads = await responderFor('files.request-upload', [
@@ -1698,7 +1590,7 @@ describe('runTick — el dedup contra el hilo NO existe, y es DELIBERADO (CA-14)
         BASE_CONFIG,
         logger,
         bus.client,
-        threads,
+        space,
       );
 
       expect(tickLine(capture)).toMatchObject({ comentados: 1, fallidos: 0 });

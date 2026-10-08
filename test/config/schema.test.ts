@@ -9,10 +9,6 @@ import {
   DEFAULT_ALLOWED_MIME_TYPES,
   DEFAULT_IMAP_PORT,
   DEFAULT_ISSUER,
-  DEFAULT_KV_THREADS_BUCKET,
-  DEFAULT_KV_THREADS_TTL_DAYS,
-  DEFAULT_KV_TICKETS_BUCKET,
-  DEFAULT_KV_WATCH_RETRY_MS,
   DEFAULT_MAX_ATTACHMENT_SIZE_BYTES,
   DEFAULT_PLACEHOLDER_BODY,
   DEFAULT_PLACEHOLDER_TITLE,
@@ -146,14 +142,15 @@ describe('envSchema', () => {
   // INVERTIDO DOS VECES, nunca borrado, y el historial es el punto. La primera mitad la INVIRTIO
   // S-007 (hasta S-006 afirmaba que NINGUNA clave empezaba con 'IMAP_'); la segunda la invirtio
   // S-012 (hasta S-011 afirmaba que las del Mapa de Tickets estaban ausentes). **S-025 la vuelve a
-  // invertir**: el mapa se muda al KV y sus dos claves desaparecen del schema. Un test borrado no
-  // dejaria rastro de que la regla cambio a proposito.
-  // (TS-25, TS-36, TS-42; TS-27 de S-025)
+  // invertir**: el mapa se muda al KV y sus dos claves desaparecen del schema. **S-032 invierte la
+  // de las cuatro `KV_*`**: el estado pasa al Espacio KV del SDK (bucket fijo, sin TTL, sin watch)
+  // y las cuatro desaparecen. Un test borrado no dejaria rastro de que la regla cambio a proposito.
+  // (TS-25, TS-36, TS-42; TS-27 de S-025; TS-50 de S-032)
   it('declares the four IMAP and three POLL variables, the three routing ones, and the four attachment policy ones', () => {
     const declared = Object.keys(envSchema);
 
-    // Veintiocho desde S-025: las treinta de S-024 menos las dos del Mapa de Tickets.
-    expect(declared).toHaveLength(28);
+    // Veinticuatro desde S-032: las veintiocho de S-025 menos las cuatro `KV_*`.
+    expect(declared).toHaveLength(24);
     for (const name of ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASSWORD']) {
       expect(declared, name).toContain(name);
     }
@@ -178,13 +175,15 @@ describe('envSchema', () => {
     ]) {
       expect(declared, name).toContain(name);
     }
+    // TS-50 de S-032: las cuatro claves del KV NO EXISTEN. Mismo criterio que TS-27 de S-025: la
+    // cuenta y la ausencia se rompen juntas si alguien repone una.
     for (const name of [
       'KV_TICKETS_BUCKET',
       'KV_THREADS_BUCKET',
       'KV_THREADS_TTL_DAYS',
       'KV_WATCH_RETRY_MS',
     ]) {
-      expect(declared, name).toContain(name);
+      expect(declared, name).not.toContain(name);
     }
   });
 
@@ -418,15 +417,16 @@ describe('envSchema IMAP requirement independence', () => {
  * parseo del JSON, la normalizacion a minusculas, el mapa vacio, los projectId invalidos, los slugs
  * duplicados, y la limitacion declarada de la clave exactamente repetida. **Se eliminaron enteros,
  * y no es perdida de cobertura**: no probaban una propiedad del sistema, probaban un MECANISMO que
- * dejo de existir. Su equivalente vive ahora en `test/infra/kv/ticket-map.test.ts`, contra el
- * bucket real.
+ * dejo de existir. Su equivalente vivio en `test/infra/kv/ticket-map.test.ts` (el `watch()` de
+ * S-025) y, desde S-032, en `test/infra/kv/tickets.test.ts` (`lookupTicket()`, contra el Espacio KV
+ * real).
  *
  * En particular, la deteccion propia de slugs duplicados NO se reubico: el almacen KV no admite
  * claves duplicadas —dos `put` sobre la misma clave son una actualizacion, no dos entradas— asi que
  * ese modo de falla dejo de ser posible. No habia nada que trasladar.
  *
- * Lo que SI se conserva de aquel bloque, en el nuevo archivo: la normalizacion a minusculas en las
- * dos puntas, el mapa vacio como estado valido, y que el `projectId` no se valida contra Jiku.
+ * Lo que SI se conserva de aquel bloque: la normalizacion a minusculas en las dos puntas, el mapa
+ * vacio como estado valido, y que el `projectId` no se valida contra Jiku.
  */
 
 describe('envSchema routing defaults', () => {
@@ -561,44 +561,3 @@ describe('envSchema attachment policy defaults', () => {
   });
 });
 
-describe('envSchema KV defaults', () => {
-  // Los cuatro defaults van como constantes NOMBRADAS y exportadas, siguiendo el precedente de
-  // DEFAULT_IMAP_PORT / DEFAULT_POLL_CRON: un default que otra story tenga que referir no se
-  // copia, se importa. S-025 va a referir DEFAULT_KV_WATCH_RETRY_MS sin volver a escribir 30000.
-  it('exposes the four KV defaults as named constants', () => {
-    expect(DEFAULT_KV_TICKETS_BUCKET).toBe('TICKETS');
-    expect(DEFAULT_KV_THREADS_BUCKET).toBe('MAIL_THREADS');
-    expect(DEFAULT_KV_THREADS_TTL_DAYS).toBe(90);
-    expect(DEFAULT_KV_WATCH_RETRY_MS).toBe(30_000);
-  });
-
-  // Los dos nombres de bucket por default tienen que ser validos contra el `validBucketRe` de
-  // @nats-io/kv (lib/kv.js:88), o el conector fallaria al arrancar con la configuracion por
-  // default — que es el peor modo de falla posible para un default.
-  it('keeps both default bucket names valid against the KV bucket-name rule', () => {
-    const validBucketRe = /^[-\w]+$/;
-
-    expect(validBucketRe.test(DEFAULT_KV_TICKETS_BUCKET)).toBe(true);
-    expect(validBucketRe.test(DEFAULT_KV_THREADS_BUCKET)).toBe(true);
-  });
-
-  it('applies the four defaults when only the required variables are present', () => {
-    const parsed = schema.parse(VALID_ENV);
-
-    expect(parsed.KV_TICKETS_BUCKET).toBe(DEFAULT_KV_TICKETS_BUCKET);
-    expect(parsed.KV_THREADS_BUCKET).toBe(DEFAULT_KV_THREADS_BUCKET);
-    expect(parsed.KV_THREADS_TTL_DAYS).toBe(DEFAULT_KV_THREADS_TTL_DAYS);
-    expect(parsed.KV_WATCH_RETRY_MS).toBe(DEFAULT_KV_WATCH_RETRY_MS);
-  });
-
-  // Cada clave es independiente: declarar solo una arranca igual, con las otras tres en default.
-  // Es la forma observable de "ninguna es cross-field".
-  it('starts with only one of the four KV keys declared', () => {
-    const parsed = schema.parse({ ...VALID_ENV, KV_THREADS_TTL_DAYS: '7' });
-
-    expect(parsed.KV_THREADS_TTL_DAYS).toBe(7);
-    expect(parsed.KV_TICKETS_BUCKET).toBe(DEFAULT_KV_TICKETS_BUCKET);
-    expect(parsed.KV_THREADS_BUCKET).toBe(DEFAULT_KV_THREADS_BUCKET);
-    expect(parsed.KV_WATCH_RETRY_MS).toBe(DEFAULT_KV_WATCH_RETRY_MS);
-  });
-});
