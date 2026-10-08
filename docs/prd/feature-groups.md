@@ -210,11 +210,12 @@ suposiciones de volumen (NFR-P06) y para cargar el Mapa de Tickets del próximo 
 
 **Descripción:**
 
-Une las dos mitades del conector. Carga el Mapa de Tickets desde variable de entorno o archivo
-montado con fail-fast si está mal formado; extrae el `<slug>` del subaddress del `recipient`,
-normalizándolo a minúsculas; lo resuelve a un `projectId` contra el KV; y aplica los cinco motivos
-de descarte —sin slug, slug no mapeado, **es una respuesta**, sin `Message-Id`, no parseable— cada
-uno con su línea de log.
+Une las dos mitades del conector. Extrae el `<slug>` del subaddress del `recipient`,
+normalizándolo a minúsculas; lo resuelve a un `projectId` con un `get` al Espacio KV del conector en
+cada mail; y aplica el catálogo de motivos de descarte de ADR-006 —sin slug, slug no mapeado, slug no
+consultable, es una respuesta, hilo desconocido, sin `Message-Id`, no parseable— cada uno con su
+línea de log. *(REQ-008: antes cargaba el Mapa de Tickets desde variable de entorno o archivo
+montado con fail-fast, y aplicaba un catálogo de cinco motivos)*
 
 Con el proyecto resuelto, arma el payload real desde el mail: título limpio truncado a 255 antes de
 publicar, placeholders cuando el asunto o el cuerpo vienen vacíos, `type: incidencia`,
@@ -237,7 +238,7 @@ comentario.
 
 **Capabilities que implementa:**
 
-- C-09: Cargar el Mapa de Tickets al arrancar (from F-02)
+- C-09: Cargar el Mapa de Tickets en el Espacio KV (from F-02)
 - C-10: Extraer el slug del subaddress (from F-02)
 - C-11: Resolver el slug a un `projectId` (from F-02)
 - C-12: Descartar una respuesta a un hilo (from F-02)

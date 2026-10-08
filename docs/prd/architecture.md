@@ -30,7 +30,7 @@ son **módulos internos**, no servicios.
 
 | Servicio | Tecnología | Responsabilidades | Entidades que posee | Base de Datos | APIs Externas |
 |---|---|---|---|---|---|
-| **jiku-email-tickets** | Node.js ≥ 22.12 + TypeScript 5.x (`strict`, ESM) | Poll IMAP de la casilla de tickets, normalización del mail, ruteo por slug contra el KV local, y publicación de los dos comandos de escritura al bus de Jiku | Mail Entrante, Adjunto del Mail, Entrada del Mapa de Tickets (**las tres efímeras o de configuración: ninguna se persiste**) | **Ninguna** | Casilla IMAP, Zitadel (RFC 7523), NATS (bus de Jiku), Storage S3-compatible (`PUT` prefirmado) |
+| **jiku-email-tickets** | Node.js ≥ 22.12 + TypeScript 5.x (`strict`, ESM) | Poll IMAP de la casilla de tickets, normalización del mail, ruteo por slug contra su Espacio KV en el bus, y publicación de los dos comandos de escritura al bus de Jiku | Mail Entrante, Adjunto del Mail, Entrada del Mapa de Tickets, Entrada del Mapa de Hilos (**las dos primeras efímeras; las Entradas de los dos mapas viven en el Espacio KV del conector en el bus: el conector no tiene persistencia propia**) *(REQ-008: antes "contra el KV local" y "las tres efímeras o de configuración: ninguna se persiste")* | **Ninguna** | Casilla IMAP, Zitadel (RFC 7523), NATS (bus de Jiku), Storage S3-compatible (`PUT` prefirmado) |
 
 **Las entidades persistidas que el conector crea —Requisito, Archivo, Adjunto— no le pertenecen: son
 de Jiku y las escribe `core`.** El conector sólo las pide por comando. Ver la sección de Entidades
@@ -40,9 +40,7 @@ del Dominio en [requirements.md](requirements.md).
                   ┌──────────────────────────────────────────┐
    Casilla IMAP   │  S1 · jiku-email-tickets (worker)       │
    tickets+slug@ ─┼──> [Ingesta] ──> [Ruteo] ──> [Publicación]
-        (poll)    │                     │             │      │
-                  │              Mapa de Tickets      │      │
-                  │                (KV local)         │      │
+        (poll)    │                                   │      │
                   └───────────────────────────────────┼──────┘
                                                       │
                           @gravadigital/jiku (SDK)    │
@@ -51,7 +49,10 @@ del Dominio en [requirements.md](requirements.md).
                          │                                  │
                     NATS (bus de Jiku)              Storage S3-compatible
                          │                            (PUT prefirmado)
-                    auth-callout                            ▲
+                         ├── JetStream · JIKU_KV            ▲
+                         │     └─ Espacio KV del conector   │
+                         │        (tickets. / hilos.)       │
+                    auth-callout                            │
                          │                                  │
                     core ─────── firma la URL ──────────────┘
                          │
@@ -59,7 +60,10 @@ del Dominio en [requirements.md](requirements.md).
 ```
 
 **Nada de lo que está debajo de la línea del SDK es infraestructura del conector**: es Jiku, ya
-desplegado. El conector no despliega NATS, ni el callout, ni el storage, ni PostgreSQL.
+desplegado. El conector no despliega NATS, ni el callout, ni el storage, ni PostgreSQL. Tampoco
+`JIKU_KV`: lo crea el deploy de Jiku, y el conector sólo usa su Espacio KV dentro de él (los Mapas de
+Tickets y de Hilos). *(REQ-008: antes el diagrama mostraba el Mapa de Tickets como un "KV
+local" dentro del worker.)*
 
 ### Servicios descartados y por qué
 
@@ -102,8 +106,10 @@ decisión y no un olvido:
    `INSERT`/`UPDATE`/`DELETE` y `core` es el único escritor (ADR-001 de Jiku). El conector se somete
    a la misma regla y por eso **no lleva cliente de PostgreSQL**.
 2. **No necesita.** Su único mecanismo de idempotencia es el flag `\Seen` de IMAP, que vive en el
-   servidor de mail. No persiste estado de ninguna clase: los mails normalizados viven en memoria
-   durante un tick y se descartan al terminar.
+   servidor de mail. No tiene persistencia **propia**: los mails normalizados viven en memoria
+   durante un tick y se descartan al terminar, y el único estado que sobrevive —los Mapas de Tickets
+   y de Hilos— vive en el Espacio KV del conector, en el bus (el matiz de ADR-001). *(REQ-008: antes
+   "No persiste estado de ninguna clase")*
 
 Consecuencia documental: **no hay documento de esquema en `docs/db-schemas/`** para este producto. Sin
 base propia no hay tablas, ni migraciones, ni DBML que poblar. El esquema de las entidades que el
@@ -325,8 +331,9 @@ usuarios— y no guarda sesión de nada.
 
 ### Performance
 
-**Caching:** Ninguno. El único dato que se lee repetidamente es el Mapa de Tickets, que ya está en
-memoria (se carga al arrancar).
+**Caching:** Ninguno, por diseño: el Mapa de Tickets se consulta en cada mail con un `get` al Espacio
+KV, y no se guarda el resultado (un alta o una baja vale desde el mail siguiente). *(REQ-008: antes
+el mapa se cargaba en memoria al arrancar)*
 
 **Rate Limiting:** No aplica en el sentido habitual — el conector no recibe requests. El control de
 caudal es **el cap por tick** (50 mails por default) más el intervalo del cron (5 min por default).
@@ -346,8 +353,10 @@ queda.
 - Un contenedor Docker, una instancia, dentro de la red del bus de Jiku.
 - Configuración entera por variables de entorno más dos archivos montados (la key del machine user y
   el creds del sentinel).
-- El Mapa de Tickets por variable de entorno o archivo montado; **se lee al arrancar**, así que
-  agregar un slug implica reiniciar.
+- **Precondición de `JIKU_KV`:** el bucket lo crea el deploy de Jiku, con `allow_direct` y sin TTL, y
+  el rol `internal-app` concede los tres grants del Espacio KV (nunca la forma ancha `$JS.API.>`).
+  Agregar un slug es un `nats kv put` sobre el Espacio KV, sin reiniciar. *(REQ-008: antes "por
+  variable de entorno o archivo montado; se lee al arrancar", con reinicio para agregar un slug)*
 - Sin base de datos, sin volumen que respaldar, sin migraciones que correr. **Es la ventaja operativa
   concreta de no tener persistencia propia.**
 - Fail-fast: si falta configuración, el worker no arranca e informa la lista completa.

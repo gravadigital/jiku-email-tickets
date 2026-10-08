@@ -442,6 +442,11 @@ respuesta de un cliente—, así que las **30 siguen siendo 30 y siguen cubierta
 las filas de C-09, C-12 y C-29, que apuntaban a implementaciones o tests que REQ-005 reemplazó, y
 las columnas de tests, que ganan las suites nuevas. Están actualizadas abajo.
 
+**Revisión de S-034:** REQ-008 **tampoco agregó capabilities** —muda el estado del conector a su
+Espacio KV en `JIKU_KV` y resuelve el slug con un `get` por mail—, así que las **30 siguen siendo 30**.
+Las filas de C-09, C-11 y C-13 apuntaban a `ticket-map.ts` y a tests que S-032 borró: se re-apuntaron
+al código de S-032 y a las suites de S-032 y S-033.
+
 | Capability | Descripción | Implementada en | Test que la cubre |
 |---|---|---|---|
 | C-01 | Disparar el tick del poll | `src/domain/ingesta/scheduler.ts` | `test/ingesta/scheduler.test.ts` |
@@ -452,11 +457,11 @@ las columnas de tests, que ganan las suites nuevas. Están actualizadas abajo.
 | C-06 | Convertir un mail sólo-HTML a texto plano | `src/domain/ingesta/normalize.ts` | `test/ingesta/normalize.test.ts` |
 | C-07 | Parsear los adjuntos de las partes MIME | `src/domain/ingesta/normalize.ts` | `test/ingesta/normalize.test.ts` |
 | C-08 | Contabilizar y loguear el resultado del tick | `src/domain/ingesta/tick.ts` | `test/ingesta/tick.test.ts`, `test/ingesta/tick-adjuntos-propiedades.test.ts` (S-022, TS-9) |
-| C-09 | Cargar el Mapa de Tickets al arrancar | **`src/infra/kv/ticket-map.ts`** (S-025: era `config/schema.ts` hasta S-024; el mapa **ya no es configuración del proceso**, vive en un bucket KV y se mantiene al día con `watch()`) | `test/infra/kv/ticket-map.test.ts`, `test/infra/kv/e2e-watch-tick.test.ts` (S-028, TS-40 a TS-46: el slug nuevo ruteando **sin reiniciar**, medido sobre `runTick()`) |
+| C-09 | Cargar el Mapa de Tickets en el Espacio KV | **`src/infra/kv/tickets.ts`** (`lookupTicket()`) + `src/infra/kv/keys.ts` (`ticketKey()`) (S-032: el mapa vive en las claves `tickets.<slug>` del Espacio KV y se consulta por mail; hasta S-032, un módulo propio con `watch()`, y hasta S-024, `config/schema.ts`) | `test/infra/kv/tickets.test.ts` (TS-27 a TS-29), `test/ingesta/tick-mapa-tickets.test.ts` (TS-54, TS-63), `test/infra/kv/e2e-operador.test.ts` (S-033, TS-1 a TS-6: el slug que el operador carga con la clave completa rutea desde el mail siguiente, sin reabrir el espacio) |
 | C-10 | Extraer el slug del subaddress | `src/domain/ruteo/route-mail.ts` | `test/ruteo/route-mail.test.ts` |
-| C-11 | Resolver el slug a un `projectId` | `src/domain/ruteo/route-mail.ts` | `test/ruteo/route-mail.test.ts` |
+| C-11 | Resolver el slug a un `projectId` | `src/domain/ruteo/route-mail.ts` (el slug en minúsculas, la intención de alta) + `src/infra/kv/tickets.ts` (`lookupTicket()`, resuelto en `src/domain/ingesta/tick.ts`) | `test/ruteo/route-mail.test.ts` (TS-44), `test/ingesta/tick-mapa-tickets.test.ts` (TS-55, TS-61), `test/infra/kv/e2e-operador.test.ts` (TS-5: mayúsculas no matchean; TS-7/TS-8: cada instancia ve sólo su espacio) |
 | C-12 | Descartar una respuesta a un hilo | `src/domain/ruteo/route-mail.ts` + **`src/infra/kv/threads.ts`** (S-026/S-027: `routeMail()` ya no decide el descarte, devuelve la **intención**; el lookup del Mapa de Hilos decide, y con match la respuesta se **comenta** en vez de descartarse) | `test/ruteo/route-mail.test.ts`, `test/ingesta/tick-hilos.test.ts`, `test/ingesta/tick-propiedades-kv.test.ts` (S-028, TS-16 a TS-20: los **tres** casos de `hilo_desconocido` sin crear nada) |
-| C-13 | Descartar en silencio lo que no resuelve | `src/domain/ruteo/route-mail.ts` | `test/ruteo/route-mail.test.ts` |
+| C-13 | Descartar en silencio lo que no resuelve | `src/domain/ruteo/route-mail.ts` (`sin_slug`) + `lookupTicket()` en el tick (`slug_no_mapeado`, `slug_no_consultable`) + `src/shared/motivo-descarte.ts` (los siete motivos) | `test/ruteo/route-mail.test.ts`, `test/ingesta/tick-mapa-tickets.test.ts` (TS-56 a TS-59), `test/shared/motivo-descarte.test.ts` (TS-17/TS-48), `test/ingesta/tick-propiedades-espacio.test.ts` (S-033, TS-17 a TS-19: la caída del KV en caliente) |
 | C-14 | Construir la identidad y conectar al bus | `src/infra/bus/connection.ts`, `src/infra/bus/identity.ts` | `test/bus/connection.test.ts` |
 | C-15 | Mantener el token fresco | `src/infra/bus/connection.ts` (`onTokenError`) | `test/bus/connection.test.ts` |
 | C-16 | Armar el payload del alta | `src/domain/publicacion/mail-payload.ts` | `test/publicacion/mail-payload.test.ts` |

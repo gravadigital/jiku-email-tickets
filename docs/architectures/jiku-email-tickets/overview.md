@@ -22,45 +22,73 @@ worker en node
   indicador de solapamiento **siempre** —incluso si el tick lanza—, y responde a `SIGTERM`/`SIGINT`
   esperando el tick en vuelo antes de cerrar el bus y salir con codigo `0`. Desde S-014/S-015, cada
   mail normalizado se rutea y publica dentro de la misma iteracion del tick — ver el modulo `ruteo`.
-- **ruteo** — Resolucion del slug del subaddress contra el Mapa de Tickets (copia en memoria de un
-  bucket KV del bus, cargada al arrancar y actualizada **en caliente** por `watch()` desde S-025). Un mail sin slug mapeado se descarta con motivo logueado. **Estado (S-012 a S-016):**
-  **implementado** de punta a punta — el arbol de decision puro de `routeMail()` (`es_respuesta` →
-  `sin_slug` → `slug_no_mapeado` → resuelto, S-013), cableado en el tick junto con la publicacion
+- **ruteo** — Extraccion del slug del subaddress y decision de la **intencion** del mail.
+  `routeMail()` es pura: devuelve la **intencion de alta** con el slug en minusculas, la intencion de
+  comentario, o el descarte `sin_slug`; ya no tiene el mapa. El tick resuelve el slug con
+  `lookupTicket()` (`#infra/kv`) contra el Espacio KV, **un `get` por mail nuevo con slug**, sin copia
+  en memoria ni cache; un slug no mapeado se descarta como `slug_no_mapeado` y una consulta fallida
+  como `slug_no_consultable`, los dos con el slug en el log. *(S-034 / REQ-008: hasta S-032 el slug
+  se resolvia contra una copia en memoria de un bucket propio, seguida con `watch()` desde S-025.)*
+  **Estado (S-012 a S-016):**
+  **implementado** de punta a punta — el arbol de decision puro de `routeMail()` (hoy: intencion de
+  comentario → `sin_slug` → intencion de alta, S-027 y S-032; en S-013 era `es_respuesta` →
+  `sin_slug` → `slug_no_mapeado` → resuelto), cableado en el tick junto con la publicacion
   (S-014), y con las propiedades del sistema completo afirmadas por tests (slug literal en el log
   redactado, ningun log filtra contenido de cliente, entry points limpios, pico de memoria de un mail
-  a la vez — S-016). Documentado de punta a punta en
-  [ruteo-y-alta-del-requisito](../../flows/ruteo-y-alta-del-requisito.md).
-- **infra/kv** — Los dos buckets KV de NATS sobre la **conexion unica** del proceso (ADR-002): el
-  `Kvm` se construye sobre `client.connection`, nunca sobre una conexion nueva. **Estado (S-024):**
-  la **apertura y verificacion** de los dos buckets al arrancar esta **implementada** —
-  `openKvStores()` los abre con `open()` y verifica que existen con `status()`, falla rapido con un
-  error que **nombra el bucket faltante**, y compara el TTL del bucket de hilos avisando con un
-  `warn` sin fijarlo. El conector **no crea buckets** y **no fija el TTL**, las dos cosas afirmadas
-  por tests que escanean `src/`. **S-025 sumo el `watch()` del Mapa de Tickets**: `startTicketMapWatch()`
-  espera la carga inicial completa antes de que se schedule el primer tick y despues mantiene la copia
-  en memoria al dia, mutando SIEMPRE el mismo `Map` —nunca reemplazandolo— que es lo que hace que
-  `config.ruteo.ticketMap` vea las actualizaciones. Si el watch se cae, el mapa **se conserva** y se
-  reintenta; vaciarlo convertiria una caida del bus en perdida de tickets. **S-026 sumo las
-  operaciones del Mapa de Hilos** (`threads.ts`): `sha256hex()` construye la clave —el sha256 en hex
-  del `Message-Id` **crudo**, porque `validKeyRe` de la libreria rechaza `<`, `>` y `@`—,
-  `recordThreadEntry()` escribe la entrada despues del alta con una falla **no cancelante**, y
-  `lookupThread()` recorre los `referenceIds` **en orden** y **corta en el primer hit**. El bucket de
-  hilos se lee con `get()` **puntual, sin `watch()` y sin copia en memoria**: es estado de alto
-  cardinal que cambia en cada mail, y el contraste con el Mapa de Tickets es deliberado. Ninguna de
-  las dos operaciones lanza, y **el bucket NO participa de la idempotencia** —el `\Seen` sigue siendo
-  la unica marca—, las tres cosas afirmadas por tests que escanean `src/`. El parseo del entero leido
-  del KV vive **compartido** en `parse.ts` (`parsePositiveId()`), consumido por los dos buckets.
-  **S-027 le dio consumidor al lookup**: la respuesta con match se publica como Comentario y
-  `comentados` empieza a incrementarse. **S-028 lo verifico de punta a punta** contra un NATS real con
-  JetStream —el ciclo alta → write → respuesta → comentario → write → respuesta a la respuesta
-  (`test/infra/kv/e2e-kv.test.ts`), el fail-fast del bucket faltante encadenado con
-  `reportStartupFailure()` para los dos buckets, el `watch()` en caliente medido **sobre el tick**
-  (`test/infra/kv/e2e-watch-tick.test.ts`), y las propiedades del sistema sobre `runTick()` cableado
-  (`test/ingesta/tick-propiedades-kv.test.ts`)—. **El modulo esta completo y verificado** — REQ-005
-  **no deja nada pendiente** en `infra/kv`. Documentado en el Paso 5.5 de [arranque-y-conexion-al-bus](../../flows/arranque-y-conexion-al-bus.md), que
-  registra los cuatro hallazgos verificados del KV (entre ellos que `open()` **no** verifica
-  existencia, y que el TTL viene en milisegundos), y de punta a punta en
+  a la vez — S-016). **S-032** saco la resolucion del slug de `routeMail()` y la llevo al tick con
+  `lookupTicket()`, antes del procesamiento de adjuntos (subir archivos de un mail que despues se
+  descarta los dejaria huerfanos). Documentado de punta a punta en
+  [ruteo-y-alta-del-requisito](../../flows/ruteo-y-alta-del-requisito.md) (Paso 2 y Paso 2.5).
+- **infra/kv** — El **Espacio KV** del conector dentro del bucket compartido `JIKU_KV` del bus, sobre
+  la **conexion unica** del proceso (ADR-002): `client.kv()` viaja por `client.connection`, nunca por
+  una conexion nueva. Guarda los dos mapas bajo prefijos fijos —constantes del codigo, no
+  configuracion—: `tickets.<slug> → projectId` y `hilos.<sha256> → requirementId`. El conector maneja
+  solo esa parte derecha de la clave; el prefijo `{instance}.{userId}.` lo agrega y lo quita el SDK
+  (invariante 31). Seis archivos:
+
+  - `space.ts` — `openKvSpace({ client, logger })`, la **unica** llamada a `client.kv()` de `src/`
+    (un test de propiedad lo afirma). Devuelve `KvSpace = Pick<KV, 'get' | 'put'>`: sin `delete()`,
+    el conector no borra. El SDK verifica `JIKU_KV` y su `allow_direct` con
+    `$JS.API.STREAM.INFO.KV_JIKU_KV`; el conector **no crea el bucket**. Loguea `info`
+    `'espacio KV abierto'` con `{ bucket, kvPrefix }` (el campo no se llama `key`: `REDACT_PATHS` lo
+    redactaria).
+  - `tickets.ts` — `lookupTicket({ space, slug, logger })`: un `get` por mail nuevo, un intento, sin
+    cache, **nunca lanza**. Tres resultados: `found` con el `projectId`; no encontrado y consultable
+    (nunca cargado, borrado, valor mal formado con `warn` que nombra el slug, o slug que no puede ser
+    clave, sin round-trip); no consultable (el `get()` rechazo, con `warn` `{ slug, errorClass }`).
+  - `keys.ts` — `TICKETS_KEY_PREFIX` / `THREADS_KEY_PREFIX`, `sha256hex()`, `ticketKey()`,
+    `threadKey()` e `isStorableSlug()`, que delega en `assertValidKVKey()` del SDK (las reglas de
+    clave de NATS, que rechazan `<`, `>` y `@`: por eso la clave del hilo es el sha256 del
+    `Message-Id` **crudo**, sin normalizar). Es el unico lugar que arma claves.
+  - `threads.ts` — `recordThreadEntry()` escribe la entrada despues del alta o del comentario con una
+    falla **no cancelante** (`warn` con `errorClass`, `JikuBucketFull` incluido), y `lookupThread()`
+    recorre los `referenceIds` **en orden** y **corta en el primer hit**. El `put()` va sin opciones:
+    los hilos **no expiran** (invariante 32). Ninguna de las dos lanza, y **el KV NO participa de la
+    idempotencia** —el `\Seen` sigue siendo la unica marca—.
+  - `errors.ts` — `KvSpaceUnavailableError` (`KV_SPACE_UNAVAILABLE_ERROR`) y `diagnoseKvFailure()`,
+    que diagnostica **por clase** del SDK (`instanceof`, nunca el mensaje): `JikuNoBucket` →
+    `bucket_no_usable`, `JikuKVPermissionDenied` → `kv_sin_permisos`, todo lo demas → `desconocido`.
+  - `parse.ts` — `parsePositiveId()`, el parseo del entero leido del KV, **compartido** por los dos
+    mapas.
+
+  **Estado (S-032 / S-033):** **implementado** por S-032 y **verificado** por S-033 contra un
+  JetStream real —el slug que el operador carga con la clave completa del README rutea desde el mail
+  siguiente, el aislamiento por instancia y por identidad, las tres causas de fallo del arranque, la
+  caida del KV en caliente— y sobre `runTick()` cableado. Suites: `test/infra/kv/space.test.ts`,
+  `test/infra/kv/tickets.test.ts`, `test/infra/kv/keys.test.ts`, `test/infra/kv/threads.test.ts`,
+  `test/infra/kv/errors.test.ts`, `test/infra/kv/source-properties.test.ts`,
+  `test/infra/kv/startup-wiring.test.ts`, `test/ingesta/tick-mapa-tickets.test.ts`,
+  `test/infra/kv/e2e-operador.test.ts`, `test/infra/kv/e2e-kv.test.ts`,
+  `test/infra/kv/e2e-permisos.test.ts` y `test/ingesta/tick-propiedades-espacio.test.ts` (mas las
+  conservadas de REQ-005: `test/ingesta/tick-propiedades-kv.test.ts` y
+  `test/infra/kv/preservacion-req-005.test.ts`). Documentado en el Paso 5.5 de
+  [arranque-y-conexion-al-bus](../../flows/arranque-y-conexion-al-bus.md) y de punta a punta en
   [mapa-de-hilos-en-kv](../../flows/mapa-de-hilos-en-kv.md).
+
+  *Historia (REQ-005, S-024 a S-028):* hasta S-032 el modulo abria dos buckets propios con el KV
+  crudo de la libreria sobre la conexion, seguia el Mapa de Tickets con un `watch()` sobre una copia
+  en memoria y los hilos tenian un TTL de 90 dias. REQ-008 reemplazo todo eso por el Espacio KV del
+  SDK; el detalle queda en las stories S-024 a S-028 y en el catalogo de codigo reutilizable.
 - **publicacion** — Los dos planos del bus que el conector toca, y desde S-029 son **dos**:
   **escritura** —los TRES comandos via el SDK: `files.request-upload`, `requirements.new` y —desde
   S-027— `requirements.{id}.comment`, mas el `PUT` del byte del adjunto a la URL prefirmada que
@@ -126,13 +154,17 @@ casilla duplicarian tickets (NFR-SC03).
 **Restriccion dura de red.** El conector va dentro de la red del bus de Jiku, que no esta expuesta al
 ingress. No puede desplegarse afuera y alcanzar NATS.
 
-**El SDK `@gravadigital/jiku` (>= v1.1.0) es la dependencia central.** Reemplaza el cliente NATS propio,
+**El SDK `@gravadigital/jiku` es la dependencia central.** Reemplaza el cliente NATS propio,
 la obtencion del token de Zitadel (RFC 7523) y su refresh en background, y el prefijo de inbox. Las
-siete clases de error del SDK son lo que distingue *que sistema rechazo* en el log. Desde S-023 el
-SDK tambien **re-exporta el KV** por su subpath `./nats`, y es por ahi que entra: el conector **no**
-declara `@nats-io/kv` ni `@nats-io/jetstream` (ADR-002), porque tomarlos del subpath garantiza una
-sola copia de `nats-core` en el arbol — sin la cual un `instanceof` contra una clase de error del
-SDK falla contra la copia que lo lanzo.
+clases de error del SDK son lo que distingue *que sistema rechazo* en el log. Se consume del **build
+local de `jiku-ts@edd1064`** (`vendor/gravadigital-jiku-1.0.0-edd1064.tgz`, el `npm pack` sin
+publicar, que declara `1.0.0`). El KV entra por **`client.kv()`**, y sus clases de error
+(`JikuNoBucket`, `JikuKVPermissionDenied`, `JikuBucketFull`) salen de la entrada principal: el
+conector **no** declara ninguna libreria de KV ni de JetStream (ADR-002). Sigue valiendo que haya una
+sola copia de `nats-core` en el arbol —la del SDK—, sin la cual un `instanceof` contra una clase de
+error del SDK falla contra la copia que lo lanzo. *(Historia: entre S-023 y S-032 el KV entro por un
+re-export de `@nats-io/kv` en el subpath `./nats` de un build 1.1.0 vendoreado; `jiku-ts` nunca tuvo
+ese re-export. REQ-008 lo reemplazo por `client.kv()`.)*
 
 **El conector no expone nada.** Ni HTTP, ni puerto, ni suscripcion a subjects de otros. Por eso no
 hay especificacion OpenAPI en `docs/apis/` para este producto — un `/health` de relleno seria un
@@ -143,13 +175,18 @@ PostgreSQL. Las entidades que el conector crea (Requisito, Archivo, Adjunto) son
 escribe `core`.
 
 **Pero desde S-024 sí tiene estado, y vive en el bus.** El matiz correcto no es "el conector no
-persiste nada" sino **"el conector no tiene persistencia propia"**: usa dos buckets KV de NATS
-(JetStream), que es un almacén del bus —una dependencia que ya tenía— y no una base que él
-administre. Sigue sin haber `docs/db-schemas/`, sin migraciones y sin cliente de base: un bucket KV
-no es ninguna de esas cosas. Los dos buckets son `KV_TICKETS_BUCKET` (el Mapa de Tickets:
-`slug → projectId`, configuración que administra un humano) y `KV_THREADS_BUCKET` (el Mapa de Hilos:
-`sha256(Message-Id) → requirementId`, estado que el conector escribe en cada mail). **Los crea el
-operador**, no el conector.
+persiste nada" sino **"el conector no tiene persistencia propia"**: usa su **Espacio KV** dentro del
+bucket compartido `JIKU_KV` (JetStream), que es un almacén del bus —una dependencia que ya tenía— y no
+una base que él administre. Sigue sin haber `docs/db-schemas/`, sin migraciones y sin cliente de
+base: un espacio KV no es ninguna de esas cosas. El espacio tiene dos prefijos: `tickets.<slug> →
+projectId` (el Mapa de Tickets, configuración que administra un humano, U-02) y `hilos.<sha256> →
+requirementId` (el Mapa de Hilos, estado que el conector escribe en cada mail). **`JIKU_KV` lo crea
+el deploy de Jiku**, ni U-02 ni el conector. Cada identidad alcanza **sólo su propio espacio**
+(invariante 31): por el prefijo que agrega el SDK y por los **tres grants** de la plantilla de
+`internal-app` (`$JS.API.STREAM.INFO.KV_JIKU_KV`, `$KV.JIKU_KV.<instance>.{{user_id}}.>` y
+`$JS.API.DIRECT.GET.KV_JIKU_KV.$KV.JIKU_KV.<instance>.{{user_id}}.>`), nunca una forma ancha como
+`$JS.API.>`, que alcanzaria las claves de todas las identidades. *(S-034 / REQ-008: hasta S-032 eran
+dos buckets propios, configurables por variable de entorno y creados por el operador.)*
 
 **El logging es la preocupacion transversal mas importante.** No hay nadie mirando: el cliente mando
 un mail y se fue. Un ticket perdido no tiene sintoma. Cada mail deja al menos una linea con su

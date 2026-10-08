@@ -153,6 +153,9 @@ son quienes disparan, configuran o consumen su resultado.
   `ticket_slug` existe en la base de Jiku pero está **deliberadamente no expuesto ni filtrable** en
   el contrato de consultas del bus, y está marcado para eliminarse: un conector que resolviera por
   bus **no tiene por dónde**. Guardar el id y no el nombre es lo que hace al KV autosuficiente.
+  *(REQ-005 → REQ-008: el KV es el Espacio KV del conector en el bus —claves `tickets.<slug>` dentro
+  de `JIKU_KV`—, que U-02 sigue cargando a mano. La decisión no cambia: el id como valor, sin plano
+  de lectura.)*
 
 - **El alta no valida el proyecto antes de crear** (decisión 4): Validar el proyecto antes de crear
   no agregaría información —`core` ya responde `project_not_found`, que nombra el problema real— y
@@ -213,7 +216,8 @@ de `core`, y eso modifica el producto** (G-03). Queda registrado como fuera de a
 - **Ingesta IMAP por poll** de la casilla de tickets, con cap por tick y marcado `\Seen`
 - **Parseo y normalización** del mail: asunto limpio, cuerpo en texto plano sin texto citado,
   referencias del hilo, remitente, adjuntos
-- **Resolución del proyecto por `<slug>`** contra un KV local cargado a mano
+- **Resolución del proyecto por `<slug>`** contra un KV local cargado a mano *(REQ-005 → REQ-008: el
+  Espacio KV del conector en el bus, cargado a mano por U-02 y consultado con un `get` por mail)*
 - **Descarte silencioso** de todo lo que no resuelve (sin slug, slug no mapeado, respuesta a un
   hilo, mail sin `Message-Id`, mail no parseable)
 - **Alta del requisito en Jiku** publicando `requirements.new`, con traducción de la respuesta y de
@@ -243,7 +247,9 @@ de `core`, y eso modifica el producto** (G-03). Queda registrado como fuera de a
 - **Webhook / push del proveedor de mail** — el poll alcanza para el volumen y no depende del
   proveedor
 - **Reintento de un comando fallido** — consecuencia directa de la decisión 1
-- **Recarga en caliente del KV** — se lee al arrancar
+- ~~**Recarga en caliente del KV** — se lee al arrancar~~ **DEROGADO:** desde REQ-005 el mapa se
+  actualiza sin reiniciar, y desde REQ-008 se consulta con un `get` al Espacio KV en cada mail, así
+  que un alta o una baja vale desde el mail siguiente
 - **Cualquier interfaz de usuario** — es un worker
 
 ### Restricciones

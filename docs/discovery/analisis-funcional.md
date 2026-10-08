@@ -645,6 +645,8 @@ Ninguno. Los siete puntos de arriba son de configuración, no de construcción.
    > (no hay base, ni migraciones, ni cliente de base), no es una tabla de Jiku (el conector no
    > escribe la base de Jiku, sigue sin poder), y no toca el asunto. Es un almacén **del bus**, que
    > ya era una dependencia del conector, con la clave `sha256(Message-Id)` y un TTL de 90 días.
+   > *(REQ-008: el estado pasó al Espacio KV del conector en `JIKU_KV`, con la clave bajo `hilos.` y
+   > sin TTL.)*
    >
    > **La decisión 1 se matizó, no se revisó:** ADR-001 pasó de *"no persiste nada"* a *"no tiene
    > persistencia **propia**"*, y el `\Seen` de IMAP sigue siendo el único mecanismo de
