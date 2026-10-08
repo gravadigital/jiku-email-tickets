@@ -469,11 +469,11 @@ para que el pedido de cada cliente aterrice en su proyecto y en ningún otro.
 
 | ID | Capability | Actor | Entity | Operation | Key Fields | Business Rules |
 |----|-----------|-------|--------|-----------|------------|----------------|
-| C-09 | Cargar el Mapa de Tickets al arrancar | U-02 (Operador) | Entrada del Mapa de Tickets | CREATE | `slug` (string, req, **único**, minúsculas), `projectId` (int, req) | Por variable de entorno o archivo montado. Se lee **al arrancar**; sin recarga en caliente en v1. Un mapa **vacío es válido** (arranca y descarta todo con log); un mapa **mal formado hace fail-fast** y el worker no arranca. Dos entradas con el mismo slug = mal formado |
+| C-09 | Cargar el Mapa de Tickets en el Espacio KV | U-02 (Operador) | Entrada del Mapa de Tickets | CREATE | `slug` (string, req, **único**, minúsculas), `projectId` (int, req) | U-02 carga cada entrada con `nats kv put` en el Espacio KV del conector, con la clave completa (`nats kv put JIKU_KV <instance>.<sub>.tickets.<slug> <projectId>`). **Vale desde el mail siguiente**, sin reiniciar ni redesplegar. Un mapa **vacío es válido** (arranca y descarta todo con log). Una entrada **mal formada se ignora con `warn`** que nombra el slug, y el mail se descarta como `slug_no_mapeado`. El **duplicado es imposible**: el almacén no admite dos entradas con la misma clave (invariante 5) *(REQ-008: antes "Cargar el Mapa de Tickets al arrancar", por variable de entorno o archivo montado, leído al arrancar y con fail-fast si estaba mal formado)* |
 | C-10 | Extraer el slug del subaddress | Tick | Mail Entrante | READ | `recipient` (string), `subaddressPrefix` (string, default `tickets`) | Aísla el email si viene como `Nombre <mail@dominio>`, matchea `^<prefijo>\+([^@]+)@` **sin distinguir mayúsculas**, y normaliza el slug **a minúsculas**. Sin match → descarte silencioso. Resuelve por `Delivered-To`, que es **uno solo**: varios destinatarios con slugs distintos no son ambiguos |
-| C-11 | Resolver el slug a un `projectId` | Tick | Entrada del Mapa de Tickets | READ | `slug` (string, minúsculas) | Compara **siempre en minúsculas en las dos puntas**: `TICKETS+Alfa@` y `tickets+alfa@` resuelven al mismo proyecto. Sin entrada → descarte silencioso con log **nombrando el slug buscado** (es el dato que hace falta para cargarlo). **El conector no valida que el proyecto exista**: publica el `projectId` y `core` valida por su cuenta |
+| C-11 | Resolver el slug a un `projectId` | Tick | Entrada del Mapa de Tickets | READ | `slug` (string, minúsculas) | **Un `get` al Espacio KV por mail nuevo con slug**, sin copia en memoria ni caché. Compara **siempre en minúsculas en las dos puntas**: `TICKETS+Alfa@` y `tickets+alfa@` resuelven al mismo proyecto. Sin entrada → descarte silencioso como `slug_no_mapeado`, con log **nombrando el slug buscado** (es el dato que hace falta para cargarlo). Consulta fallida → descarte como `slug_no_consultable`, también con el slug (invariante 30). **El conector no valida que el proyecto exista**: publica el `projectId` y `core` valida por su cuenta *(REQ-008: antes se resolvía contra el mapa leído al arrancar)* |
 | C-12 | Descartar una respuesta a un hilo | Tick | Mail Entrante | ACTION | `referenceIds` (string[]) | Si `referenceIds` **no está vacío**, se descarta con log explícito de "respuesta, fuera de alcance v1". **Es un descarte activo, no una omisión**: sin esta regla una respuesta del cliente crearía un Requisito nuevo duplicado en vez de un comentario |
-| C-13 | Descartar en silencio lo que no resuelve | Tick | Mail Entrante | ACTION | motivo (enum: `sin_slug`/`slug_no_mapeado`/`es_respuesta`/`sin_message_id`/`no_parseable`) | **El descarte es la respuesta correcta, no un error**: la casilla recibe spam, respuestas automáticas y mails a direcciones sin slug. Cada descarte deja **una** línea de log con el `Message-Id` y el motivo, y nada más. **No crea nada**: un Requisito en el proyecto equivocado sería visible a un cliente que no debía verlo |
+| C-13 | Descartar en silencio lo que no resuelve | Tick | Mail Entrante | ACTION | motivo (enum, el catálogo completo de ADR-006: `sin_slug`/`slug_no_mapeado`/`slug_no_consultable`/`es_respuesta`/`sin_message_id`/`no_parseable`/`hilo_desconocido`) *(REQ-008: antes enumeraba cinco)* | **El descarte es la respuesta correcta, no un error**: la casilla recibe spam, respuestas automáticas y mails a direcciones sin slug. Cada descarte deja **una** línea de log con el `Message-Id` y el motivo, y nada más. **No crea nada**: un Requisito en el proyecto equivocado sería visible a un cliente que no debía verlo |
 
 **Acceptance Criteria:**
 
@@ -653,7 +653,7 @@ para no descubrir un ticket perdido cuando el cliente reclame.
 
 | ID | Capability | Actor | Entity | Operation | Key Fields | Business Rules |
 |----|-----------|-------|--------|-----------|------------|----------------|
-| C-27 | Validar la configuración al arrancar | U-02 (Operador) | — | ACTION | todas las `JIKU_*` req, las de IMAP y el Mapa de Tickets | **Fail-fast con la lista completa de lo que falta**, no de a uno: es la diferencia entre *"faltan X, Y y Z"* y descubrir los tres con un deploy cada vez. Punto de lectura **único y tipado**: `process.env` no se lee en ningún otro lugar. Secretos **inyectados por el entorno**, nada horneado en la imagen |
+| C-27 | Validar la configuración al arrancar | U-02 (Operador) | — | ACTION | todas las `JIKU_*` req y las de IMAP *(REQ-008: antes incluía "el Mapa de Tickets", que desde REQ-005 no es configuración del proceso)* | **Fail-fast con la lista completa de lo que falta**, no de a uno: es la diferencia entre *"faltan X, Y y Z"* y descubrir los tres con un deploy cada vez. Punto de lectura **único y tipado**: `process.env` no se lee en ningún otro lugar. Secretos **inyectados por el entorno**, nada horneado en la imagen |
 | C-28 | Emitir logs estructurados a stdout | Caller / Tick | — | ACTION | nivel (enum: `debug`/`info`/`warn`/`error`, default `info`) | **stdout, nunca a archivo, JSON en producción.** Jiku tiene los transports de archivo de sus dos backends con `filename: undefined` en producción porque las variables no están en el compose; el conector **no repite el error**. **Un fallo no se le reporta a nadie**: no hay usuario esperando ni request que responder |
 | C-29 | No filtrar datos sensibles al log | Caller / Tick | — | ACTION | — | Nunca se loguean: credenciales, tráfico IMAP crudo, **el cuerpo del mail** ni el contenido de un adjunto. El cuerpo es contenido de negocio y puede traer datos del cliente: el log es el único rastro de un ticket perdido, pero **sigue siendo un log, no un depósito de datos del cliente** |
 | C-30 | Emitir las métricas del tick | Tick | — | ACTION | `ingestados`, `parseados`, `creados`, `descartados`, `fallidos` | Una línea por tick. Es la única visibilidad agregada del worker: métricas exportadas y healthcheck están **fuera de alcance v1** |
@@ -735,7 +735,7 @@ para no descubrir un ticket perdido cuando el cliente reclame.
 | NFR-SC01 | Adjuntos por requisito | **10** (el `maxItems` del contrato, no configurable) | v1 |
 | NFR-SC02 | Tamaño máximo por adjunto | El que declare `system_settings` de Jiku (**hoy 10 MB**) | v1 |
 | NFR-SC03 | Instancias del worker | **1**: sin idempotencia ni coordinación, dos instancias sobre la misma casilla duplicarían tickets | v1 |
-| NFR-SC04 | Entradas del Mapa de Tickets | Decenas **(asumido)**; un KV en memoria no tiene problema con miles | v1 |
+| NFR-SC04 | Entradas del Mapa de Tickets | Decenas **(asumido)**. Viven en el Espacio KV y se consultan de a una por mail, así que su cantidad no pesa en el conector; el conector **no las puede enumerar**, y el tamaño del bucket `JIKU_KV` lo **comparten todas las identidades** *(REQ-008: antes "un KV en memoria no tiene problema con miles")* | v1 |
 | NFR-SC05 | Modo de ingesta | Poll por cron. Webhook/push **fuera de alcance** | Post-v1 |
 
 ### Operabilidad
@@ -758,8 +758,10 @@ Derivadas del discovery, salvo donde se indica:
 
 - **El volumen es de decenas de mails por día** (asumido, a validar con U-02). Es lo que hace que un
   poll cada 5 minutos con un cap de 50 alcance con margen.
-- **El Mapa de Tickets cambia con poca frecuencia**, así que leerlo al arrancar y no en caliente es
-  suficiente. Agregar un slug implica un redeploy.
+- **El Mapa de Tickets cambia con poca frecuencia**, pero eso ya no condiciona cómo se lee: se
+  consulta con un `get` al Espacio KV en cada mail, y agregar un slug es un `nats kv put` que vale
+  desde el mail siguiente, sin redeploy. *(REQ-008: antes "leerlo al arrancar y no en caliente es
+  suficiente. Agregar un slug implica un redeploy")*
 - **`type: incidencia` es un default razonable** para un mail de cliente. Es lo que hace el servicio
   existente y se conserva para no cambiar el comportamiento en la migración — pero es el default más
   discutible del conector (ver Preguntas Abiertas).

@@ -4,8 +4,8 @@ title: Publicación de requirements.{id}.comment
 type: feature
 status: Implemented
 created: 2026-09-09
-last_updated: 2026-09-10
-stories: [S-027, S-029, S-030]
+last_updated: 2026-10-08
+stories: [S-027, S-029, S-030, S-032, S-034]
 ---
 
 # Publicación de `requirements.{id}.comment`
@@ -15,8 +15,10 @@ stories: [S-027, S-029, S-030]
 **Creado:** 2026-09-09
 **Última actualización:** 2026-09-10 (REQ-006 / S-029 + S-030: el Paso 3 deja de documentar el
 duplicado como costo aceptado — el adjunto que Gmail arrastra del mail original **se reusa** contra
-el hilo por una consulta a `attachments.list`, con degradación a subir)
-**Stories:** S-027, S-029, S-030
+el hilo por una consulta a `attachments.list`, con degradación a subir). 2026-10-08 (S-032
+implementada y documentada en S-034 / REQ-008: el Mapa de Hilos vive en el Espacio KV del conector
+—claves `hilos.`—, sin expiración; la lógica del lookup, del comentario y del write no cambia)
+**Stories:** S-027, S-029, S-030, S-032, S-034
 
 ## Descripción
 
@@ -55,7 +57,7 @@ que **se retiró** por REQ-006 / S-030: el dedup contra el hilo se implementó. 
 ```mermaid
 sequenceDiagram
     participant MC as jiku-email-tickets
-    participant KV as KV del bus (Mapa de Hilos)
+    participant KV as Espacio KV (Mapa de Hilos, JIKU_KV)
     participant CORE as Jiku core
     participant S3 as Storage
 
@@ -64,7 +66,7 @@ sequenceDiagram
     alt sin match (consultable)
         KV-->>MC: no encontrado
         MC-->>MC: descarta con motivo hilo_desconocido
-    else bucket inaccesible
+    else espacio inaccesible
         KV-->>MC: no consultable
         MC-->>MC: descarta con motivo es_respuesta
     else con match
@@ -86,8 +88,8 @@ sequenceDiagram
         alt success
             CORE-->>MC: el Comentario existe
             MC-->>MC: comentados += 1
-            MC->>KV: put(sha256(Message-Id de LA RESPUESTA) -> requirementId)
-            Note over MC,KV: El write va DESPUÉS del success, nunca antes:<br/>si no, el bucket apuntaría a un comentario inexistente
+            MC->>KV: put(hilos.<sha256(Message-Id de LA RESPUESTA)> -> requirementId)
+            Note over MC,KV: El write va DESPUÉS del success, nunca antes:<br/>si no, el espacio apuntaría a un comentario inexistente
         else failure / timeout
             CORE-->>MC: failure con su code, o nada
             MC-->>MC: fallidos += 1 — SIN write, sin reintento
@@ -122,7 +124,7 @@ sequenceDiagram
 ### Paso 2: El lookup en el Mapa de Hilos
 
 **Origen:** `jiku-email-tickets`
-**Destino:** Bus NATS (KV)
+**Destino:** el Espacio KV del conector (`JIKU_KV`, claves `hilos.`)
 
 `lookupThread()` recorre los `referenceIds` **en orden** —la unión deduplicada de `In-Reply-To` +
 `References` que `normalize()` ya arma, con `In-Reply-To` primero por ser el mensaje inmediatamente
@@ -136,12 +138,12 @@ Sus tres resultados y qué hace el tick con cada uno:
 |---|---|---|
 | **Con match** | El hilo se conoce | Sigue al Paso 3: se comenta |
 | **Sin match, consultable** | Se pudo preguntar y ninguna referencia matcheó | Descarta con `hilo_desconocido` |
-| **No consultable** | El bucket no se pudo leer | Descarta con `es_respuesta` |
+| **No consultable** | El espacio no se pudo leer | Descarta con `es_respuesta` |
 
 > **Los dos motivos son distintos a propósito**, y el log tiene que sostener la distinción: uno se
-> arregla **cargando el hilo** (o esperando: puede ser un hilo anterior al despliegue, o una entrada
-> expirada por el TTL de 90 días), el otro **arreglando el bucket**. Un solo motivo para los dos
-> perdería el diagnóstico.
+> arregla **cargando el hilo** (o esperando: puede ser un hilo anterior al despliegue), el otro
+> **arreglando el KV**. Un solo motivo para los dos perdería el diagnóstico. *(S-034 / REQ-008: los
+> hilos ya no expiran, así que la entrada expirada dejó de ser una causa)*
 
 ---
 
@@ -238,15 +240,15 @@ continue-on-failure.
 ### Paso 5: El write que cierra el ciclo del hilo
 
 **Origen:** `jiku-email-tickets`
-**Destino:** Bus NATS (KV)
+**Destino:** el Espacio KV del conector (`JIKU_KV`, claves `hilos.`)
 
-Tras el `success`, se escribe `sha256(Message-Id de la respuesta) → requirementId`.
+Tras el `success`, se escribe `hilos.<sha256(Message-Id de la respuesta)> → requirementId`.
 
 **Ref:** S-027; CA-9, CA-10
 
 > **El orden es la única cosa de este flujo que corrompe estado si se hace mal.** El write va
 > **estrictamente después** del `success`, dentro del mismo `try`, después de `comentados += 1`. Un
-> write anticipado —o en paralelo— dejaría el bucket apuntando a un Comentario **que no existe**, y
+> write anticipado —o en paralelo— dejaría el espacio apuntando a un Comentario **que no existe**, y
 > la próxima respuesta rutearía a un hilo cuyo último eslabón se perdió. Con cualquier fallo del
 > comentario, el write **no corre**.
 >
@@ -263,7 +265,7 @@ Tras el `success`, se escribe `sha256(Message-Id de la respuesta) → requiremen
 
 | Paso | Error | Código | Comportamiento |
 |---|---|---|---|
-| 2 | El bucket de hilos no se puede leer | — | Descarta con `es_respuesta`. **No** se comenta: sin saber el Requisito no hay dónde |
+| 2 | El Espacio KV no se puede leer | — | Descarta con `es_respuesta`. **No** se comenta: sin saber el Requisito no hay dónde |
 | 2 | Ninguna referencia matchea | — | Descarta con `hilo_desconocido`. Log `warn`, **una sola línea** |
 | 3 | **Falla la consulta de reuso** (`attachments.list`: timeout, cualquiera de los seis códigos, `JikuError` de forma) | — | Log `warn`, **degrada a subir**: sigue el ciclo normal de permiso + `PUT`. **No cuesta un adjunto ni un ticket** (reglas 13 y 27), y el peor caso es el duplicado que existía antes de REQ-006 |
 | 3 | Un adjunto lo rechaza la política local | — | **El comentario se publica igual**, con el aviso en su texto |
@@ -284,7 +286,7 @@ una entrada nueva en el Mapa de Hilos que permite que la conversación siga.
 |---|---|
 | `comentados` | **+1** por respuesta comentada con éxito |
 | `creados` | **Sin cambios.** Un comentario no es un alta, y sumarlos borraría la distinción |
-| `descartados` | +1 por respuesta sin match o con el bucket inaccesible |
+| `descartados` | +1 por respuesta sin match o con el espacio inaccesible |
 | `fallidos` | +1 por fallo de la publicación |
 
 ## Notas

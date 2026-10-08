@@ -59,6 +59,14 @@ al terminar.
 > tomó REQ-005. Los mails normalizados siguen viviendo en memoria durante un tick y descartándose al
 > terminar.
 
+> **Nota de REQ-008 / S-034 (2026-10-08).** El estado ya no vive en dos buckets: desde S-032 vive en
+> el **Espacio KV** del conector dentro del bucket compartido `JIKU_KV` del bus de Jiku, con las claves
+> `tickets.<slug>` (el Mapa de Tickets) y `hilos.<sha256>` (el Mapa de Hilos) bajo el prefijo que agrega
+> el SDK. El matiz de arriba se mantiene y se refuerza: sigue **sin haber persistencia propia** —el
+> bucket lo crea el deploy de Jiku y el conector no administra ningún almacén, ni siquiera un bucket—.
+> **Lo que esta ADR decide no cambia:** el `\Seen` de IMAP sigue siendo el **único** mecanismo de
+> idempotencia, y el KV **no participa** de ella.
+
 **Se acepta explícitamente que no hay garantía de entrega en ninguna de las dos direcciones:**
 
 - **Se pierde un ticket.** El mail se marca `\Seen` y el comando falla después. El mail queda leído y

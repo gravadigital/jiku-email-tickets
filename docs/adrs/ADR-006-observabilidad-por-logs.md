@@ -1,12 +1,16 @@
 # ADR-006: Observabilidad por logs estructurados a stdout, con el origen del rechazo explícito
 
-**Status:** Accepted (matizada el 2026-09-08 por REQ-005 / S-026)
+**Status:** Accepted (matizada el 2026-09-08 por REQ-005 / S-026; matizada el 2026-10-08 por REQ-008 /
+S-034)
 **Date:** 2026-08-26
 **Amended:** 2026-09-08 — el catálogo de motivos de descarte pasa de **cinco a seis** literales, y la
 línea de métricas del tick pasa de **cinco a seis** contadores. Lo que la ADR decide —que cada mail
 deje rastro, que el motivo sea un literal exacto y que el tick emita una línea de métricas— no cambia:
 lo que cambia es la enumeración de dos catálogos que la ADR fija por extensión. Ver la nota al pie de
 las Implementation Rules.
+**Amended:** 2026-10-08 — REQ-008 / S-034: el catálogo de motivos de descarte pasa de **seis a siete**
+literales, con `slug_no_consultable`. **La línea de métricas del tick sigue con seis contadores**: el
+motivo nuevo suma en `descartados`. Ver la segunda nota al pie de las Implementation Rules.
 **Deciders:** Technical Leader
 **Tags:** observabilidad, logging, manejo-de-errores, operabilidad
 
@@ -94,10 +98,12 @@ peor resultado posible en un servicio sin nadie mirando.
 - **Cada mail procesado MUST dejar al menos una línea de log** con su `messageId` y su resultado.
   Ningún mail termina sin rastro
 - Un alta exitosa MUST loguear `messageId`, `projectId` y el `id` del requisito creado, juntos
-- Un descarte MUST loguear `messageId` y el **motivo** (`sin_slug`, `slug_no_mapeado`, `es_respuesta`,
-  `sin_message_id`, `no_parseable`, `hilo_desconocido`)
-- Un descarte por slug no mapeado MUST incluir **el slug buscado** (es el dato que hace falta para
-  cargarlo)
+- Un descarte MUST loguear `messageId` y el **motivo** (`sin_slug`, `slug_no_mapeado`,
+  `slug_no_consultable`, `es_respuesta`, `sin_message_id`, `no_parseable`, `hilo_desconocido`)
+  *(S-034 / REQ-008: antes enumeraba seis, sin `slug_no_consultable`)*
+- Un descarte por slug no mapeado **o no consultable** MUST incluir **el slug buscado** (es el dato que
+  hace falta para cargarlo, y el que permite reconstruir el mail desde la casilla; invariante 30)
+  *(S-034 / REQ-008: antes "Un descarte por slug no mapeado")*
 - Un fallo de comando MUST loguear la **clase de error del SDK** y, cuando exista, el `code` y el
   `hint()`. MUST NOT reducirse a un mensaje genérico de "falló el comando"
 - Un `errorCode` desconocido MUST loguearse con su `code` y su `hint()` sin mapearse a otro error
@@ -123,7 +129,9 @@ peor resultado posible en un servicio sin nadie mirando.
 > - `hilo_desconocido` — *"esta respuesta apunta a un hilo que no conozco"*. El lookup al Mapa de
 >   Hilos **sí se pudo hacer** y ninguna referencia matcheó. Cubre, indistinguibles a propósito, el
 >   reenvío de un hilo interno con slug mapeado, una entrada expirada por el TTL de 90 días, y un
->   hilo anterior al despliegue. El arreglo, si lo hay, es del lado del hilo.
+>   hilo anterior al despliegue. El arreglo, si lo hay, es del lado del hilo. *(S-034 / REQ-008: la
+>   entrada expirada por el TTL **ya no es un origen** —los hilos viven en el Espacio KV y no
+>   expiran—; quedan dos: el reenvío de un hilo interno y el hilo anterior al despliegue)*
 > - `es_respuesta` — pasa a cubrir, **además** de su significado original, *"no pude averiguar a qué
 >   hilo apunta"*: el bucket de hilos estaba inaccesible y el lookup no se pudo hacer. El arreglo es
 >   del lado de la infraestructura.
@@ -144,6 +152,33 @@ peor resultado posible en un servicio sin nadie mirando.
 > existente"* en la **única línea de métricas que el tick emite** — y esta ADR ya decidió que no hay
 > healthcheck ni exportador de métricas en v1, así que esa línea es todo lo que hay. Es además la
 > métrica que S-027 va a mirar para verificar que el comentario empezó a funcionar de verdad.
+
+> **Matizado por REQ-008 / S-034 (2026-10-08).** La regla de los motivos de descarte vuelve a
+> enumerar un catálogo por extensión, y REQ-008 le agrega un miembro. La regla ya está escrita con el
+> catálogo ampliado; esta nota registra **qué** cambió y **por qué**, para que no se lea como un error
+> (el código lo declara en la cabecera de `src/shared/motivo-descarte.ts` como *"SEGUNDA DESVIACION
+> DECLARADA DE ADR-006"*).
+>
+> **1. El catálogo de motivos de descarte pasa de seis a siete: se agrega `slug_no_consultable`.**
+>
+> Desde REQ-008 el slug se resuelve con un `get` al Espacio KV por mail (`lookupTicket()`), y esa
+> consulta puede fallar. El literal es exacto y se loguea tal cual, como los otros seis.
+> `slug_no_mapeado` **se conserva**, y los dos conviven a propósito porque cubren situaciones distintas
+> cuyo arreglo está en lugares distintos:
+>
+> - `slug_no_mapeado` — *"el slug no está cargado"*. La consulta **sí se pudo hacer** (o no hacía
+>   falta) y no hay una entrada usable: el slug nunca se cargó, se borró, su valor está mal formado, o
+>   no puede ser clave del KV (y entonces nunca pudo cargarse). El arreglo es **cargarlo**.
+> - `slug_no_consultable` — *"no pude consultar el slug"*. El `get()` rechazó (timeout, permisos,
+>   bucket, conexión) y no se sabe si el slug está cargado. El arreglo es **arreglar el KV**.
+>
+> Es el mismo argumento con el que S-026 separó `hilo_desconocido` de `es_respuesta`: colapsarlos en un
+> literal borraría exactamente la señal que distingue *cargar el slug* de *arreglar el KV*. Los dos
+> descartes llevan el `slug` en la línea.
+>
+> **2. La línea del tick sigue con seis contadores.** No se agrega contador: `slug_no_consultable` es
+> un descarte más y **suma en `descartados`**, como `slug_no_mapeado`. La regla de los seis contadores
+> no cambia.
 
 ## Consequences
 

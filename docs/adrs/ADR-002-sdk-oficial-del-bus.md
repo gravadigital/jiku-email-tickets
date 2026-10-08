@@ -81,6 +81,23 @@ mano**, justo lo que el monorepo de Jiku existe para evitar (ADR-012 de Jiku).
 - Los errores del bus MUST manejarse por las clases del SDK (`JikuPermissionDenied`, `JikuFailure`,
   `JikuTimeout`, `JikuNoEndpoint`, `JikuInvalidRequest`), no inspeccionando strings de mensaje
 
+> **Nota de REQ-008 / S-034 (2026-10-08).** Desde S-032 el conector usa también el KV del bus, y las
+> reglas de arriba lo cubren sin cambios:
+>
+> 1. **El KV entra por `client.kv()`**, sobre la misma conexión única. Sus errores (`JikuNoBucket`,
+>    `JikuKVPermissionDenied`, `JikuBucketFull`) se manejan **por las clases del SDK**, exportadas
+>    desde la entrada principal (`@gravadigital/jiku`), que es la regla que esta ADR ya fija: el
+>    diagnóstico del arranque es por `instanceof`, nunca por el mensaje.
+> 2. **El KV deja de existir como librería en el árbol** (`@nats-io/kv`, `@nats-io/jetstream`): el
+>    conector no la declara ni la importa, así que *"MUST NOT declarar `nats`"* ahora también la cubre.
+> 3. **El SDK se consume del build local de `jiku-ts@edd1064`**
+>    (`vendor/gravadigital-jiku-1.0.0-edd1064.tgz`) hasta que se publique, como antes se consumió el
+>    1.1.0 vendoreado. Declara versión `1.0.0`, así que la regla `^1.0.0` se sigue cumpliendo; como
+>    `npm ls` no distingue el build del publicado, un test afirma sobre lo instalado.
+>
+> **Historia:** entre S-023 y S-032 el KV entró por un re-export de `@nats-io/kv` en el subpath
+> `./nats` de un build 1.1.0 vendoreado; `jiku-ts` nunca tuvo ese re-export. Ya no rige.
+
 ## Consequences
 
 ### Positive

@@ -4,8 +4,8 @@ title: Arranque y conexión al bus
 type: event
 status: Active
 created: 2026-08-27
-last_updated: 2026-09-08
-stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024, S-025]
+last_updated: 2026-10-08
+stories: [S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024, S-025, S-032, S-034]
 ---
 
 # Arranque y Conexión al Bus
@@ -21,8 +21,12 @@ reescribe ningún paso de contenido — y S-016 cierra el estado formal: `Status
 —abrir y verificar los dos buckets del KV sobre la conexión ya establecida— entra entre conectar al
 bus y schedular el tick, con sus filas en la tabla de errores. S-025 implementada: el Paso 5.6 carga
 el Mapa de Tickets desde el bucket y lo sigue con `watch()`; el Paso 1 deja de validarlo y pierde su
-única regla cross-field)
-**Stories:** S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024, S-025
+única regla cross-field). 2026-10-08 (S-032 implementada y documentada en S-034 / REQ-008: el Paso
+5.5 pasa a abrir el **Espacio KV** del conector en `JIKU_KV` con `client.kv()`; el Paso 5.6 —el
+`watch()`— se elimina con nota; el Paso 1 pierde las cuatro variables `KV_*`; la tabla de errores
+reemplaza las filas del 5.5 y del 5.6 por las tres del espacio)
+**Stories:** S-002, S-003, S-004, S-006, S-007, S-011, S-012, S-013, S-014, S-015, S-016, S-024, S-025,
+S-032, S-034
 
 ## Descripción
 
@@ -73,20 +77,13 @@ sequenceDiagram
                 BUS->>CORE: evento del auth-callout (no durable)
                 CORE->>CORE: INSERT users (identity_type: service, email NULL)
                 MC-->>MC: log de arranque exitoso (sin credenciales)
-                MC->>BUS: Kvm(client.connection).open(TICKETS) + status()
-                alt el bucket de slugs no existe
-                    BUS-->>MC: StreamNotFoundError → exit ≠ 0 nombrando TICKETS
-                else existe
-                    MC->>BUS: open(MAIL_THREADS) + status()
-                    alt el bucket de hilos no existe
-                        BUS-->>MC: StreamNotFoundError → exit ≠ 0 nombrando MAIL_THREADS
-                    else existe
-                        MC-->>MC: compara el TTL del de hilos (warn si difiere, arranca igual)
-                        MC-->>MC: buckets del KV abiertos y verificados
-                        MC->>BUS: status() + watch() del bucket de slugs
-                        BUS-->>MC: carga inicial (0..N entradas) y despues las novedades
-                        MC-->>MC: Mapa de Tickets en memoria; el watch queda corriendo
-                    end
+                MC->>BUS: client.kv() → $JS.API.STREAM.INFO.KV_JIKU_KV (una vez)
+                alt JIKU_KV no existe, sin allow_direct, o JetStream apagado
+                    BUS-->>MC: JikuNoBucket → exit ≠ 0 (bucket_no_usable)
+                else el rol no tiene los grants del Espacio KV
+                    BUS-->>MC: JikuKVPermissionDenied → exit ≠ 0 (kv_sin_permisos, subject)
+                else espacio usable
+                    MC-->>MC: info 'espacio KV abierto' { bucket, kvPrefix }
                 end
             end
         end
@@ -151,20 +148,21 @@ filesystem y CA-2 exige fallar sin intentar nada antes.
 | `SUBADDRESS_PREFIX` | No | `tickets` |
 | `PLACEHOLDER_TITLE` | No | `Ticket recibido por mail` |
 | `PLACEHOLDER_BODY` | No | `(mail sin contenido)` |
-| `KV_TICKETS_BUCKET` | No | `TICKETS` |
-| `KV_THREADS_BUCKET` | No | `MAIL_THREADS` |
-| `KV_THREADS_TTL_DAYS` | No | `90` |
-| `KV_WATCH_RETRY_MS` | No | `30000` |
 
 Las de **IMAP ya se declaran y son requeridas** (S-007): con la ingesta en alcance dejaron de ser
-opcionales, y esto **supera el criterio 5 de REQ-001**. S-024 sumó las cuatro del KV.
+opcionales, y esto **supera el criterio 5 de REQ-001**. S-024 sumó las cuatro del KV. *(S-034 /
+REQ-008: S-032 las eliminó —`KV_TICKETS_BUCKET`, `KV_THREADS_BUCKET`, `KV_THREADS_TTL_DAYS`,
+`KV_WATCH_RETRY_MS`—: el bucket es `JIKU_KV`, fijo en el SDK, y los prefijos son constantes del
+código. Una variable vieja que quede en el entorno se ignora)*
 
 **El Mapa de Tickets ya no se valida acá, y su regla cross-field desapareció (S-025).** Hasta S-024
 este paso validaba `TICKET_MAP` / `TICKET_MAP_FILE` —dos fuentes **excluyentes**, la única regla
 cross-field de todo el schema— y **leía el archivo del mapa desde adentro de la validación**, con lo
-que el schema tocaba el filesystem. Nada de eso existe más: el mapa vive en un bucket KV y se carga
-en el **Paso 5.6**, sobre la conexión al bus. Este paso volvió a ser una validación de variables
-sueltas, sin ninguna regla entre claves y sin tocar el disco.
+que el schema tocaba el filesystem. Nada de eso existe más: el mapa vive en el Espacio KV del
+conector y se consulta **una vez por mail**, en el tick (ver
+[ruteo-y-alta-del-requisito](ruteo-y-alta-del-requisito.md)). *(S-034 / REQ-008: antes "vive en un
+bucket KV y se carga en el Paso 5.6, sobre la conexión al bus")* Este paso volvió a ser una
+validación de variables sueltas, sin ninguna regla entre claves y sin tocar el disco.
 
 Las tres consecuencias de esa eliminación:
 
@@ -173,8 +171,9 @@ Las tres consecuencias de esa eliminación:
    sigue siendo la razón por la que la lista sale completa).
 2. **La validación del schema volvió a ser pura**: ya no hay `readFileSync` en el camino, ni la
    excepción de "el schema toca el filesystem" que había que justificar.
-3. **El fail-fast del mapa no se perdió, se mudó**: un bucket inexistente impide el arranque en el
-   Paso 5.5, con un error que nombra el bucket. Lo que cambió es *cuándo* falla y *qué* nombra.
+3. **El fail-fast del mapa no se perdió, se mudó**: un `JIKU_KV` no usable impide el arranque en el
+   Paso 5.5, con un error que nombra el bucket y la causa. Lo que cambió es *cuándo* falla y *qué*
+   nombra. *(S-034 / REQ-008: antes "un bucket inexistente")*
 
 `POLL_CRON` se valida con **`cron.validate()` de `node-cron`, en el arranque** — no al schedular.
 Sin esa validación temprana, un cron mal formado explotaría recién en `cron.schedule()` (Paso 8, ya
@@ -424,125 +423,81 @@ credencial**.
 
 ---
 
-### Paso 5.5: Abrir y verificar los dos buckets del KV
+### Paso 5.5: Abrir el Espacio KV
 
 **Origen:** `jiku-email-tickets`
-**Destino:** Bus NATS (JetStream)
+**Destino:** Bus NATS (JetStream, bucket `JIKU_KV`)
 **Tipo:** Operación del bus (no es un comando de `core`)
 
-**Operación:** `new Kvm(client.connection)` y, sobre él, `open()` + `status()` de los dos buckets:
-el del Mapa de Tickets (`KV_TICKETS_BUCKET`, por default `TICKETS`) y el del Mapa de Hilos
-(`KV_THREADS_BUCKET`, por default `MAIL_THREADS`).
+**Operación:** `openKvSpace({ client, logger })` (`src/infra/kv/space.ts`), que llama a
+`client.kv()` — el **único** `client.kv()` de `src/`, afirmado por un test de propiedad—. El SDK
+publica **una vez** `$JS.API.STREAM.INFO.KV_JIKU_KV`, verifica que el bucket exista y que tenga
+`allow_direct` (sin él, los `get` irían a un subject que el rol no tiene), y devuelve el handle del
+espacio de la identidad. El handle viaja por parámetro (`space`) al tick; es un
+`Pick<KV, 'get' | 'put'>`, así que el conector **no puede** borrar entradas.
 
-**Ref:** S-024; ADR-002; REQ-005
+**Response (éxito):** una línea `info` `'espacio KV abierto'` con `{ bucket, kvPrefix }`: `bucket` es
+siempre `JIKU_KV` y `kvPrefix` es `kvKey(client.instance, client.userId, '')` (el prefijo
+`{instance}.{userId}.` que el SDK agrega a cada clave, y el dato que U-02 copia para cargar un slug).
+El campo **no** se llama `key` porque `REDACT_PATHS` lo redactaría en silencio.
 
-> **Implementado en S-024** — `src/infra/kv/stores.ts` (`openKvStores()`). Va **después** del Paso 5
-> y **antes** del Paso 8 por dos razones que no son de estilo: el `Kvm` se construye sobre
-> `client.connection`, así que sin conexión no hay nada sobre lo que construirlo; y un bucket
-> faltante tiene que impedir el arranque en vez de descubrirse en el primer mail.
->
-> **Cuatro hallazgos verificados contra el paquete instalado, que la próxima story del KV no debería
-> tener que redescubrir:**
->
-> **1. `open()` NO verifica que el bucket exista, y su docstring engaña.** Dice *"If the KV doesn't
-> exist, this API will fail on accessing the KV"*, que se lee fácil como "`open()` lanza". No lanza:
-> `open()` fija `bindOnly: true` (`lib/kv.js:158-160`) y delega en `Bucket.bind()`
-> (`lib/kv.js:228-246`), que valida el nombre, construye el objeto y **nunca llama a `streams.info`**.
-> El fallo está diferido al primer acceso real. **La verificación es `status()`**, que sí consulta
-> (`lib/kv.js:812`). Sin ese `status()`, el conector arrancaría feliz contra un despliegue sin
-> buckets y descartaría todos los mails en silencio — el modo de falla exacto que este paso cierra.
-> Si alguien ve el `status()` como "redundante después del `open()`" y lo borra, reintroduce eso.
->
-> **2. `status().ttl` viene en MILISEGUNDOS, y `0` significa "sin TTL".** Es
-> `millis(si.config.max_age)` (`lib/kv.js:835-837`): un bucket creado con `--ttl=90d` reporta
-> `7776000000`. La configuración está en **días**, porque es la unidad con la que el operador crea el
-> bucket, así que la comparación convierte explícitamente.
->
-> **3. "Sin permisos de KV" es INDISTINGUIBLE de "JetStream deshabilitado", y no hay que intentar
-> distinguirlos.** Una violación de permisos sobre `$JS.API.>` no llega como respuesta a la request:
-> llega como un `-ERR` asincrónico por el stream de status de la conexión, y el cliente la envuelve
-> igual que la ausencia de JetStream, como `JetStreamNotEnabled`. Separarlas exigiría correlacionar
-> el error asincrónico con la request. El diagnóstico `kv_no_disponible` nombra **las dos** cosas a
-> revisar, que es lo único que el operador necesita.
->
-> **4. Las clases de error del KV no son importables desde el subpath del SDK**, así que `instanceof`
-> es imposible y `diagnoseKvFailure()` clasifica por `name` y por `code` (`10059`) — nunca por el
-> texto del mensaje. El propio `Kvm.create()` de la librería compara
-> `err.message === "stream not found"`, que es el bug que este módulo no replica.
->
-> **El conector NO crea buckets y NO fija el TTL**, y las dos cosas están afirmadas por tests que
-> escanean `src/`. Crear un bucket ante un typo en el nombre dejaría un bucket vacío en silencio, con
-> el mismo síntoma indiagnosticable de arriba. Fijar el TTL exigiría el permiso de escritura de
-> streams que la decisión de no crear buckets existe para evitar. **Los crea el operador** — es una
-> precondición de despliegue, no un paso del arranque.
->
-> **Los dos buckets se verifican en orden y se corta en el primero que falta**, empezando por el de
-> slugs: sin el Mapa de Tickets no se puede rutear nada, mientras que sin el de hilos sólo degradan
-> las respuestas. No son equivalentes, y el error nombra **un** bucket para que el operador sepa cuál
-> crear.
+**Si falla:** el error de `client.kv()` se traduce **por clase del SDK** —por `instanceof`, nunca por
+el mensaje— en `KvSpaceUnavailableError` (`code: KV_SPACE_UNAVAILABLE_ERROR`):
 
----
+| Clase del SDK | `diagnosis` | Qué hay que arreglar |
+|---|---|---|
+| `JikuNoBucket` | `bucket_no_usable` | `JIKU_KV` no existe, no tiene `allow_direct`, o JetStream está apagado. Lo arregla el **deploy de Jiku**; no es un problema de grants |
+| `JikuKVPermissionDenied` | `kv_sin_permisos` | El bus rechazó un subject del espacio: al rol le faltan los grants. El error lleva el `subject` rechazado |
+| Cualquier otra (un `JikuError` de timeout, un cliente cerrado) | `desconocido` | No se mapea a otra causa |
 
-### Paso 5.6: Cargar el Mapa de Tickets y seguirlo con `watch()`
+**Ref:** S-024, S-032; ADR-002, ADR-004; REQ-008
 
-**Origen:** `jiku-email-tickets`
-**Destino:** Bus NATS (JetStream)
-**Tipo:** Operación del bus
+> **Implementado en S-032.** Va **después** del Paso 5 y **antes** del Paso 8 por dos razones que no
+> son de estilo: `client.kv()` viaja por `client.connection` —sin conexión no hay sobre qué abrirlo,
+> y no se abre ninguna otra (ADR-002)—; y un espacio no usable tiene que impedir el arranque, no
+> descubrirse en el primer mail, donde cada mail nuevo se descartaría como `slug_no_consultable`. El
+> error se propaga sin envolverse de nuevo: ya trae su diagnóstico. Sin timeout propio: rige el del
+> cliente (15000 ms).
+>
+> **El conector NO crea el bucket.** `JIKU_KV` lo crea y lo configura **el deploy de Jiku** (ni U-02
+> ni el conector): crearlo ante un despliegue roto escondería el problema detrás de un bucket vacío,
+> con todos los mails descartados como `slug_no_mapeado` y sin síntoma en el arranque.
+>
+> **Los grants son tres, exactos, y ninguno ancho** (invariante 31: cada identidad alcanza sólo su
+> propio espacio). La plantilla del rol `internal-app` concede:
+>
+> ```yaml
+> pub:
+>   allow:
+>     - "$JS.API.STREAM.INFO.KV_JIKU_KV"
+>     - "$KV.JIKU_KV.<instance>.{{user_id}}.>"
+>     - "$JS.API.DIRECT.GET.KV_JIKU_KV.$KV.JIKU_KV.<instance>.{{user_id}}.>"
+> ```
+>
+> **No** se otorga ninguna forma ancha —`$JS.API.>`, `$KV.JIKU_KV.>`,
+> `$JS.API.DIRECT.GET.KV_JIKU_KV`, `$JS.API.STREAM.MSG.GET.KV_JIKU_KV`—: cada una alcanza las claves
+> de **todas** las identidades. Ante `kv_sin_permisos`, el remedio son los grants que faltan, que el
+> SDK nombra en `causes` (`requiredKVPermissions()`), no un permiso amplio.
+>
+> **Historia (S-024 a S-032).** Hasta S-032 este paso abría **dos buckets propios** con el KV crudo de
+> `@nats-io/kv` sobre la conexión, y registraba cuatro hallazgos de esa librería (que `open()` no
+> verificaba la existencia, que el TTL venía en milisegundos, que "sin permisos" era indistinguible
+> de "JetStream deshabilitado", y que sus clases de error no eran importables, por lo que se
+> clasificaba por `name`/`code`). **Ya no aplican**: la librería no está en el árbol, el SDK verifica
+> el bucket en `client.kv()`, distingue `JikuNoBucket` de `JikuKVPermissionDenied` y exporta sus
+> clases, así que el diagnóstico pasó a `instanceof`. Los hallazgos quedan registrados en
+> el Story Plan de
+> [S-024](../story-plans/S-024.jiku-email-tickets.apertura-buckets-kv-conexion-unica.md).
 
-**Operación:** `startTicketMapWatch()` sobre el handle del bucket de slugs que abrió el Paso 5.5:
-espera la **carga inicial completa** y deja corriendo un `watch()` que mantiene la copia en memoria
-actualizada por el resto de la vida del proceso.
-
-**Ref:** S-025; ADR-004; REQ-005
-
-> **Implementado en S-025.** Es el paso que hace que agregar un proyecto **no necesite un redeploy**:
-> un `nats kv put` sobre el bucket aparece en el ruteo en segundos.
->
-> **El arranque ESPERA la carga inicial completa**, y no es una preferencia: schedular el primer tick
-> con el mapa a medio llenar haría que los mails de un slug que sí está cargado se descarten como
-> `slug_no_mapeado`. Un descarte es definitivo —el mail queda `\Seen`— así que la ventana no se
-> puede tolerar.
->
-> **Cinco hallazgos verificados empíricamente** contra `nats:2.11-alpine` con `-js` y
-> `@nats-io/kv@3.4.0`. Cada uno invalida una implementación que parece obviamente correcta, así que
-> valen más escritos que redescubiertos:
->
-> **1. Un bucket VACÍO no emite NUNCA ningún entry, y esperar uno cuelga el arranque para siempre.**
-> Es la trampa central. `watch()` marca el fin de la carga inicial con `isUpdate`, pero con cero
-> entradas **el callback no se invoca jamás**. Una espera escrita como *"resolver cuando llegue el
-> primer entry con `isUpdate: true`"* **no resuelve nunca** contra un bucket vacío: el proceso queda
-> vivo, sin loguear, sin schedular el tick y sin morirse — **sin ningún síntoma**. Y un bucket vacío
-> es el estado del **primer arranque de todo despliegue nuevo**. La solución es consultar
-> `status().values` **antes** de arrancar el watch: con `0`, la carga inicial está completa por
-> definición.
->
-> **2. El ÚLTIMO entry de la carga inicial ya trae `isUpdate: true`.** Con tres entradas se emite
-> `false, false, true`. Por eso el orden es **aplicar primero, resolver después**: un
-> `if (entry.isUpdate) resolver()` colocado antes de aplicar se saltearía la última entrada.
->
-> **3. Cuando el watch se cae, el `for await` TERMINA NORMALMENTE — no lanza.** La librería empuja un
-> centinela que termina el iterador limpiamente, así que un `try { for await } catch { reintentar }`
-> **no detecta la caída más común**: el loop sale por la puerta de adelante y nadie reintenta. La
-> detección va **después** del loop, en el camino normal.
->
-> **4. Un `delete` llega como `operation: 'DEL'`, con el valor VACÍO.** Aplicar todo como `set()`
-> deja un slug borrado por el operador ruteando para siempre; y parsear el valor antes de mirar la
-> operación produce un `NaN`.
->
-> **5. `entry.json()` LANZA** con un valor cargado a mano que no sea JSON válido. Un dato malo no
-> debe matar el watch entero, así que el parseo es propio y tolerante: la entrada inválida se
-> **ignora con un `warn` que nombra la clave** y las demás siguen funcionando.
->
-> **Si el watch se cae, el mapa NO se vacía.** Se conserva la última copia buena y se reintenta cada
-> `KV_WATCH_RETRY_MS`; lo que se pierde son las actualizaciones, no el ruteo. Vaciarlo dejaría de
-> rutear mails que se podían rutear perfectamente, convirtiendo una caída del bus en pérdida de
-> tickets.
->
-> **El `Map` es el MISMO objeto durante toda la vida del proceso.** El watch lo muta con
-> `set`/`delete` y **nunca lo reemplaza**, que es lo que permite que `config.ruteo.ticketMap` sea una
-> referencia fija y vea las actualizaciones. Un `new Map(...)` defensivo, un spread o un
-> `structuredClone` en el camino romperían la vivacidad **sin fallar en compilación**: el conector
-> rutearía bien los slugs iniciales y no vería ninguno nuevo, nunca.
+> **El Paso 5.6 ya no existe (REQ-008 / S-032, documentado en S-034).** Hasta S-032 había un Paso
+> 5.6 que cargaba el Mapa de Tickets con `watch()` sobre una copia en memoria y esperaba la carga
+> inicial completa antes de schedular el tick. Desde REQ-008 el slug se consulta **una vez por mail**
+> (`lookupTicket()`, en el tick): no hay nada que cargar antes del primer tick, y el arranque ya no
+> espera nada. Con el paso desapareció **una clase entera de fallas**: el bucket vacío que colgaba el
+> arranque sin ningún síntoma, la caída silenciosa del iterador del watch (el `for await` que termina
+> normalmente), y el `DEL` con valor vacío que dejaba un slug borrado ruteando. Los cinco hallazgos
+> del watch quedan registrados en el Story Plan de
+> [S-025](../story-plans/S-025.jiku-email-tickets.mapa-tickets-al-kv-con-watch.md).
 
 ---
 
@@ -639,15 +594,9 @@ cancelarlo nunca**) → `await closeBus()` → `process.exit(0)`.
 | 5 | Bus inalcanzable (host irresoluble o puerto cerrado) | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: bus_inalcanzable` | **No arranca**: el proceso no queda vivo en un estado inútil |
 | 5 | Creds del sentinel ilegible | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: creds_ilegible` — el arreglo está en el **montaje del archivo** | **No arranca**, exit ≠ 0 |
 | 5 | Cualquier otro fallo de conexión | `BUS_CONNECT_ERROR` | Log `fatal` con `diagnosis: desconocido`, la clase del SDK y la cadena de causas, **sin mapearse a otra causa** | **No arranca**, exit ≠ 0 |
-| 5.5 | El bucket del Mapa de **Tickets** no existe | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: bucket_inexistente` y **`bucket: TICKETS`** — el nombre del bucket es el dato que hace accionable el fallo | **No arranca**, exit ≠ 0. Lo crea el operador (`nats kv add`), no el conector |
-| 5.5 | El bucket del Mapa de **Hilos** no existe | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: bucket_inexistente` y **`bucket: MAIL_THREADS`** | **No arranca**, exit ≠ 0. Sin él las respuestas no rutearían, y arrancar a medias lo escondería |
-| 5.5 | JetStream deshabilitado **o** sin permisos de KV en el auth-callout | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: kv_no_disponible`. El mensaje nombra **las dos** cosas a revisar: son indistinguibles desde el cliente | **No arranca**, exit ≠ 0. **No** dice que el bus esté inalcanzable: la conexión funcionó |
-| 5.5 | Nombre de bucket inválido en la configuración | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: nombre_de_bucket_invalido`. Se detecta **antes** de cualquier I/O, así que el diagnóstico es positivo y no por descarte | **No arranca**, exit ≠ 0 |
-| 5.5 | Cualquier otro fallo del KV | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con `diagnosis: desconocido`, la clase del error y la cadena de causas, **sin mapearse a otra causa** | **No arranca**, exit ≠ 0 |
-| 5.5 | El TTL del bucket de hilos **difiere** del configurado | — | Log `warn` con `bucket`, `expectedTtlDays` y `actualTtlMs` | **Arranca igual.** Un TTL distinto no rompe el ruteo: sólo cambia la ventana, y una entrada expirada degrada a `hilo_desconocido`, que es una falla segura. El conector **no** lo fija |
-| 5.6 | El `watch()` del Mapa de Tickets no se puede dar de alta | `KV_BUCKET_MISSING_ERROR` | Log `fatal` con el bucket y la operación | **No arranca**, exit ≠ 0. Sin el mapa no se puede rutear nada |
-| 5.6 | Una entrada del bucket tiene un valor inválido (no es un entero positivo) | — | Log `warn` que **nombra la clave** | **Arranca igual** y la entrada se **ignora**. Un dato malo cargado a mano no debe dejar sin ruteo a los demás proyectos, y con el mapa en el KV ya no hay un "momento de carga" en el que fallar |
-| 5.6 | El `watch()` se cae con el proceso vivo | — | Log `warn` con el bucket y el intervalo de reintento | **El proceso NO muere.** El mapa **conserva la última copia buena** y el ruteo sigue; se reintenta cada `KV_WATCH_RETRY_MS`. Lo que se pierde son las **actualizaciones**, no el mapa |
+| 5.5 | `JIKU_KV` no existe, no tiene `allow_direct`, o JetStream está apagado (`JikuNoBucket`) | `KV_SPACE_UNAVAILABLE_ERROR` | Log `fatal` `'el arranque fallo: el espacio KV no esta usable'` con `diagnosis: bucket_no_usable` y `bucket: JIKU_KV`; el mensaje del SDK en `causes` nombra cuál de las tres causas es | **No arranca**, exit ≠ 0. Lo crea y lo configura el deploy de Jiku; el conector no lo crea. **No** sugiere agregar grants |
+| 5.5 | El rol no tiene los grants del Espacio KV (`JikuKVPermissionDenied`) | `KV_SPACE_UNAVAILABLE_ERROR` | Log `fatal` con `diagnosis: kv_sin_permisos`, el `subject` rechazado, y en `causes` los grants que faltan (`requiredKVPermissions()`) | **No arranca**, exit ≠ 0. **No** dice que el bus esté inalcanzable: la conexión funcionó. El remedio son los tres grants exactos, nunca `$JS.API.>` |
+| 5.5 | Cualquier otro fallo de `client.kv()` (un `JikuError` de timeout, un cliente cerrado) | `KV_SPACE_UNAVAILABLE_ERROR` | Log `fatal` con `diagnosis: desconocido`, `errorClass` y la cadena de causas, **sin mapearse a otra causa** | **No arranca**, exit ≠ 0 |
 | 6 | Se pierde el evento del auth-callout | — | — | El conector queda sin fila en `users` hasta su próxima autenticación. Reconectar lo resuelve. **Dependencia declarada del producto, no un bug del conector** |
 | 7 | Falla el refresh del token | — | Log `error` con `diagnosis: refresh_del_token_fallo`, la clase del SDK y la cadena de causas | **El proceso NO muere** (NFR-R04). El token vigente sigue sirviendo |
 
@@ -672,7 +621,13 @@ background** no lo es. Son dos momentos distintos y las dos reglas conviven.
 > ausente, porque manda a revisar el sistema equivocado, que es el fallo exacto que ADR-006 existe
 > para evitar.
 
-> **Agregado en S-024: las seis filas del Paso 5.5, y una rama de reporte propia.** El KV **no**
+> **Agregado en S-024: las seis filas del Paso 5.5, y una rama de reporte propia.** *(S-034 /
+> REQ-008: este bloque se conserva como historia. **La rama propia sigue**, ahora para
+> `KvSpaceUnavailableError`, con el mensaje *"el espacio KV no esta usable"* y el contexto
+> `{ code, diagnosis, bucket, subject?, errorClass, causes }`; su argumento —la conexión al bus
+> funcionó— sigue siendo la razón del código. Lo que cambió: las filas son tres, el arreglo ya no es
+> *"un `nats kv add`"* sino el bucket (deploy de Jiku) o los grants, y **desde REQ-008 el arranque no
+> tiene ninguna fila `warn`**: la del TTL salió con los buckets propios.)* El KV **no**
 > comparte la rama de `BusConnectError` en `reportStartupFailure()`, y la separación es el punto:
 > cuando falta un bucket, la conexión al bus funcionó perfectamente. Reportarlo como *"el conector no
 > pudo conectarse al bus"* mandaría al operador a revisar Zitadel, la red y los montajes de
@@ -680,7 +635,8 @@ background** no lo es. Son dos momentos distintos y las dos reglas conviven.
 > ADR-006 existe para evitar. De ahí que el mensaje de esta rama sea *"un bucket del KV no está
 > usable"* y que el contexto lleve `bucket` y `operation`.
 >
-> **La única fila `warn` de todo el arranque es la del TTL**, y es deliberado: es el único hallazgo
+> **La única fila `warn` de todo el arranque es la del TTL** *(hasta S-032; ver la anotación de
+> arriba)*, y es deliberado: es el único hallazgo
 > del Paso 5.5 que no impide operar. Todo lo demás del KV es fatal, por la misma regla que gobierna
 > la tabla — un fallo al arrancar es fatal.
 
