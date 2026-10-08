@@ -38,6 +38,9 @@ import { startJetStreamNats, type JetStreamNats } from './helpers.js';
  * Hasta S-032 este bloque tenia ademas dos escenarios por bucket faltante (el de hilos solo, y los
  * dos a la vez). Desde REQ-008 hay UN solo bucket, `JIKU_KV`, y se borraron con los dos buckets.
  *
+ * S-033 (CA-6 caso 2) suma TS-11: `JIKU_KV` SIN `allow_direct`, encadenado igual. El caso 3 (un rol
+ * sin los grants del espacio) necesita un servidor con permisos y vive en `e2e-permisos.test.ts`.
+ *
  * # POR QUE NO SE INVOCA `runStartup()`
  *
  * `runStartup()` llama a `connectToBus()`, que pide el token a Zitadel ANTES de abrir el socket. No
@@ -312,9 +315,15 @@ describe('E2E contra NATS real: el ciclo alta -> respuesta -> respuesta a la res
  * CA-8 — EL FAIL-FAST DEL ESPACIO NO USABLE, ENCADENADO CON EL REPORTE DEL ARRANQUE
  * ========================================================================================== */
 describe('E2E contra NATS real: el arranque falla cuando JIKU_KV no esta usable (CA-8)', () => {
-  // Los escenarios que borran `JIKU_KV` lo dejan como estaba para el resto del archivo.
+  // Los escenarios que borran `JIKU_KV` —o lo dejan sin `allow_direct` (S-033, TS-11)— lo dejan
+  // como estaba para el resto del archivo: borrado y creado otra vez con la configuracion del SDK.
   afterEach(async () => {
-    if (!(await nats.bucketExists())) await nats.createBucket();
+    if (!(await nats.bucketExists())) {
+      await nats.createBucket();
+    } else if ((await nats.bucketConfig())['allow_direct'] !== true) {
+      await nats.deleteBucket();
+      await nats.createBucket();
+    }
   });
 
   /**
@@ -417,5 +426,38 @@ describe('E2E contra NATS real: el arranque falla cuando JIKU_KV no esta usable 
       bucket: 'JIKU_KV',
       msg: FATAL_MESSAGE,
     });
+  });
+
+  // TS-11 (S-033, CA-6 caso 2). El bucket EXISTE pero sin `allow_direct`: el SDK lo rechaza al abrir
+  // (sin direct get no puede leer confinado al prefijo) y el conector no lo arregla. El mensaje del
+  // SDK dice "Do not grant it" —contiene la palabra "grant"—, asi que "ninguna mencion de grants" se
+  // afirma sobre el texto del CONECTOR (`error.message`, el `msg` del fatal), sobre la AUSENCIA del
+  // campo `subject` y sobre el diagnosis, nunca sobre la linea serializada entera (Hallazgo 3).
+  it('TS-11: JIKU_KV sin allow_direct -> bucket_no_usable, sin subject ni grants, y el conector no lo arregla', async () => {
+    await nats.deleteBucket();
+    await nats.createBucket({ allow_direct: false });
+
+    const { error, fatals } = await arrancarYFallar();
+
+    expect(error.diagnosis).toBe('bucket_no_usable');
+    expect(error.diagnosis).not.toBe('kv_sin_permisos');
+    expect(error.errorClass).toBe('JikuNoBucket');
+    expect(error.causes[0]).toContain('allow_direct');
+    expect(error.message).not.toMatch(/grant|permis/i);
+
+    expect(fatals).toHaveLength(1);
+    const fatal = fatals[0] ?? {};
+    expect(fatal).toMatchObject({
+      code: 'KV_SPACE_UNAVAILABLE_ERROR',
+      diagnosis: 'bucket_no_usable',
+      bucket: 'JIKU_KV',
+      errorClass: 'JikuNoBucket',
+      msg: FATAL_MESSAGE,
+    });
+    expect('subject' in fatal).toBe(false);
+    expect(String(fatal['msg'])).not.toMatch(/grant|permis/i);
+
+    // El conector no lo arreglo: el bucket sigue sin `allow_direct`.
+    expect((await nats.bucketConfig())['allow_direct']).toBe(false);
   });
 });

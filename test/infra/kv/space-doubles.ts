@@ -78,3 +78,68 @@ export function withFailingPut(space: KvSpace, error: unknown = defaultTimeout()
     put: () => Promise.reject(error),
   };
 }
+
+/** Lo que devuelve `switchableSpace()`: el espacio y los dos interruptores. */
+export interface SwitchableSpace {
+  /** EL MISMO objeto antes, durante y despues de la caida. */
+  readonly space: KvSpace;
+  /** Desde aca, `get()` y `put()` rechazan con el error de la caida. */
+  readonly down: () => void;
+  /** Desde aca, `get()` y `put()` vuelven a delegar en el espacio envuelto. */
+  readonly up: () => void;
+}
+
+/**
+ * Una caida del KV en caliente, controlada: con `down()` el `get()` y el `put()` rechazan con
+ * `error` (por defecto, el timeout del SDK); con `up()` vuelven a delegar.
+ *
+ * Es EL MISMO objeto antes y despues, y eso es lo que lo hace util (S-033, CA-7): el tick que sigue
+ * a la caida usa el mismo handle, sin reabrir el espacio, y si crea su requisito es porque no habia
+ * ningun estado que reconstruir. Un doble que devolviera un objeto nuevo al volver no probaria eso.
+ */
+export function switchableSpace(space: KvSpace, error: unknown = defaultTimeout()): SwitchableSpace {
+  let isDown = false;
+  return {
+    space: {
+      get: (key, options) => (isDown ? Promise.reject(error) : space.get(key, options)),
+      put: (key, value, options) => (isDown ? Promise.reject(error) : space.put(key, value, options)),
+    },
+    down: () => {
+      isDown = true;
+    },
+    up: () => {
+      isDown = false;
+    },
+  };
+}
+
+/** Lo que devuelve `withEntryCreated()`: el espacio y el registro de lo que devolvio fechado. */
+export interface AgedSpace {
+  readonly space: KvSpace;
+  /** Cada entrada que el doble devolvio con la fecha cambiada, en orden. */
+  readonly reads: { key: string; created: Date }[];
+}
+
+/**
+ * El mismo espacio, con cada entrada existente devuelta con `created` fijado en `created`. JetStream
+ * no permite fechar una entrada hacia atras, y "una respuesta a un hilo de 91 dias" necesita una
+ * entrada de 91 dias (S-033, CA-4).
+ *
+ * El registro `reads` existe para que el test afirme que el doble SE USO: un doble que nadie
+ * consulto haria pasar el escenario sin probar nada sobre la antiguedad.
+ */
+export function withEntryCreated(space: KvSpace, created: Date): AgedSpace {
+  const reads: { key: string; created: Date }[] = [];
+  return {
+    reads,
+    space: {
+      get: async (key, options) => {
+        const entry = await space.get(key, options);
+        if (entry === undefined) return undefined;
+        reads.push({ key, created });
+        return { ...entry, created };
+      },
+      put: (key, value, options) => space.put(key, value, options),
+    },
+  };
+}

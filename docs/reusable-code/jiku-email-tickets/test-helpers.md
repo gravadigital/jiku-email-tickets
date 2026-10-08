@@ -487,7 +487,9 @@ expect(fake.gets).toEqual(['tickets.alfa']);
 **Description:** Starts a NATS container **with `-js`** (on the `nats:2.11-alpine` tag, different from
 the shared `nats:2.10-alpine`, so `shared-container.test.ts`'s `ancestor=` count never sees it — not a
 version decision) and creates `JIKU_KV` with the stream configuration the SDK's own integration test
-uses (`allow_direct: true`, **no** `max_age`). Rewritten in S-032 without `Kvm`.
+uses (`allow_direct: true`, **no** `max_age`). Rewritten in S-032 without `Kvm`. S-033 added
+`bucketConfig()` and `lastSequences()`, and moved the bucket creation to the exported module-level
+`createBucket(connection, overrides?)` so the permissioned server can reuse it.
 
 **Signature:**
 
@@ -499,11 +501,18 @@ interface JetStreamNats {
   readonly createBucket: (overrides?: Record<string, unknown>) => Promise<void>;  // $JS.API.STREAM.CREATE.KV_JIKU_KV
   readonly deleteBucket: () => Promise<void>;
   readonly bucketExists: () => Promise<boolean>;  // false on err_code 10059
+  readonly bucketConfig: () => Promise<Record<string, unknown>>;  // STREAM.INFO `config` (S-033)
+  readonly lastSequences: (filter?: string) => Promise<Map<string, number>>;  // subject -> last seq (S-033)
   readonly spaceFor: (userId: string, instance?: string) => Promise<KvSpace>;
   readonly stop: () => Promise<void>;
 }
 
 function startJetStreamNats(): Promise<JetStreamNats>
+
+// Module-level exports, shared with permission-helpers.ts (S-033):
+const JIKU_KV_STREAM: { name: 'KV_JIKU_KV'; subjects: ['$KV.JIKU_KV.>']; allow_direct: true; /* … */ };
+const createBucket: (connection: NatsConnection, overrides?: Record<string, unknown>) => Promise<void>;
+function connectWithRetry(url: string, options?: Omit<ConnectionOptions, 'servers'>): Promise<NatsConnection>;
 ```
 
 **Usage example:**
@@ -522,7 +531,17 @@ await nats.createBucket();                            // restore it in afterEach
 
 - **`createBucket` is the ONLY place in the repo that creates a bucket** — it stands in for the deploy
   of Jiku. A property test (`test/infra/kv/source-properties.test.ts`, TS-82) scans `src/` and
-  `test/` for any other `STREAM.CREATE`.
+  `test/` for any other `STREAM.CREATE`. Since S-033 it is a module-level export that takes the
+  connection: `startJetStreamNats()` calls it on its own connection and `permission-helpers.ts` on
+  the `deploy` user's. Reuse it — never write a second `STREAM.CREATE`.
+- **`lastSequences()` is how a test reads "every key a connector wrote"** (S-033), which the SDK's
+  `KV` cannot list: `STREAM.INFO` with `subjects_filter` returns `state.subjects`, and
+  `STREAM.MSG.GET` with `last_by_subj` gives each subject's last sequence. With
+  `max_msgs_per_subject: 1` the count is always 1, so "this key did not change" is asserted by
+  **comparing sequences between two snapshots**, not counts. A `nats kv del` marker is a message too,
+  so a deleted key stays listed with a new sequence.
+- **`bucketConfig()`** returns the stream `config`, to assert the connector did **not** fix a
+  misconfigured bucket (`allow_direct === false` after a failed start).
 - **A fresh space per identity replaces the bucket per test.** The bucket is one and fixed; what
   isolates tests is the `{instance}.{userId}.` prefix the SDK adds, the same isolation production
   has. The SDK's `KV` does not list keys, so there is no other way to start clean.
@@ -577,3 +596,152 @@ await runTick(source, config, logger, bus.client, withFailingPut(space, new Jiku
   over the instance breaks as soon as a method touches `this.#prefix` with the proxy as `this`.
 - **"Nothing was written" is asserted on what the code ASKED for**, since the SDK's `KV` cannot list
   keys.
+
+---
+
+## switchableSpace() / withEntryCreated()
+
+**Location:** `test/infra/kv/space-doubles.ts`
+
+**Description:** Two more wrappers of a `KvSpace` (S-033), for states JetStream cannot produce on a
+healthy container. `switchableSpace()` is a **controlled outage**: after `down()` both `get()` and
+`put()` reject (by default with the SDK's timeout `JikuError`); after `up()` they delegate again.
+`withEntryCreated()` returns every existing entry with its `created` replaced, and records each read.
+
+**Signature:**
+
+```ts
+interface SwitchableSpace {
+  readonly space: KvSpace;   // THE SAME object before, during and after the outage
+  readonly down: () => void;
+  readonly up: () => void;
+}
+interface AgedSpace {
+  readonly space: KvSpace;
+  readonly reads: { key: string; created: Date }[];
+}
+
+function switchableSpace(space: KvSpace, error?: unknown): SwitchableSpace;
+function withEntryCreated(space: KvSpace, created: Date): AgedSpace;
+```
+
+**Usage example:**
+
+```ts
+const sw = switchableSpace(space);
+sw.down();
+await runTick(source, config, logger, bus.client, sw.space);   // slug_no_consultable / es_respuesta
+sw.up();
+await runTick(next, config, logger, bus.client, sw.space);     // same handle: creates, no restart
+
+const created = new Date(Date.now() - 91 * 86_400_000);
+const aged = withEntryCreated(space, created);
+await runTick(reply, config, logger, bus.client, aged.space);
+expect(aged.reads).toContainEqual({ key: threadKey('<orig@cliente.com>'), created });
+```
+
+**Notes:**
+
+- **`switchableSpace()` returns the same object on purpose.** If the tick after the outage creates
+  its requirement on that very handle, there was no state to rebuild — which is the property (CA-7 of
+  S-033). A double that handed back a fresh object would prove nothing.
+- **JetStream cannot back-date an entry**, so a 91-day-old thread needs `withEntryCreated()`. Always
+  assert on `reads`: a double nobody queried would let the scenario pass without proving anything
+  about age.
+- Plain objects that delegate, never a `Proxy` (same reason as `spyOnSpace()`).
+
+---
+
+## operatorTicketKey() / operatorPut() / operatorDel() / readmeTicketTemplate()
+
+**Location:** `test/infra/kv/operator.ts`
+
+**Description:** What U-02 does with the NATS CLI on the connector's KV Space (S-033):
+`nats kv put` / `nats kv del` with the **full key**, built from the template the README documents and
+the `kvPrefix` copied from the `'espacio KV abierto'` startup line.
+
+**Signature:**
+
+```ts
+const TEMPLATE_PREFIX = '<instance>.<sub>.';
+
+function readmeTicketTemplate(): string;                              // '<instance>.<sub>.tickets.<slug>'
+function readmeTicketMapSection(): string;                            // README '#### El Mapa de Tickets…'
+function ticketTemplateIn(text: string, where: string): string;       // first `nats kv put JIKU_KV <key> <projectId>`
+function fillTemplate(template: string, values: { kvPrefix: string } & Record<string, string>): string;
+function operatorTicketKey({ kvPrefix, slug }: { kvPrefix: string; slug: string }): string;
+
+interface PubAck { readonly stream: string; readonly seq: number }
+function operatorPut(connection: NatsConnection, fullKey: string, value: string): Promise<PubAck>;
+function operatorDel(connection: NatsConnection, fullKey: string): Promise<PubAck>;  // KV-Operation: DEL
+```
+
+**Usage example:**
+
+```ts
+const kvPrefix = startupCapture.lines().find((l) => l['msg'] === 'espacio KV abierto')?.['kvPrefix'];
+const fullKey = operatorTicketKey({ kvPrefix, slug: 'beta' });   // 'dev.387842544790142978.tickets.beta'
+await operatorPut(nats.connection, fullKey, '57');               // as `nats kv put JIKU_KV …`
+await runTick(source, config, logger, bus.client, space);        // the next mail routes to 57
+await operatorDel(nats.connection, fullKey);                     // as `nats kv del JIKU_KV …`
+```
+
+**Notes:**
+
+- **This is the only place that builds a `$KV.JIKU_KV.…` subject by hand, on purpose.** ADR-002's
+  rule is for production code; this file stands in for the operator's CLI, which writes the full key.
+  Writing through the SDK's `KV` would let the SDK add the prefix and prove nothing about the
+  documented template.
+- **The template is a contract.** `readmeTicketTemplate()` parses it out of the README and throws a
+  clear error if missing; the operator E2E consumes it, and `test/story-033-docs.test.ts` crosses it
+  with `kvKey()` + `ticketKey()`. Change the README template or the key shape in code, and a test
+  fails.
+- `operatorDel()` writes an empty message with `KV-Operation: DEL` on the same subject (what the
+  SDK's `delete()` does); `deny_delete: true` allows it because it is a write.
+- An ack carrying `error` throws: it is a helper failure, not a state to assert.
+
+---
+
+## startPermissionedJetStreamNats()
+
+**Location:** `test/infra/kv/permission-helpers.ts`
+
+**Description:** Starts a NATS container (`nats:2.11-alpine`, outside the shared container's
+`ancestor=` count) with JetStream and **static user permissions**, and creates `JIKU_KV` as the
+`deploy` user with `createBucket()` (S-033, CA-6 case 3). Users (password = name): `deploy` (no
+permissions declared, i.e. everything), `sin-grants` (only its inbox — missing all three KV Space
+grants), `solo-info` (can open the space with `STREAM.INFO` but cannot read or write keys).
+
+**Signature:**
+
+```ts
+type PermissionedUser = 'deploy' | 'sin-grants' | 'solo-info';
+
+interface PermissionedJetStreamNats {
+  readonly url: string;
+  readonly connectAs: (user: PermissionedUser) => Promise<NatsConnection>;  // caller closes it
+  readonly stop: () => Promise<void>;
+}
+
+function startPermissionedJetStreamNats(): Promise<PermissionedJetStreamNats>;
+```
+
+**Usage example:**
+
+```ts
+const nats = await startPermissionedJetStreamNats();   // beforeAll, 120 s timeout
+const conn = await nats.connectAs('sin-grants');
+const client = Client.fromConnection(conn, { instance: 'test', userId: 'sin-grants-0001', timeoutMs: 2_000 });
+await openKvSpace({ client, logger });                 // rejects: kv_sin_permisos, subject STREAM.INFO
+```
+
+**Notes:**
+
+- **What it proves and what it does not.** A real `nats-server` denying the SDK's publish reaches
+  the connector as `JikuKVPermissionDenied` with the rejected subject (verified for the first time
+  in S-033). It does **not** exercise the auth-callout, the real `internal-app` template, or the
+  `{{user_id}}` substitution — the permissions are static server config.
+- **The third authorized exception** to "one container per suite", same shape and reason as
+  `startAuthenticatedNats()` and `startJetStreamNats()`: the shared container cannot have
+  permissioned users without breaking every test that connects without credentials.
+- Reuses `connectWithRetry()` (dind's transient `EHOSTUNREACH`) and names Docker as a precondition.

@@ -1,7 +1,8 @@
 # Verificación manual de extremo a extremo
 
-**Última actualización:** 2026-09-09
-**Story:** S-028 (extiende el procedimiento del adjunto, escrito por S-022)
+**Última actualización:** 2026-10-08
+**Story:** S-033 (rehace la Parte 2 sobre el Espacio KV del SDK; la Parte 2 la escribió S-028, que
+extendió el procedimiento del adjunto escrito por S-022)
 
 Este documento es el procedimiento que **U-02** ejecuta contra un **entorno real** para confirmar,
 con mails reales, lo que la suite automatizada **no puede** confirmar. Tiene dos partes, cada una de
@@ -10,7 +11,7 @@ la story que la escribió:
 | Parte | Story | Qué cubre |
 |---|---|---|
 | [El camino del adjunto](#parte-1-el-camino-del-adjunto-s-022-ca-14) | S-022 | El camino completo con adjunto: ingesta → ruteo → partición/dedup/tope → permiso → `PUT` → descripción → alta del Requisito |
-| [El alcance del KV](#parte-2-el-alcance-del-kv-s-028-ca-15) | S-028 | La creación y siembra de los dos buckets, el slug nuevo que rutea **sin redesplegar**, y la respuesta que produce un **comentario público visible en Opus** |
+| [El alcance del KV](#parte-2-el-alcance-del-kv-s-028-ca-15) | S-028 · rehecha por S-033 | La verificación de `JIKU_KV` y la siembra del Mapa de Tickets con la clave completa, el slug nuevo que rutea **sin redesplegar** (y el borrado que deja de rutear), y la respuesta que produce un **comentario público visible en Opus** |
 
 **Por qué este documento existe y no es burocracia.** `Client.fromConnection()` **saltea el
 handshake de auth**, así que los tests de integración —por reales que sean el bus y el KV— **no
@@ -33,13 +34,14 @@ doble de `core` y de storage. Exige S-017 a S-021 terminadas e integradas.
 ## Precondición
 
 Las **ocho** precondiciones del `README.md` deben estar satisfechas. Eran cinco originalmente, S-022
-sumó la #7 (storage alcanzable) y **S-024 a S-027 sumaron la #8** (JetStream habilitado, permisos de
-KV en el auth-callout, y los dos buckets creados —el de hilos con su `--ttl=90d`). Para esta parte
-importan en particular:
+sumó la #7 (storage alcanzable) y **S-024 a S-027 sumaron la #8**, que REQ-008 reformuló: `JIKU_KV`
+creado por el deploy de Jiku en un bus con JetStream, con `allow_direct` y sin TTL, y los tres grants
+del Espacio KV en la plantilla de `internal-app`. Para esta parte importan en particular:
 
 - Instancia de Jiku alcanzable, con `tickets+alfa@grava.io` (o el slug equivalente) mapeado a un
-  `projectId` real **en el bucket KV del Mapa de Tickets** (ver la [Parte 2](#paso-1-crear-los-dos-buckets-con-el-cli-de-nats);
-  hasta S-024 esto era la variable `TICKET_MAP`, que **ya no existe**).
+  `projectId` real **en el Mapa de Tickets del Espacio KV del conector** (ver la
+  [Parte 2](#paso-2-sembrar-el-mapa-de-tickets-con-nats-kv-put-y-la-clave-completa); hasta S-024
+  esto era la variable `TICKET_MAP`, que **ya no existe**).
 - Storage S3-compatible alcanzable por red desde donde corre el conector.
 - Casilla IMAP real con subaddress habilitado.
 
@@ -110,69 +112,89 @@ un entorno real, cerrando el mismo contrato que la suite automatizada (CA-13) ve
 
 # Parte 2: el alcance del KV (S-028, CA-15)
 
-Los pasos manuales del alcance que REQ-005 agregó. **Sólo U-02 puede ejecutarlos** contra un entorno
-real (bus con JetStream + `core` + portal Opus): la suite automatizada corre contra un NATS real de
-Testcontainers y un KV real, pero con `Client.fromConnection()`, así que no prueba nada del auth
-handshake ni del renderizado en Opus.
+**Rehecha por S-033 (CA-13)** sobre el **Espacio KV** del SDK (REQ-008): el estado del conector ya no
+vive en dos buckets propios que crea el operador sino en su porción del bucket `JIKU_KV`, que crea el
+deploy de Jiku. Lo que la Parte 2 verifica sigue siendo lo mismo —el slug nuevo que rutea sin
+redesplegar y la respuesta que produce un comentario público visible en Opus—; cambia cómo se prepara
+y cómo se inspecciona.
+
+Los pasos manuales del alcance del KV. **Sólo U-02 puede ejecutarlos** contra un entorno real (bus con
+JetStream + `core` + portal Opus): la suite automatizada corre contra un NATS real de Testcontainers y
+un KV real, pero con `Client.fromConnection()` y permisos estáticos, así que no prueba nada del auth
+handshake, de la plantilla real de `internal-app` ni del renderizado en Opus.
 
 ## Precondición de esta parte
 
-Un bus con **JetStream habilitado** y la cuenta del conector con **permisos de KV** en el
-auth-callout. Si falta cualquiera de las dos, el conector **no arranca**: `code:
-KV_BUCKET_MISSING_ERROR` con `diagnosis: kv_no_disponible`, y el mensaje nombra **las dos cosas** a
-revisar, porque desde el cliente son indistinguibles.
+La **precondición 8 del `README.md`**: `JIKU_KV` creado por el deploy de Jiku con `allow_direct` y
+**sin TTL**, y los **tres grants** del Espacio KV en la plantilla de `internal-app`. Ni U-02 ni el
+conector la crean: U-02 la **verifica** (Paso 1) y, si falta, la pide al deploy de Jiku.
 
-Y el CLI de NATS (`nats`) configurado contra el bus, con una cuenta que pueda crear streams. **No es
-la cuenta del conector**: el conector no crea buckets a propósito.
+Y el CLI de NATS (`nats`) configurado contra el bus, con una **credencial que pueda escribir bajo el
+prefijo del conector** (`$KV.JIKU_KV.<instance>.<sub>.>`). **No puede ser la de un usuario común**:
+los grants confinan a cada rol a su propio `{{user_id}}`, así que un usuario común sólo escribe en su
+propio espacio, nunca en el del conector.
 
-## Paso 1: crear los dos buckets con el CLI de NATS
+## Paso 1: verificar que `JIKU_KV` existe, con `allow_direct` y sin TTL
 
-Una vez por despliegue, a mano:
-
-```bash
-nats kv add TICKETS                    # el Mapa de Tickets: slug -> projectId
-nats kv add MAIL_THREADS --ttl=90d     # el Mapa de Hilos: sha256(Message-Id) -> requirementId
-```
-
-Los nombres son los **defaults**; se cambian con `KV_TICKETS_BUCKET` y `KV_THREADS_BUCKET`. El
-`--ttl=90d` del bucket de hilos coincide con el default de `KV_THREADS_TTL_DAYS` (`90`).
-
-Dos cosas que el conector **no hace**, y hay que saberlo antes de esperar que las haga:
-
-- **No crea los buckets.** Un typo en el nombre crearía un bucket **vacío** en silencio, y el
-  síntoma sería un conector aparentemente sano que descarta **todos** los mails sin decir por qué.
-  Un arranque que falla nombrando el bucket que falta es mucho mejor.
-- **No fija el TTL.** Lo **compara** contra `KV_THREADS_TTL_DAYS` y avisa con un `warn` si difieren,
-  pero arranca igual. Fijarlo exigiría el permiso de escritura de streams que la decisión de no
-  crear buckets existe para evitar.
-
-**Verificación del paso:** arrancar el conector. Debe emitir la línea
-`'buckets del KV abiertos y verificados'` con `{ ticketsBucket, threadsBucket }`. Si falta un bucket,
-**no arranca**: `diagnosis: bucket_inexistente` y el log **nombra cuál** (el de slugs primero: sin el
-Mapa de Tickets no se puede rutear nada).
-
-## Paso 2: sembrar el Mapa de Tickets con `nats kv put`
-
-Un `put` por proyecto, con el slug del subaddress como clave y el `projectId` como valor:
+Nada que crear: el bucket lo crea el deploy de Jiku. Lo que hace U-02 es **verificarlo** antes de
+arrancar el conector:
 
 ```bash
-nats kv put TICKETS alfa 42          # tickets+alfa@grava.io -> projectId 42
-nats kv put TICKETS beta 7
-nats kv ls TICKETS                   # las claves son legibles: son los slugs
-nats kv get TICKETS alfa             # -> 42
+nats kv info JIKU_KV                 # o: nats stream info KV_JIKU_KV
+# Allows Direct: true                -> allow_direct activo (el SDK lo exige para leer)
+# Maximum Age: unlimited             -> sin TTL (max_age 0): los hilos no expiran
 ```
 
-El slug se normaliza a **minúsculas** en los dos lados del lookup, así que
-`nats kv put TICKETS Alfa 42` se guarda tal cual pero **no** rutea un mail a `tickets+alfa@`: usar
-minúsculas siempre.
+Ni U-02 ni el conector crean `JIKU_KV`, y es a propósito: un bucket creado por error —con otro nombre
+o con otra configuración— queda **vacío** en silencio, y el síntoma sería un conector aparentemente
+sano que descarta **todos** los mails sin decir por qué. Un arranque que falla nombrando el bucket es
+mucho mejor.
+
+**Un TTL no impide el arranque y el conector no puede detectarlo** (el SDK sólo exige `allow_direct`):
+por eso se mira acá. Con TTL, los slugs cargados empezarían a descartarse como `slug_no_mapeado` sin
+que nadie los haya borrado.
+
+**Verificación del paso:** arrancar el conector. Debe emitir la línea `'espacio KV abierto'` con
+`{ bucket: 'JIKU_KV', kvPrefix: '<instance>.<sub>.' }`. **Anotar el `kvPrefix`**: es el prefijo de
+todas las claves de los pasos siguientes. Si no arranca, la línea `fatal` trae
+`code: KV_SPACE_UNAVAILABLE_ERROR` y uno de tres `diagnosis`:
+
+- `bucket_no_usable`: `JIKU_KV` no existe, no tiene `allow_direct` o JetStream está apagado. Lo
+  arregla el **deploy de Jiku**; la causa exacta va en `causes`. No es un problema de grants.
+- `kv_sin_permisos`: al rol le faltan los grants. La línea trae el `subject` rechazado y los grants
+  que faltan; se arregla en la **plantilla de `internal-app`**.
+- `desconocido`: no encaja en ninguno; la clase y la cadena de causas van en la línea.
+
+## Paso 2: sembrar el Mapa de Tickets con `nats kv put` y la clave completa
+
+La plantilla de las tres operaciones, la misma del README:
+
+```bash
+nats kv put JIKU_KV <instance>.<sub>.tickets.<slug> <projectId>   # cargar o cambiar
+nats kv get JIKU_KV <instance>.<sub>.tickets.<slug>               # verificar
+nats kv del JIKU_KV <instance>.<sub>.tickets.<slug>               # borrar
+```
+
+`<instance>.<sub>.` es el `kvPrefix` del Paso 1, **copiado tal cual** (con el punto final). Con el
+ejemplo `prod.387842544790142978.`:
+
+```bash
+nats kv put JIKU_KV <instance>.<sub>.tickets.alfa 42     # tickets+alfa@grava.io -> projectId 42
+nats kv get JIKU_KV <instance>.<sub>.tickets.alfa        # -> 42
+# es decir: nats kv put JIKU_KV prod.387842544790142978.tickets.alfa 42
+```
+
+El slug se normaliza a **minúsculas** en los dos lados del lookup, así que una clave `…tickets.Alfa`
+se guarda tal cual pero **no** rutea un mail a `tickets+alfa@`: usar minúsculas siempre. Y el espacio
+es **por instancia**: `dev` y `prod` tienen `kvPrefix` distintos y se siembran por separado.
 
 **Verificación del paso:** mandar un mail a `tickets+alfa@grava.io` y confirmar que crea el requisito
 en el proyecto `42`.
 
-## Paso 3: un slug nuevo rutea SIN redesplegar
+## Paso 3: un slug nuevo rutea SIN redesplegar, y uno borrado deja de rutear
 
-Es la propiedad que REQ-005 compra, y la que deroga la Negative de ADR-004
-(*"agregar o cambiar un slug exige reiniciar el proceso"*).
+Es la propiedad que REQ-005 compró y REQ-008 conserva sin el `watch()`: el conector no guarda ninguna
+copia del mapa, consulta la clave del slug con un `get` puntual **por cada mail nuevo**.
 
 Con el conector **corriendo** —sin reiniciarlo, sin redesplegarlo, sin tocar el contenedor:
 
@@ -181,23 +203,23 @@ Con el conector **corriendo** —sin reiniciarlo, sin redesplegarlo, sin tocar e
    viaja en la línea justamente porque es el dato que hace falta para cargarlo.
 2. Cargar el slug, con el proceso vivo:
    ```bash
-   nats kv put TICKETS gamma 99
+   nats kv put JIKU_KV <instance>.<sub>.tickets.gamma 99
    ```
 3. Mandar **otro** mail a `tickets+gamma@grava.io`.
-   → **Crea el requisito en el proyecto 99**, sin haber reiniciado nada.
+   → **Crea el requisito en el proyecto 99** desde ese mail, sin haber reiniciado nada.
 
 El primer mail **no se recupera**: quedó `\Seen` y el `\Seen` es la única marca de idempotencia
 (ADR-001). Cargar el slug arregla los mails **siguientes**, no los anteriores.
 
-**El mismo paso al revés** (opcional, recomendado): `nats kv delete TICKETS gamma` y confirmar que un
-mail a ese slug vuelve a caer en `slug_no_mapeado`. Un `DEL` que el conector aplicara como un `set()`
-dejaría el slug ruteando **para siempre**: el operador lo saca del bucket, ve que el comando
-funcionó, y los mails siguen entrando.
+**El mismo paso al revés** (recomendado): `nats kv del JIKU_KV <instance>.<sub>.tickets.gamma` y
+confirmar que el mail **siguiente** a ese slug vuelve a caer en `slug_no_mapeado`, también sin
+redesplegar.
 
-**Y la degradación** (opcional): con el bus del KV cortado, el mapa **se conserva** y el ruteo sigue
-funcionando con la última copia buena; lo que se pierde son las **actualizaciones**. Un slug agregado
-durante el corte cae en `slug_no_mapeado` hasta que el reintento (`KV_WATCH_RETRY_MS`) repuebla el
-mapa entero.
+**Y la degradación** (opcional): si el KV no responde, los mails nuevos se descartan como
+**`slug_no_consultable`** —no como `slug_no_mapeado`: el arreglo es el bus, no cargar el slug— y
+quedan `\Seen`. Cada descarte nombra el slug y el `messageId`, para reconstruirlos desde la casilla.
+Cuando el KV vuelve, el mail siguiente rutea sin reiniciar el conector: no hay estado que
+reconstruir.
 
 ## Paso 4: la respuesta que produce un comentario público visible en Opus
 
@@ -231,53 +253,41 @@ afirman que `visibilityLevel: 'public'` viaja en el payload, pero no que el clie
 
 **Y el caso que debe descartar:** responder desde una cuenta cualquiera a un hilo que el conector
 **no** conoce (un reenvío interno, o un hilo anterior al despliegue del KV) tiene que descartarse con
-`motivo: 'hilo_desconocido'`, **sin crear un requisito duplicado ni un comentario**. Los tres casos
-que producen ese motivo —reenvío interno, entrada expirada por el TTL, hilo anterior al
-despliegue— son **indistinguibles a propósito**: significan lo mismo operativamente y el arreglo es
-el mismo.
+`motivo: 'hilo_desconocido'`, **sin crear un requisito duplicado ni un comentario**. Los dos casos
+que producen ese motivo —reenvío interno e hilo anterior al despliegue— son **indistinguibles a
+propósito**: significan lo mismo operativamente y el arreglo es el mismo. (Desde REQ-008 los hilos
+**no expiran**: una respuesta a un hilo de cualquier antigüedad comenta.)
 
-## Paso 5: cómo inspeccionar el bucket de hilos (las claves son 64 chars de hex)
+## Paso 5: cómo inspeccionar una entrada del Mapa de Hilos (la clave es un hash hex)
 
-`nats kv ls MAIL_THREADS` muestra **hashes ilegibles**:
+La entrada de un hilo vive en la clave `hilos.<sha256 del Message-Id>` del espacio del conector. El
+`KV` no lista claves por identidad, y la clave no se lee —son 64 chars de hex, ilegibles—, así que se
+inspecciona **una entrada concreta**, armando la clave completa con el hash que el log ya emite:
 
 ```bash
-nats kv ls MAIL_THREADS
-# 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
-# 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
-# ...
+# 1. Del log, tomar el messageIdHash de la línea que interesa:
+#    { "messageId": "<abc@cliente.com>", "messageIdHash": "9f86d0...", "requirementId": 700, ... }
+
+# 2. Consultar esa clave en el espacio del conector (el kvPrefix del Paso 1 + hilos. + el hash):
+nats kv get JIKU_KV <instance>.<sub>.hilos.<messageIdHash>
+# -> 700
 ```
 
-**Por qué, y por qué no se va a "arreglar":**
+**Por qué la clave es un hash, y por qué no se va a "arreglar":**
 
-- `validKeyRe` de la librería del KV es `/^[-/=.\w]+$/` y **rechaza `<`, `>` y `@`** — los tres
-  presentes en un `Message-Id` real (`<abc@cliente.com>`). Una clave inválida hace que la librería
-  lance un `Error` **plano**, sin `name` ni `code` distintivos: no hay diagnóstico estructural que
-  recuperar de ella, así que la defensa es **no producirla nunca**.
-- La alternativa obvia —normalizar y escapar el `Message-Id` para que entre en el regex— **no se
+- Las reglas de clave de NATS —las que aplica `assertValidKVKey()` del SDK— **rechazan `<`, `>` y
+  `@`**, los tres presentes en un `Message-Id` real (`<abc@cliente.com>`). Una clave inválida no se
+  puede escribir, así que la defensa es **no producirla nunca**.
+- La alternativa obvia —normalizar y escapar el `Message-Id` para que entre en las reglas— **no se
   implementa a propósito**: permitiría que dos `Message-Id` distintos **colapsen a la misma clave** y
   **ruteen un comentario al requisito equivocado**, violando G-04. La legibilidad de la clave no vale
   un comentario en el ticket de otro cliente.
 - Por eso el hash va sobre el `Message-Id` **crudo**, con sus brackets, **sin `trim()`, sin
   `toLowerCase()` y sin normalización de ninguna clase**.
 
-Que la clave no se lea es un **riesgo aceptado explícitamente** (REQ-005, riesgo 5). Lo que lo hace
-**operable** es que el log emite el hash:
-
-**Cómo cruzar una línea de log con el bucket.** Toda línea del Mapa de Hilos lleva el campo
+**Cómo cruzar una línea de log con el espacio.** Toda línea del Mapa de Hilos lleva el campo
 **`messageIdHash`** —el mismo hash que es la clave— junto al `messageId` **en claro**. El hash **no
-reemplaza** al `Message-Id` en el log, sólo en la clave:
-
-```bash
-# 1. Del log, tomar el messageIdHash de la línea que interesa:
-#    { "messageId": "<abc@cliente.com>", "messageIdHash": "9f86d0...", "requirementId": 700, ... }
-
-# 2. Consultar esa clave en el bucket:
-nats kv get MAIL_THREADS 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
-# -> 700
-
-# 3. Y el histórico de esa clave, si hace falta:
-nats kv history MAIL_THREADS 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
-```
+reemplaza** al `Message-Id` en el log, sólo en la clave.
 
 El campo se llama `messageIdHash` y **no `key`**: la lista de redacción incluye `'key'` y `'*.key'`
 para cubrir la clave privada del machine user, así que un campo llamado `key` saldría `[REDACTED]`
@@ -287,16 +297,18 @@ Que el hash **sí** se loguee no es una violación de la política de redacción
 contenido del cliente**. Lo que nunca viaja al log es el **cuerpo del mail**, el **texto del
 comentario** y el **contenido de un adjunto**.
 
-**El valor es un entero en TEXTO**, no JSON (`nats kv get` muestra `700`, no `{"id":700}`):
-`entry.json<T>()` **lanza** si el payload no es parseable, y una excepción por el dato malo de una
-sola clave no puede ser un modo de falla.
+**El valor es un entero en TEXTO**, no JSON (`nats kv get` muestra `700`, no `{"id":700}`): una
+entrada que no parsea como entero positivo se saltea con un `warn`, y el dato malo de una sola clave
+no puede ser un modo de falla.
 
 ## Resultado esperado de la Parte 2
 
-Los dos buckets creados por el operador y verificados al arrancar; el Mapa de Tickets sembrado y
-actualizable **en caliente**; un slug nuevo ruteando **sin redespliegue**; la respuesta de un cliente
-convertida en un **comentario público que el cliente ve en Opus**; la conversación siguiendo en la
-respuesta a la respuesta; y el bucket de hilos **inspeccionable** cruzando el `messageIdHash` del log.
+`JIKU_KV` verificado (existe, con `allow_direct`, sin TTL) y el espacio del conector abierto al
+arrancar, con su `kvPrefix`; el Mapa de Tickets sembrado con la clave completa y actualizable **sin
+redesplegar**, desde el mail siguiente, en las dos direcciones (alta y baja); la respuesta de un
+cliente convertida en un **comentario público que el cliente ve en Opus**; la conversación siguiendo
+en la respuesta a la respuesta; y una entrada del Mapa de Hilos **inspeccionable** con
+`nats kv get` cruzando el `messageIdHash` del log.
 
 ---
 
@@ -472,6 +484,15 @@ invocado directo) más el escenario de extremo a extremo automatizado (CA-13).
 
 ## Cierre de REQ-005 (S-028)
 
+> **Nota de S-033 (REQ-008).** Esta tabla se conserva tal como la cerró S-028, como historia. REQ-008
+> reemplazó dos de sus filas: la del **watch en caliente** y su degradación
+> (`test/infra/kv/e2e-watch-tick.test.ts`, borrado en S-032 junto con el `watch()`: un slug vale
+> desde el mail siguiente porque se consulta por mail, y una caída descarta como
+> `slug_no_consultable`), y la de la **expiración por TTL** como uno de los tres casos de
+> `hilo_desconocido` (desde REQ-008 los hilos no expiran: quedan dos casos). El fail-fast "para los
+> dos buckets" es hoy el de `JIKU_KV`. Lo vigente está en el
+> [Cierre de REQ-008](#cierre-de-req-008-s-033).
+
 REQ-005 **no agregó capabilities** y **no deja nada pendiente**. Lo que S-028 agrega es la
 verificación de las propiedades del sistema **sobre el tick cableado de punta a punta** —no sobre
 módulos puros— y la verificación E2E contra un NATS real con JetStream:
@@ -496,3 +517,35 @@ módulos puros— y la verificación E2E contra un NATS real con JetStream:
 Lo que **ninguna suite puede** verificar, y por eso la [Parte 2](#parte-2-el-alcance-del-kv-s-028-ca-15)
 de este documento existe: el handshake de auth de Zitadel, el rol, el `inboxPrefix`, y que el
 comentario `public` **se vea en Opus**.
+
+## Cierre de REQ-008 (S-033)
+
+REQ-008 **no agregó capabilities**: muda el estado del conector a su **Espacio KV** dentro de
+`JIKU_KV` —el Mapa de Tickets consultado por mail, sin `watch()` ni copia en memoria, y el Mapa de
+Hilos sin TTL— sin cambiar ningún comportamiento de producto. Lo que S-033 agrega es la verificación,
+**contra un JetStream real y sobre el `runTick()` cableado**, de lo que S-032 sólo conservó: la clave
+completa que escribe un operador siguiendo el README, el aislamiento por instancia e identidad, el
+arranque que falla por cada una de sus tres causas reales, la caída del KV con recuperación sin
+reiniciar, el hilo viejo que comenta, la redacción y la memoria. Y reescribe la documentación de
+operación, con un test que ata la plantilla de clave documentada a la que arma el código.
+
+| Propiedad verificada | Suite |
+|---|---|
+| Un slug cargado por el operador con la **clave completa** de la plantilla del README (y el `kvPrefix` leído de la línea de arranque) rutea desde el mail siguiente, sin reabrir el espacio; cambiarlo vale desde el mail siguiente; una clave en mayúsculas no matchea; un valor malo se ignora con un `warn` que nombra el slug y no el valor (CA-1) | `test/infra/kv/e2e-operador.test.ts` (TS-1/TS-2, TS-4, TS-5, TS-6) |
+| Un slug borrado con `nats kv del` deja de rutear desde el mail siguiente (CA-2) | `test/infra/kv/e2e-operador.test.ts` (TS-3) |
+| Cada instancia e identidad ve **sólo** su espacio: lo cargado en `dev` no rutea en `prod`, y cada conector escribe sólo bajo su prefijo, mirado desde el **stream** (CA-3) | `test/infra/kv/e2e-operador.test.ts` (TS-7/TS-8) |
+| Una respuesta a un hilo de 91 días —o de 10 días, o de 10 años— comenta (CA-4) | `test/ingesta/tick-propiedades-espacio.test.ts` (TS-15, TS-16) |
+| El ciclo alta → respuesta → respuesta a la respuesta contra el espacio real (CA-5) | `test/infra/kv/e2e-kv.test.ts` (TS-31/TS-32/TS-33, conservado) |
+| El arranque falla por la causa real: sin `JIKU_KV` (`bucket_no_usable`, y no lo crea), sin `allow_direct` (`bucket_no_usable`, sin `subject` ni grants, y no lo arregla), y sin grants (`kv_sin_permisos` con el `subject` rechazado y los grants que faltan, **contra un `nats-server` real con permisos**), encadenado con `reportStartupFailure()` (CA-6) | `test/infra/kv/e2e-kv.test.ts` (TS-34, TS-37, TS-38, TS-11) + `test/infra/kv/e2e-permisos.test.ts` (TS-12, TS-13, TS-14) |
+| Una caída del KV en caliente descarta los nuevos como `slug_no_consultable`, las respuestas como `es_respuesta`, todo queda `\Seen`, sin un séptimo contador; y el tick siguiente crea sobre el **mismo** handle, sin reiniciar (CA-7) | `test/ingesta/tick-propiedades-espacio.test.ts` (TS-17/TS-18/TS-19) + `test/infra/kv/e2e-permisos.test.ts` (TS-14: el rechazo de permisos en caliente) |
+| Ninguna línea del log completo del proceso —arranque y ticks— filtra el cuerpo, el comentario, un adjunto ni un **valor crudo** del KV; `messageIdHash` sólo en los `warn` del Mapa de Hilos y `kvPrefix` como único dato nuevo del espacio (CA-8) | `test/ingesta/tick-propiedades-espacio.test.ts` (TS-20, TS-21) + `test/ingesta/tick-propiedades-kv.test.ts` (TS-1 a TS-7, conservados) |
+| El tick lee sólo las claves de sus mails: el costo no crece con los slugs cargados, y nada del camino del slug guarda estado entre mails (CA-9) | `test/ingesta/tick-propiedades-espacio.test.ts` (TS-23, TS-24) + `test/ingesta/tick-memory.test.ts` (línea de base, **sin modificar**) |
+| `hilo_desconocido` tiene **dos** orígenes (reenvío interno, hilo anterior al despliegue) y la expiración ya no es uno; contadores, idempotencia y dedup se conservan (CA-10) | `test/ingesta/tick-propiedades-espacio.test.ts` (TS-25) + `test/ingesta/tick-propiedades-kv.test.ts` (TS-16, TS-18 a TS-20, TS-27 a TS-30, TS-51 a TS-56, conservados) |
+| El README documenta la operación del Espacio KV: la precondición 8, los tres grants **cruzados con el SDK**, el síntoma de un bucket con TTL, los tres comandos con la clave completa y la credencial de U-02 (CA-11); el `.env.example` deja de explicar el mecanismo viejo (CA-12) | `test/story-033-docs.test.ts` (TS-27 a TS-34) + `test/deployment-docs.test.ts` (TS-43, invertidos en S-033) |
+| La Parte 2 de este documento, rehecha (CA-13), y la plantilla de clave documentada **cruzada con el código**, idéntica en el README y acá (CA-14) | `test/story-033-docs.test.ts` (TS-35 a TS-42) + `test/story-028-docs.test.ts` (TS-44, re-apuntados en S-033) |
+
+Lo que **ninguna suite puede** verificar, y por eso la [Parte 2](#parte-2-el-alcance-del-kv-s-028-ca-15)
+de este documento sigue existiendo: el auth-callout real y el `{{user_id}}` reemplazado por el `sub`
+del token, que la **plantilla real de `internal-app`** tenga los tres grants (la suite usa permisos
+estáticos en la configuración del servidor de test), el handshake de Zitadel, y que el comentario
+`public` **se vea en Opus**.

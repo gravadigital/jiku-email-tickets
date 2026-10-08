@@ -174,22 +174,21 @@ describe('README deployment section', () => {
     expect(deployment).toMatch(/se ignora/i);
   });
 
-  // TS-48, INVERTIDO EN S-025. Afirmaba que el README explicaba las DOS FUENTES EXCLUYENTES del
-  // Mapa de Tickets y el tercer montaje read-only del archivo. S-025 elimino las dos fuentes y el
-  // montaje: el mapa vive en un bucket KV. Lo que el operador necesita ahora es el comando que lo
-  // carga y saber que el cambio es EN CALIENTE — que es justo lo contrario de lo que decia antes.
-  it('explains the KV bucket that holds the map, and that it loads without a redeploy', () => {
-    // El comando exacto, porque es lo que el operador ejecuta.
-    expect(deployment).toContain('nats kv put');
-    expect(deployment).toContain('nats kv add');
-    // Y la propiedad que REQ-005 compra: sin redeploy.
-    expect(deployment).toMatch(/sin redeploy|no necesita redeploy|en caliente/i);
+  // TS-48, INVERTIDO EN S-025 y otra vez: INVERTIDO EN S-033. Afirmaba que el README explicaba las
+  // DOS FUENTES EXCLUYENTES del Mapa de Tickets y el tercer montaje read-only del archivo; S-025 lo
+  // invirtio al bucket KV `TICKETS` con su `nats kv add`. S-033 lo vuelve a invertir: no hay ningun
+  // bucket que crear —`JIKU_KV` lo crea el deploy de Jiku— y el comando del operador es
+  // `nats kv put JIKU_KV` con la clave completa. Lo que NO cambia es la propiedad: sin redeploy.
+  it('explains the KV space that holds the map, and that it loads without a redeploy', () => {
+    // El comando exacto, porque es lo que el operador ejecuta: sobre JIKU_KV, nunca un `nats kv add`.
+    expect(deployment).toContain('nats kv put JIKU_KV');
+    expect(deployment).not.toContain('nats kv add');
+    // Y la propiedad que REQ-005 compro y REQ-008 conserva: sin redeploy.
+    expect(deployment).toMatch(/sin redeploy|no necesita redeploy|sin redesplegar/i);
     // Los dos montajes read-only que SI quedan (la key y el creds) siguen documentados.
     expect(deployment).toContain(':ro');
   });
 
-  // CA-10 desde el lado de la documentacion: para que un operador no busque una variable de
-  // carpeta que no existe.
   /* ========================================================================================
    * S-028 (CA-16): las precondiciones del KV, completas y CONSISTENTES entre si.
    *
@@ -198,76 +197,69 @@ describe('README deployment section', () => {
    * El README YA tenia la precondicion 8 con las cuatro cosas, los dos `nats kv add` con el
    * `--ttl=90d`, la nota de que el operador los crea, y las cuatro variables `KV_*` en la tabla:
    * S-024 a S-027 las fueron dejando. (S-032 saco las cuatro variables y, con ellas, el caso de
-   * consistencia entre el bloque de comandos y la tabla, TS-64; la prosa de la precondicion 8 la
-   * reescribe S-033, junto con los casos de aca que la afirman.) Lo que faltaba no era el CONTENIDO sino LA ASERCION, y en
-   * particular la de CONSISTENCIA — que es la unica falla que nadie ve leyendo una seccion sola.
+   * consistencia entre el bloque de comandos y la tabla, TS-64.) Lo que faltaba no era el CONTENIDO
+   * sino LA ASERCION.
    *
-   * Por eso el caso de consistencia CRUZA las dos secciones del mismo archivo (extrae el nombre del
-   * bucket del bloque de comandos y el default de la tabla de variables, y los compara entre si) en
-   * vez de afirmar cada uno contra una constante del test. Afirmar contra constantes detectaria que
-   * una seccion cambio; cruzarlas detecta que las dos DIVERGIERON, que es la falla que importa: un
-   * operador que copia el comando de una seccion y la variable de la otra termina con un bucket
-   * creado con un nombre y un conector buscando otro — y el sintoma es un conector que descarta
-   * todo sin decir por que.
+   * # INVERTIDO EN S-033
+   *
+   * S-033 reescribio la prosa de la precondicion 8 para el Espacio KV del SDK: un bucket, `JIKU_KV`,
+   * que crea el deploy de Jiku con `allow_direct` y sin TTL, y los tres grants de `internal-app`.
+   * Los casos de abajo se INVIRTIERON (no se borraron): afirman la AUSENCIA de los dos buckets, del
+   * `--ttl=90d` y de los diagnosticos de REQ-005, y la PRESENCIA de lo que los reemplaza. Las
+   * aserciones finas de la precondicion nueva (los grants cruzados con el SDK, la plantilla de la
+   * clave cruzada con el codigo) viven en `test/story-033-docs.test.ts`; aca queda el rastro.
    * ======================================================================================== */
 
-  // TS-62
-  it('the KV precondition names all FOUR things: JetStream, KV permissions, and both buckets', () => {
-    // Las cuatro, explicitas. Si falta una, el operador despliega y el conector no arranca por una
-    // razon que la seccion no le anticipo.
-    expect(deployment).toMatch(/JetStream/);
-    // Los permisos van en el auth-callout, que es un sistema distinto del bus y del conector.
-    expect(deployment).toMatch(/auth-callout/);
-    expect(deployment).toMatch(/permisos de KV/i);
-    // Y los dos buckets, el de hilos con su TTL.
-    expect(deployment).toContain('TICKETS');
-    expect(deployment).toContain('MAIL_THREADS');
-    expect(deployment).toContain('--ttl=90d');
+  // TS-62, INVERTIDO EN S-033. Exigia JetStream, permisos de KV en el auth-callout y los dos buckets
+  // `TICKETS` y `MAIL_THREADS` con `--ttl=90d`. Ahora es UN bucket con su configuracion y los grants.
+  it('the KV precondition names JIKU_KV with allow_direct, and no longer the two buckets', () => {
+    expect(deployment).toContain('JIKU_KV');
+    expect(deployment).toContain('allow_direct');
+    expect(deployment).toContain('internal-app');
+    // Los dos buckets de REQ-005, y su TTL, desaparecieron.
+    expect(deployment).not.toContain('MAIL_THREADS');
+    expect(deployment).not.toContain('--ttl=90d');
+    expect(deployment).not.toMatch(/nats kv \w+ TICKETS\b/);
   });
 
-  // TS-62, segunda mitad: el bloque de comandos con los DOS `nats kv add`.
-  it('carries both nats kv add commands, and the threads one with its --ttl=90d', () => {
-    const adds = deployment.match(/nats kv add/g) ?? [];
-    expect(adds.length, 'tienen que estar los DOS `nats kv add`').toBeGreaterThanOrEqual(2);
-
-    expect(deployment).toMatch(/nats kv add\s+TICKETS/);
-    // El del de hilos lleva el TTL en la MISMA linea: separarlo lo volveria un comando que el
-    // operador puede copiar sin el flag.
-    expect(deployment).toMatch(/nats kv add\s+MAIL_THREADS[^\n]*--ttl=90d/);
+  // TS-62, segunda mitad, INVERTIDO EN S-033: ya no hay ningun `nats kv add` que copiar. El operador
+  // solo escribe claves, con `nats kv put JIKU_KV` y la clave completa.
+  it('carries no nats kv add command any more, only nats kv put JIKU_KV with the full key', () => {
+    expect(deployment).not.toContain('nats kv add');
+    expect(deployment).toMatch(/nats kv put JIKU_KV <instance>\.<sub>\.tickets\./);
   });
 
-  // TS-63
-  it('says the operator creates the buckets, that the connector does NOT, and why', () => {
-    // Que los crea el operador, y que el conector no.
+  // TS-63, INVERTIDO EN S-033. Decia que el OPERADOR creaba los buckets y que el TTL se COMPARABA.
+  // Ahora no los crea nadie del lado del conector —ni U-02 ni el conector—, y no hay TTL que
+  // comparar. El PORQUE de no crear el bucket sigue valiendo y se conserva.
+  it('says nobody on the connector side creates JIKU_KV, and why', () => {
     expect(deployment).toMatch(/no crea/i);
-    // EL PORQUE, que es lo que evita que alguien lo "arregle" agregando el create(): un typo
-    // crearia un bucket VACIO en silencio, y el sintoma seria un conector aparentemente sano que
-    // descarta TODOS los mails sin decir por que.
+    // EL PORQUE, que es lo que evita que alguien lo "arregle" agregando el create(): un bucket
+    // creado por error queda VACIO en silencio.
     expect(deployment).toMatch(/vac[ií]o/i);
     expect(deployment).toMatch(/silencio/i);
     expect(deployment).toMatch(/descarta/i);
 
-    // Y el TTL: lo COMPARA y AVISA, no lo fija.
-    expect(deployment).toMatch(/no lo fija|tampoco lo fija/i);
-    expect(deployment).toMatch(/compara/i);
-    expect(deployment).toMatch(/warn/);
+    // Y el TTL ya no se compara contra ninguna variable: la de REQ-005 no existe.
+    expect(deployment).not.toMatch(/compara contra `KV_THREADS_TTL_DAYS`/);
   });
 
-  // TS-63, la contraparte: que pasa si falta cada cosa. Los dos diagnosticos son distintos y el
-  // arreglo de cada uno vive en otro lugar.
+  // TS-63, la contraparte: que pasa si falta cada cosa.
   it('states what happens if each piece is missing, with its diagnosis', () => {
     // TS-84 (S-032): el codigo del error del arranque se renombro con el Espacio KV.
     expect(deployment).toContain('KV_SPACE_UNAVAILABLE_ERROR');
     expect(readme).not.toContain('KV_BUCKET_MISSING_ERROR');
-    // Falta un bucket -> el log NOMBRA cual. Es el dato que hace falta para crearlo.
-    expect(deployment).toContain('bucket_inexistente');
-    expect(deployment).toMatch(/nombra cu[aá]l/i);
-    // Falta JetStream o los permisos -> indistinguibles desde el cliente, asi que el mensaje nombra
-    // las DOS cosas en vez de elegir una y mandar al operador al lugar equivocado.
-    expect(deployment).toContain('kv_no_disponible');
-    expect(deployment).toMatch(/indistinguibles/i);
+    // INVERTIDO EN S-033: los dos diagnosticos de REQ-005 (`bucket_inexistente`, y
+    // `kv_no_disponible` con su "indistinguibles") ya no existen. Los tres de ahora SI se
+    // distinguen: el SDK separa el bucket mal configurado de los grants que faltan.
+    expect(deployment).not.toContain('bucket_inexistente');
+    expect(deployment).not.toContain('kv_no_disponible');
+    expect(deployment).toContain('bucket_no_usable');
+    expect(deployment).toContain('kv_sin_permisos');
   });
 
+  // CA-10 desde el lado de la documentacion: para que un operador no busque una variable de
+  // carpeta que no existe.
   it('states that INBOX is fixed and not configurable', () => {
     expect(deployment).toContain('INBOX');
     expect(deployment).toMatch(/no es configurable|fija/i);

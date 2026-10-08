@@ -12,8 +12,10 @@ import { beforeAll, describe, expect, it } from 'vitest';
  * pena: cualquier reescritura legitima rompe el test y el siguiente que lo vea lo borra. Lo que
  * estos casos protegen es otra cosa —que BORRAR la seccion rompa la suite— y para eso alcanza con
  * anclar los terminos que no pueden desaparecer sin que el procedimiento deje de servirle a U-02:
- * `nats kv add`, `--ttl=90d`, `nats kv put`, `nats kv get`, `visibilityLevel`, `public`, `Opus`, y
- * las palabras clave del apartado del hex.
+ * `nats kv put`, `nats kv get`, `visibilityLevel`, `public`, `Opus`, y las palabras clave del
+ * apartado del hex. (S-033 rehizo la Parte 2 sobre el Espacio KV: los casos de los dos buckets se
+ * INVIRTIERON o se RE-APUNTARON a `JIKU_KV`, cada uno con su comentario; los de S-033 viven en
+ * `test/story-033-docs.test.ts`.)
  *
  * El fallo que previene es concreto: un procedimiento manual que nadie vuelve a leer se pudre en
  * silencio, y su ausencia solo se descubre cuando alguien tiene que verificar un despliegue de cero.
@@ -63,37 +65,37 @@ describe('CA-15: verificacion-e2e-manual.md cubre el alcance del KV', () => {
     expect(doc).toMatch(/Parte 1: el camino del adjunto/);
   });
 
-  // TS-57
-  it('TS-57: documenta la creacion de los DOS buckets con el CLI, y el de hilos con --ttl=90d', () => {
-    const adds = kv.match(/nats kv add/g) ?? [];
-    expect(adds.length, 'tienen que estar los DOS `nats kv add`').toBeGreaterThanOrEqual(2);
+  // TS-57, INVERTIDO EN S-033. Afirmaba que la Parte 2 documentaba la creacion de los DOS buckets
+  // con `nats kv add` (el de hilos con `--ttl=90d`) y las variables `KV_*_BUCKET`. Desde REQ-008 no
+  // hay buckets que crear: `JIKU_KV` lo crea el deploy de Jiku, y la Parte 2 lo VERIFICA.
+  it('TS-57: ya no documenta la creacion de buckets: verifica JIKU_KV, con allow_direct y sin TTL', () => {
+    expect(kv).not.toContain('nats kv add');
+    expect(kv).not.toContain('MAIL_THREADS');
+    expect(kv).not.toContain('--ttl=90d');
+    expect(kv).not.toContain('KV_TICKETS_BUCKET');
+    expect(kv).not.toContain('KV_THREADS_BUCKET');
 
-    // Los dos nombres de bucket por defecto, y el TTL literal en el del de hilos.
-    expect(kv).toContain('nats kv add TICKETS');
-    expect(kv).toMatch(/nats kv add MAIL_THREADS[^\n]*--ttl=90d/);
-
-    // Y la nota de que los nombres son los defaults, configurables por variable — igual que el
-    // README, para que los dos documentos no divergan.
-    expect(kv).toContain('KV_TICKETS_BUCKET');
-    expect(kv).toContain('KV_THREADS_BUCKET');
+    expect(kv).toMatch(/nats (kv|stream) info (JIKU_KV|KV_JIKU_KV)/);
+    expect(kv).toContain('allow_direct');
   });
 
-  it('dice que el operador los crea y que el conector NO los crea ni fija el TTL', () => {
-    expect(kv).toMatch(/no crea (los )?buckets?/i);
-    // El porque: un typo crearia un bucket VACIO en silencio.
+  // INVERTIDO EN S-033. Decia que el OPERADOR creaba los buckets y que el TTL se COMPARABA contra
+  // `KV_THREADS_TTL_DAYS`. Ahora nadie del lado del conector crea `JIKU_KV` —ni U-02 ni el
+  // conector— y no hay TTL que comparar. El PORQUE de no crearlo se conserva.
+  it('dice que nadie del lado del conector crea JIKU_KV, y por que', () => {
+    expect(kv).toMatch(/ni U-02 ni el conector (la |lo )?crean/i);
+    // El porque: un bucket creado por error queda VACIO en silencio.
     expect(kv).toMatch(/vac[ií]o/i);
     expect(kv).toMatch(/silencio/i);
-    // Y el TTL se compara y avisa, no se fija.
-    expect(kv).toMatch(/no fija el TTL|No fija el TTL/);
-    expect(kv).toMatch(/compara/i);
-    expect(kv).toContain('KV_THREADS_TTL_DAYS');
+    expect(kv).not.toContain('KV_THREADS_TTL_DAYS');
   });
 
-  // TS-58
-  it('TS-58: documenta la siembra del mapa con nats kv put, con un slug y un projectId de ejemplo', () => {
+  // TS-58, INVERTIDO EN S-033: la siembra es sobre `JIKU_KV` con la CLAVE COMPLETA, no sobre el
+  // bucket `TICKETS`.
+  it('TS-58: documenta la siembra del mapa con nats kv put JIKU_KV y la clave completa, con un slug y un projectId', () => {
     expect(kv).toContain('nats kv put');
-    // Sobre el bucket de slugs, con un slug de ejemplo y su projectId.
-    expect(kv).toMatch(/nats kv put TICKETS\s+\w+\s+\d+/);
+    expect(kv).toMatch(/nats kv put JIKU_KV <instance>\.<sub>\.tickets\.\w+\s+\d+/);
+    expect(kv).not.toContain('nats kv put TICKETS');
     // Y la normalizacion a minusculas, que es el error mas facil de cometer con el CLI.
     expect(kv).toMatch(/min[uú]sculas/i);
   });
@@ -131,14 +133,16 @@ describe('CA-15: verificacion-e2e-manual.md cubre el alcance del KV', () => {
     expect(kv).toContain('hilo_desconocido');
   });
 
-  // TS-61
-  it('TS-61: documenta como inspeccionar el bucket de hilos, sabiendo que las claves son hex', () => {
-    // Que `nats kv ls` muestra hashes ilegibles.
-    expect(kv).toContain('nats kv ls MAIL_THREADS');
+  // TS-61, INVERTIDO EN S-033 (re-apuntado a JIKU_KV). La entrada del hilo ya no se lista en un bucket propio
+  // (`nats kv ls MAIL_THREADS`): el `KV` no lista por identidad, y se inspecciona UNA entrada con
+  // `nats kv get JIKU_KV` y la clave completa. `validKeyRe` (de la libreria del KV crudo) deja de
+  // exigirse: las reglas de clave son hoy las del SDK. El porque del hash se conserva entero.
+  it('TS-61: documenta como inspeccionar una entrada del Mapa de Hilos, sabiendo que la clave es hex', () => {
+    expect(kv).toContain('nats kv get JIKU_KV <instance>.<sub>.hilos.');
+    expect(kv).not.toContain('nats kv ls MAIL_THREADS');
     expect(kv).toMatch(/ilegibles?|64 chars|hex/i);
 
-    // EL PORQUE: `validKeyRe` rechaza `<`, `>` y `@`.
-    expect(kv).toContain('validKeyRe');
+    // EL PORQUE: las reglas de clave rechazan `<`, `>` y `@`.
     expect(kv).toMatch(/rechaza/i);
     // Y que normalizar permitiria COLAPSAR dos Message-Id distintos y rutear un comentario al
     // requisito EQUIVOCADO. Es la razon por la que el riesgo se acepta en vez de "arreglarse".
@@ -146,15 +150,13 @@ describe('CA-15: verificacion-e2e-manual.md cubre el alcance del KV', () => {
     expect(kv).toMatch(/equivocado/i);
     expect(kv).toContain('G-04');
 
-    // COMO CRUZAR una linea de log con el bucket: el `messageIdHash` que el log ya emite.
+    // COMO CRUZAR una linea de log con el espacio: el `messageIdHash` que el log ya emite.
     expect(kv).toContain('messageIdHash');
-    expect(kv).toContain('nats kv get MAIL_THREADS');
     // Y que el campo no se llama `key` a proposito (saldria [REDACTED] sin avisar).
     expect(kv).toMatch(/\[REDACTED\]/);
     // Que el hash SI se puede loguear porque es un hash, no contenido del cliente. El texto se
     // normaliza antes de buscar: el documento respeta el ancho de columna, asi que la frase viene
-    // partida por un salto de linea y por el `**` del markdown — una regex que exija los espacios
-    // exactos se rompe con cualquier reflow legitimo del parrafo.
+    // partida por un salto de linea y por el `**` del markdown.
     expect(kv.replace(/[*\s]+/g, ' ')).toMatch(/es un hash,? no contenido del cliente/i);
   });
 
@@ -168,7 +170,9 @@ describe('CA-15: verificacion-e2e-manual.md cubre el alcance del KV', () => {
     // OCHO, no siete: S-024 a S-027 sumaron la del KV.
     expect(precondiciones).toMatch(/\bocho\b|\b8\b/i);
     expect(precondiciones).toMatch(/JetStream/);
-    expect(precondiciones).toMatch(/--ttl=90d/);
+    // INVERTIDO EN S-033: la #8 es `JIKU_KV` (REQ-008), ya no los dos buckets con `--ttl=90d`.
+    expect(precondiciones).toContain('JIKU_KV');
+    expect(precondiciones).not.toMatch(/--ttl=90d/);
     // Y el mapa ya NO es la variable `TICKET_MAP`: decirlo evita que U-02 la busque.
     expect(precondiciones).toContain('TICKET_MAP');
     expect(precondiciones).toMatch(/ya no existe|no existe/i);
