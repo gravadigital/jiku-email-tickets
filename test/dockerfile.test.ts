@@ -306,6 +306,18 @@ describe('Dockerfile', () => {
     }
   });
 
+  // TS-6 (S-032)
+  it('names the pinned jiku-ts@edd1064 build in the TEMPORAL note, and keeps the three vendor copies', () => {
+    // La nota TEMPORAL es la que dice POR QUE `vendor/` viaja en la imagen y CUANDO se borra. Si
+    // siguiera nombrando el 1.1.0, quien lea el Dockerfile buscaria publicar un minor que ya no es
+    // el que hace falta (REQ-008 consume el build de jiku-ts@edd1064, con el Espacio KV).
+    const comments = lines.filter((line) => line.isComment).map((line) => line.text);
+
+    expect(comments.some((line) => line.includes('jiku-ts@edd1064'))).toBe(true);
+    expect(comments.filter((line) => line.includes('1.1.0'))).toEqual([]);
+    expect(directiveLines(lines, 'COPY').filter((line) => line.text === 'COPY vendor ./vendor')).toHaveLength(3);
+  });
+
   it('clears the npm cache in the same layer that installs, or the layer keeps it', () => {
     const production = stageInstructions(lines, 'production');
     const installLine = production.split('\n').find((line) => line.includes('npm ci --omit=dev'));

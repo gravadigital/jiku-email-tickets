@@ -21,23 +21,35 @@
  * (`src/infra/bus/errors.ts`) y `PublishDiagnosis` (`src/domain/publicacion/publish-errors.ts`) son
  * ambos uniones de string literals para catalogos cerrados, nunca `enum`.
  *
- * DESVIACION DECLARADA DE ADR-006, introducida por S-026 (REQ-005): el catalogo pasa de CINCO
- * literales a SEIS con `hilo_desconocido`. La ADR quedo al dia en la misma story, asi que el texto
- * de la regla y esta union dicen lo mismo — si alguna vez divergen, el codigo no es la fuente.
+ * DESVIACION DECLARADA DE ADR-006, introducida por S-026 (REQ-005): el catalogo paso de CINCO
+ * literales a SEIS con `hilo_desconocido`. La ADR quedo al dia en la misma story.
+ *
+ * SEGUNDA DESVIACION DECLARADA DE ADR-006, introducida por REQ-008 (S-032): el catalogo pasa a SIETE
+ * con `slug_no_consultable`. El texto de la ADR lo enmienda S-034, igual que S-026 hizo con
+ * `hilo_desconocido`: hasta entonces la desviacion queda declarada aca, y una vez enmendada, si
+ * alguna vez divergen, el codigo no es la fuente.
  *
  * `es_respuesta` SE CONSERVA y no se depreca. Los dos motivos cubren cosas distintas a proposito, y
  * la distincion es exactamente lo que S-026 existe para preservar:
  *
  * - `hilo_desconocido`: *"esta respuesta apunta a un hilo que no conozco"* — el lookup al Mapa de
  *   Hilos SI se pudo hacer y ninguna referencia matcheo.
- * - `es_respuesta`: *"no pude averiguar a que hilo apunta"* — el bucket estaba inaccesible y el
+ * - `es_respuesta`: *"no pude averiguar a que hilo apunta"* — el espacio estaba inaccesible y el
  *   lookup no se pudo hacer. DESDE S-027 ese es su UNICO significado: una respuesta CON match ya
- *   no se descarta, se comenta (la clausula "y, mientras S-027 no exista, tambien el descarte de
- *   una respuesta CON match" dejo de valer). El motivo NO se depreca: el bucket inaccesible sigue
- *   ocurriendo y sigue necesitando su propio literal.
+ *   no se descarta, se comenta. El motivo NO se depreca: el espacio inaccesible sigue ocurriendo y
+ *   sigue necesitando su propio literal.
  *
  * Colapsarlos en uno solo borraria la unica senal que distingue un hilo desconocido de una consulta
  * imposible, que es la diferencia entre "cargar el hilo" y "arreglar el bucket".
+ *
+ * `slug_no_consultable` frente a `slug_no_mapeado` es LA MISMA distincion, del lado del Mapa de
+ * Tickets (REQ-008):
+ *
+ * - `slug_no_mapeado`: la consulta del slug SI se pudo hacer y el slug no esta (nunca se cargo, se
+ *   borro, su valor esta mal formado, o el slug no puede ser clave). El arreglo es CARGAR EL SLUG.
+ * - `slug_no_consultable`: la consulta del slug NO se pudo hacer (el `get()` rechazo: timeout,
+ *   permisos, bucket, conexion). El arreglo es ARREGLAR EL KV. Tambien lleva el `slug`, para poder
+ *   reconstruir esos mails desde la casilla.
  */
 export type MotivoDescarte =
   | 'no_parseable'
@@ -45,37 +57,39 @@ export type MotivoDescarte =
   | 'es_respuesta'
   | 'sin_slug'
   | 'slug_no_mapeado'
-  | 'hilo_desconocido';
+  | 'hilo_desconocido'
+  | 'slug_no_consultable';
 
 /**
- * El resultado de `routeMail()`: el proyecto resuelto, la intencion de comentar, o el motivo del
- * descarte. TRES formas desde S-027 — hasta S-026 eran dos.
+ * El resultado de `routeMail()`: la intencion de alta, la intencion de comentar, o el motivo del
+ * descarte. TRES formas, y NINGUNA resuelve nada contra el KV.
  *
- * LA TERCERA FORMA (`intencion: 'comentario'`, S-027) es una UNION DISCRIMINADA y no un
- * `MotivoDescarte` nuevo, y las tres condiciones que cumple son deliberadas:
+ * LAS DOS INTENCIONES son variantes de una UNION DISCRIMINADA y no un `MotivoDescarte`, y las
+ * condiciones que cumplen son deliberadas:
  *
- * 1. Es discriminable por el typechecker sin castear (`'intencion' in route`), mismo patron que
- *    `ThreadLookupResult` en `infra/kv/threads.ts` y `UploadResultado` en `files.types.ts`.
- * 2. NO lleva `motivo`, porque NO ES UN DESCARTE. Meterla en el catalogo de motivos la haria
- *    loguearse como uno, que es exactamente lo que esta story deja de hacer.
- * 3. No rompe el `if (route.ok)` del tick, pero SI obliga a discriminar antes de llegar a
- *    `route.motivo` — con `ok: false` en dos variantes, `route.motivo` no compila hasta que se
- *    decida que hacer con la respuesta. Es el typechecker forzando a escribir la rama nueva, no un
- *    inconveniente a silenciar con un cast.
+ * 1. Son discriminables por el typechecker sin castear (`'intencion' in route` y su valor), mismo
+ *    patron que `ThreadLookupResult` y `TicketLookupResult` en `infra/kv/`.
+ * 2. NO llevan `motivo`, porque NO SON DESCARTES. Meterlas en el catalogo de motivos las haria
+ *    loguearse como uno.
+ *
+ * `intencion: 'alta'` (REQ-008, S-032) reemplaza a la vieja variante resuelta
+ * `{ ok: true, projectId, slug }`: `routeMail()` ya no tiene el mapa, asi que devuelve el slug en
+ * minusculas y el tick lo resuelve contra el Espacio KV con `lookupTicket()`. Es la misma forma con
+ * la que REQ-005 saco el lookup del hilo de esta funcion (`intencion: 'comentario'`, S-027).
  *
  * `routeMail()` sigue siendo PURA Y SINCRONICA: la intencion es lo unico que la funcion puede
- * decidir con lo que sabe. El lookup asincrono al Mapa de Hilos vive en el tick, que ya es el
- * unico que compone modulos — `ruteo` no importa de `#infra/` ni de `#domain/publicacion/`.
+ * decidir con lo que sabe. Los lookups asincronos viven en el tick, que ya es el unico que compone
+ * modulos — `ruteo` no importa de `#infra/` ni de `#domain/publicacion/`.
  *
  * `slug?` (opcional) y no `slug: string | undefined` en la rama de descarte (CA-13): la diferencia
  * importa porque `slug?` permite omitir la clave por completo (`'slug' in result === false`),
  * mientras que `string | undefined` permitiria `{ motivo: 'sin_slug', slug: undefined }`, que
- * tecnicamente tiene la clave presente. El motivo `slug_no_mapeado` es el UNICO que la lleva: es el
- * dato que hace falta para cargar el slug al mapa (ADR-006). Ningun campo se llama `key` (CA-16):
- * `REDACT_PATHS` (`src/shared/log-redaction.ts`) incluye `'key'` y `'*.key'`, y un campo `key`
- * saldria como `[REDACTED]` en el log sin fallar y sin avisar.
+ * tecnicamente tiene la clave presente. Desde S-032 `routeMail()` solo produce `sin_slug` por esta
+ * rama; los descartes con `slug` (`slug_no_mapeado`, `slug_no_consultable`) los arma el tick. Ningun
+ * campo se llama `key` (CA-16): `REDACT_PATHS` (`src/shared/log-redaction.ts`) incluye `'key'` y
+ * `'*.key'`, y un campo `key` saldria como `[REDACTED]` en el log sin fallar y sin avisar.
  */
 export type RouteResult =
-  | { readonly ok: true; readonly projectId: number; readonly slug: string }
+  | { readonly ok: false; readonly intencion: 'alta'; readonly slug: string }
   | { readonly ok: false; readonly intencion: 'comentario' }
   | { readonly ok: false; readonly motivo: MotivoDescarte; readonly slug?: string };

@@ -1,6 +1,6 @@
 ---
 created: 2026-08-26
-last_updated: 2026-08-26
+last_updated: 2026-10-02
 status: Draft - In Definition
 ---
 
@@ -17,12 +17,15 @@ status: Draft - In Definition
 | Dónde vive | Entidades | Quién las escribe |
 |---|---|---|
 | **En el mail** (efímero) | Mail Entrante, Adjunto del Mail | Nadie: llegan, se procesan y se descartan |
-| **En un bucket KV del bus de Jiku** (persistido, REQ-005) | Entrada del Mapa de Tickets, Entrada del Mapa de Hilos | La del Mapa de Tickets, un operador (U-02) con el CLI de NATS. La del Mapa de Hilos, **el conector**: es la única entidad que escribe y que sobrevive al tick |
+| **En el Espacio KV del conector, dentro del bucket compartido `JIKU_KV` del bus de Jiku** (persistido, REQ-005 → REQ-008) | Entrada del Mapa de Tickets, Entrada del Mapa de Hilos | La del Mapa de Tickets, un operador (U-02) con el CLI de NATS. La del Mapa de Hilos, **el conector**: es la única entidad que escribe y que sobrevive al tick |
 | **En Jiku** (persistido) | Requisito, Comentario, Archivo, Adjunto | **`core`**, por comando. El conector sólo lo pide |
 
 Por eso esta sección modela **el ciclo de vida de un mail**, no un esquema de base de datos. El
-conector no tiene base de datos **propia**: desde REQ-005 usa dos buckets KV de NATS (JetStream) del
-bus de Jiku, que ya es su dependencia, como su único mecanismo de estado.
+conector no tiene base de datos **propia**: desde REQ-005 su único mecanismo de estado es el KV de
+NATS (JetStream) del bus de Jiku, que ya es su dependencia. *(REQ-008: deja de usar dos buckets
+propios —`TICKETS` y `MAIL_THREADS`— y pasa a su **Espacio KV** dentro del bucket `JIKU_KV`, que crea
+el deploy de Jiku y comparten todas las identidades. Los dos mapas conviven en ese espacio,
+separados por un prefijo de clave.)*
 
 ### Lenguaje Ubicuo
 
@@ -31,8 +34,9 @@ bus de Jiku, que ya es su dependencia, como su único mecanismo de estado.
 | **Mail Entrante** | Un mensaje de la casilla de tickets, ya normalizado y listo para procesar | Efímero: existe en memoria durante un tick y nunca se persiste. **No confundir con "Ticket"** |
 | **Ticket** | El pedido de un cliente expresado como mail | Es el concepto de negocio; su materialización en Jiku es un **Requisito**. La palabra no nombra ninguna entidad del conector |
 | **Slug** | El token del subaddress que identifica al proyecto destino: la parte entre `+` y `@` | Siempre en minúsculas. En `tickets+alfa@grava.io` el slug es `alfa` |
-| **Mapa de Tickets** | La tabla de configuración `slug → id de proyecto` | Un **bucket KV de NATS** que un operador carga con `nats kv put`, leído con `watch()` y con copia en memoria (REQ-005). **Es configuración del conector, no dato del producto** |
-| **Mapa de Hilos** | La tabla de estado `sha256(Message-Id) → id de requisito` | Un **segundo bucket KV de NATS**, separado del de slugs: éste lo escribe el conector en cada mail y lleva TTL de 90 días (REQ-005) |
+| **Mapa de Tickets** | La tabla de configuración `slug → id de proyecto` | Las claves `tickets.<slug>` del **Espacio KV** del conector, que un operador carga con `nats kv put` y que el conector **consulta en cada mail** con un `get` puntual, sin copia en memoria (REQ-008; hasta entonces, un bucket propio seguido con `watch()`). **Es configuración del conector, no dato del producto** |
+| **Mapa de Hilos** | La tabla de estado `sha256(Message-Id) → id de requisito` | Las claves `hilos.<sha256>` del **mismo Espacio KV**: las escribe el conector en cada mail. **No expiran** (REQ-008; hasta entonces, un bucket propio con TTL de 90 días) |
+| **Espacio KV** | El espacio por identidad del conector dentro del bucket `JIKU_KV` del bus, que el SDK abre con `client.kv()` | Guarda sus claves bajo `{instance}.{sub del machine user}.`, un prefijo que agrega el SDK. Sólo admite **leer, escribir y borrar una clave conocida**: sin listado, sin `watch`, sin historial. El bucket lo crea el deploy de Jiku y su TTL y sus límites los comparten todas las identidades (REQ-008) |
 | **Comentario** | La entidad de Jiku que representa la respuesta de un cliente en el hilo de su ticket | La escribe `core` por el comando `requirements.{id}.comment`. El conector la crea siempre con `visibilityLevel: 'public'` |
 | **Adjunto del Mail** | Una parte MIME con contenido de archivo del Mail Entrante | Efímero. **No es el Adjunto de Jiku**, que es un vínculo |
 | **Requisito** | La entidad de Jiku que representa el pedido | La escribe `core`. El conector la crea publicando un comando y **nunca la modifica después** |
@@ -93,12 +97,28 @@ bus de Jiku, que ya es su dependencia, como su único mecanismo de estado.
   proyecto inexistente, el síntoma es un `project_not_found` por mail. Si el bucket **no existe** al
   arrancar, el conector **no arranca** y no lo crea.
 
+  **REQ-008 cambia dónde vive y cómo se lee, no lo que es.** Pasa del bucket propio `TICKETS` a la
+  clave `tickets.<slug>` del **Espacio KV** del conector (bucket `JIKU_KV`), con el `projectId` como
+  **entero en texto**, igual que hoy. Como el SDK no ofrece `watch` ni listado, **se consulta con un
+  `get` puntual en cada mail nuevo**, sin copia en memoria: un alta o una baja de U-02 vale desde el
+  mail siguiente, todavía sin redesplegar. Consecuencias:
+  - El conector **ya no puede enumerar** las entradas, así que no puede informar cuántas hay.
+  - Aparece un modo de falla nuevo: **la consulta del slug puede fallar** con el conector ya
+    corriendo. Antes eso no podía pasar, porque la copia en memoria sobrevivía a una caída del KV.
+  - Un slug que **no puede ser clave** del KV (los caracteres que NATS no admite) nunca puede estar
+    cargado, así que se trata como **no mapeado**, no como una falla.
+  - Una entrada con valor mal formado se trata como **no mapeada**, con un `warn` que nombra el slug.
+  - El espacio es **por instancia** (`dev` y `prod` tienen entradas separadas) y el comando de carga
+    de U-02 lleva la clave completa: `nats kv put JIKU_KV <instance>.<sub>.tickets.<slug> <projectId>`.
+  - **Que las entradas no venzan depende de que `JIKU_KV` no tenga TTL**, y eso lo decide quien crea
+    el bucket. Es una precondición de despliegue que el conector no puede verificar.
+
 ### Entrada del Mapa de Hilos
 
-- **Atributos clave:** `messageIdHash` (string sha256 **en hex**, req, **único** — la clave del
-  bucket; el `Message-Id` crudo **no es clave válida** de NATS KV, cuyo `validKeyRe` es
-  `/^[-/=.\w]+$/` y rechaza `<`, `>` y `@`), `requirementId` (int, req — un id de `requirements`
-  de Jiku)
+- **Atributos clave:** `messageIdHash` (string sha256 **en hex**, req, **único** — la clave, bajo
+  el prefijo `hilos.` desde REQ-008; el `Message-Id` crudo **no es clave válida** de NATS KV, que
+  sólo admite letras, dígitos y `- / _ = .`, y rechaza `<`, `>` y `@`), `requirementId` (int, req —
+  un id de `requirements` de Jiku)
 - **Relaciones:** ninguna en el conector. Apunta a un Requisito de Jiku **sin FK real**
 - **Notas:** **Es la primera entidad que el conector escribe y que sobrevive al tick** — hasta
   REQ-005 todas sus entidades eran efímeras o de configuración. Se escribe al crear un Requisito
@@ -109,6 +129,16 @@ bus de Jiku, que ya es su dependencia, como su único mecanismo de estado.
   marca. El hash se elige sobre normalizar y escapar a mano porque dos `Message-Id` distintos
   podrían colapsar a la misma clave y rutear un comentario al requisito equivocado (viola G-04); el
   costo aceptado es que la clave **no es legible** con `nats kv ls`.
+
+  **REQ-008: pierde el TTL y cambia de lugar, y nada más.** Pasa del bucket propio `MAIL_THREADS` a
+  la clave `hilos.<sha256>` del **mismo Espacio KV** que el Mapa de Tickets. Se conservan la clave
+  hasheada, una entrada por cada mail del hilo, el lookup ordenado con corte en el primer hit y su
+  falla segura. **Las entradas ya no expiran**: el conector no aplica ningún TTL ni verifica el del
+  bucket, así que una respuesta a un hilo de cualquier antigüedad comenta en su Requisito, y la
+  degradación *"una entrada expirada degrada a `hilo_desconocido`"* desaparece. El costo aceptado es
+  que las entradas se acumulan sin límite de tiempo (una por mail, del orden de un centenar de
+  bytes), en un bucket cuyo tamaño comparten todas las identidades. Un TTL configurable queda como
+  cambio futuro del SDK, fuera de alcance.
 
 ### Comentario *(entidad de Jiku)*
 
@@ -189,7 +219,7 @@ consecuencia distinta** y es lo que define el comportamiento del conector.
 |---|---|---|---|
 | `sin_leer` | Está en la casilla, `\Unseen` | → `en_proceso` | — |
 | `en_proceso` | El tick lo tomó y lo marcó `\Seen` | → `descartado`, `publicado`, `fallido` | → `sin_leer` (**el `\Seen` no se revierte**) |
-| `descartado` | Sin slug, slug no mapeado, hilo desconocido, no se pudo parsear, o el lookup del hilo no se pudo hacer | (terminal) | → cualquiera |
+| `descartado` | Sin slug, slug no mapeado, hilo desconocido, no se pudo parsear, el lookup del hilo no se pudo hacer, o **la consulta del slug no se pudo hacer** (REQ-008) | (terminal) | → cualquiera |
 | `publicado` | El comando de alta **o el de comentario** respondió `success` (REQ-005) | (terminal) | → cualquiera |
 | `fallido` | El comando falló o expiró | (terminal) | → cualquiera. **No hay reintento** |
 
@@ -205,6 +235,13 @@ consecuencia distinta** y es lo que define el comportamiento del conector.
 transición `en_proceso → descartado` gana el motivo `hilo_desconocido`, y si el proceso muere después
 del `\Seen` pero antes de escribir la entrada del hilo, **ese hilo queda sin ruteo** — el `\Seen`
 sigue siendo la única marca y el KV no se aprovecha para idempotencia.
+
+**Lo que REQ-008 cambia en este ciclo:** la transición `en_proceso → descartado` gana el motivo
+`slug_no_consultable`. Con el Mapa de Tickets en memoria, resolver el slug no podía fallar después
+del arranque; con la consulta por mail sí puede, y como el mail ya está `\Seen`, la falla es un
+descarte con rastro y nunca un requisito en un proyecto adivinado. A la vez, `hilo_desconocido`
+pierde uno de sus tres orígenes: **una entrada ya no expira**, así que sólo quedan el reenvío de un
+hilo interno y el hilo anterior al despliegue.
 
 #### Adjunto del Mail
 
@@ -259,7 +296,8 @@ cosa antes de esta escritura, así que un fallo no lo deja sin vínculo.
 5. **Mapa de Tickets** *(reformulada en REQ-005)* — Un `slug` es único, y **la unicidad la garantiza
    el almacén**: un bucket KV no admite dos entradas con la misma clave, así que "mapa mal formado
    por slug duplicado" deja de ser un modo de falla posible. Lo que sí falla al arrancar es que el
-   **bucket no exista**.
+   **bucket no exista**. *(REQ-008: el bucket es `JIKU_KV`, y el arranque también falla si no tiene
+   `allow_direct` o si el rol no tiene los grants del Espacio KV. El conector sigue sin crearlo.)*
 6. **Requisito** — Nace siempre en `analisis`: el conector no manda `state`.
 7. **Requisito** — `title` se trunca a 255 caracteres **antes de publicar**. El contrato del comando
    no declara un `maxLength`, así que un asunto largo llegaría a `core` y fallaría en la base con un
@@ -332,6 +370,19 @@ cosa antes de esta escritura, así que un fallo no lo deja sin vínculo.
     regla 27 le dio al fallo del write del Mapa de Hilos, y por la misma razón de la regla 13 — el
     ticket es el activo, y una **optimización** no puede costar un archivo que el código actual sí
     entrega. El peor caso del fallo es el duplicado que ya existía antes de REQ-006.
+30. **Mail Entrante** *(REQ-008)* — Si la consulta del slug al Mapa de Tickets **no se pudo hacer**,
+    el mail se descarta con el motivo **`slug_no_consultable`** y una línea de log que nombra el
+    slug, y **no se crea nada**. Es la falla segura de la invariante 3, con la misma forma que el
+    lookup fallido del hilo: el mail ya está `\Seen`, así que el ticket se pierde y el log es su
+    único rastro. Un slug que no puede ser clave del KV, o una entrada con valor mal formado,
+    **no** son este caso: se descartan como `slug_no_mapeado`, porque nunca van a resolver.
+31. **Caller** *(REQ-008)* — El conector accede al KV **sólo por su Espacio KV** (`client.kv()` del
+    SDK), y nunca lee ni escribe claves de otra identidad ni de otra instancia. Lo garantizan el
+    prefijo que agrega el SDK y los grants del auth-callout, que confinan a cada identidad a su
+    prefijo. El conector no declara el KV crudo (`@nats-io/kv`) ni lo toma de ningún re-export.
+32. **Mapa de Hilos** *(REQ-008)* — Una entrada **no expira**: el conector no aplica TTL ni lo
+    verifica, y una respuesta a un hilo de cualquier antigüedad se comenta. Que el bucket compartido
+    no expire entradas es una **precondición de despliegue**, a cargo de quien crea `JIKU_KV`.
 
 ---
 

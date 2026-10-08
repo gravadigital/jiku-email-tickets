@@ -13,7 +13,8 @@ function escapeRegExp(value: string): string {
 }
 
 /**
- * Resuelve el proyecto de un mail entrante, o el motivo por el que se descarta.
+ * Decide que intencion tiene un mail entrante (dar de alta, comentar), o el motivo por el que se
+ * descarta.
  *
  * Funcion PURA: no importa nada de `#domain/ingesta` salvo `extractAddress` (reutilizada, no
  * reescrita -- CA-3) y el tipo `IncomingMail` (solo forma del primer parametro); no importa nada de
@@ -24,13 +25,13 @@ function escapeRegExp(value: string): string {
  * Nunca lanza: todo camino negativo es un valor de retorno tipado (`RouteResult` de descarte), no
  * una excepcion. Un `recipient` malformado no es un error del ruteo, es un `sin_slug`.
  *
- * Nunca loguea: el ruteo decide, el tick reporta (S-014). El camino feliz en particular no emite
- * ninguna linea -- la linea del alta la emite la publicacion (ADR-006 pide una linea por mail).
+ * Nunca loguea: el ruteo decide, el tick reporta (S-014). La intencion de alta en particular no
+ * emite ninguna linea -- la linea del alta la emite la publicacion (ADR-006 pide una linea por mail).
  *
  * Orden de evaluacion -- descarta lo mas barato primero (CA-8):
  *
  * 1. `referenceIds.length > 0` -> LA INTENCION DE COMENTAR (`{ ok: false, intencion: 'comentario' }`,
- *    S-027). ANTES de tocar el slug: una respuesta no gasta el regex ni el lookup, y la consecuencia
+ *    S-027). ANTES de tocar el slug: una respuesta no gasta el regex ni la consulta del slug, y la consecuencia
  *    OBSERVABLE de ese orden es que EL SLUG NO SE EVALUA NUNCA PARA UNA RESPUESTA -- una respuesta a
  *    un hilo conocido se comenta aunque su `recipient` no resuelva ningun slug valido. Basta con que
  *    `referenceIds` no este vacio, sin importar a que apunten las referencias: quien decide si el
@@ -49,15 +50,20 @@ function escapeRegExp(value: string): string {
  * 2. Aislar el email del `recipient` crudo (`extractAddress`, CA-3), aplicar
  *    `^<prefijo>\+([^@]+)@` case-insensitive, normalizar el slug capturado a minusculas. Si el
  *    `recipient` esta vacio, no matchea, o el slug queda vacio -> `sin_slug` (CA-5, CA-11). El slug
- *    se captura ENTERO entre `+` y `@`, sin validar su forma (CA-5).
- * 3. `!ticketMap.has(slug)` -> `slug_no_mapeado`, con el slug incluido (CA-12, CA-13): es el unico
- *    motivo que lo lleva -- el dato que hace falta para cargarlo al mapa.
- * 4. Resuelto -> `{ ok: true, projectId, slug }`. El `ticketMap` ya llego normalizado a minusculas
- *    desde S-012; el lookup en caliente es un `Map.get()` sin transformar el mapa.
+ *    se captura ENTERO entre `+` y `@`, sin validar su forma (CA-5): si puede ser clave del KV lo
+ *    decide `lookupTicket()` (`isStorableSlug()`), no esta funcion.
+ * 3. Hay slug -> LA INTENCION DE ALTA (`{ ok: false, intencion: 'alta', slug }`, REQ-008 / S-032),
+ *    con el slug EN MINUSCULAS (invariante 4: la comparacion es en minusculas en las dos puntas).
+ *
+ *    HASTA S-032 esta rama resolvia el proyecto contra `config.ruteo.ticketMap` (la copia en memoria
+ *    del `watch()`) y devolvia `{ ok: true, projectId }` o `slug_no_mapeado`. Desde REQ-008 el Mapa
+ *    de Tickets vive en el Espacio KV y se consulta UNA VEZ POR MAIL, asi que EL LOOKUP DEL SLUG
+ *    TAMPOCO VIVE ACA, igual que el del hilo: es asincrono y toca `#infra/kv`. Lo hace el tick con
+ *    `lookupTicket()`, que es quien decide `slug_no_mapeado` o `slug_no_consultable`.
  */
 export function routeMail(
   mail: Pick<IncomingMail, 'referenceIds' | 'recipient'>,
-  config: Pick<RuteoConfig, 'ticketMap' | 'subaddressPrefix'>,
+  config: Pick<RuteoConfig, 'subaddressPrefix'>,
 ): RouteResult {
   if (mail.referenceIds.length > 0) {
     return { ok: false, intencion: 'comentario' };
@@ -72,12 +78,5 @@ export function routeMail(
     return { ok: false, motivo: 'sin_slug' };
   }
 
-  const slug = capturedSlug.toLowerCase();
-  const projectId = config.ticketMap.get(slug);
-
-  if (projectId === undefined) {
-    return { ok: false, motivo: 'slug_no_mapeado', slug };
-  }
-
-  return { ok: true, projectId, slug };
+  return { ok: false, intencion: 'alta', slug: capturedSlug.toLowerCase() };
 }

@@ -14,17 +14,18 @@ import { runTick, type TickCounters } from '#domain/ingesta/tick.js';
 import { setupTestBus, type TestBusContext } from '../bus/helpers.js';
 import { type CoreResponder, respondTo } from '../bus/responder.js';
 import { testLoggerWithCapture } from './test-logger.js';
-import { fakeThreadsKv } from './fake-threads-kv.js';
+import { fakeKvSpace } from './fake-kv-space.js';
 
 /**
- * El bucket de hilos que estas suites le pasan al tick.
+ * El Espacio KV que estas suites le pasan al tick (S-032; hasta entonces, el bucket de hilos).
  *
- * Ninguna de ellas es sobre el Mapa de Hilos (esas son `test/ingesta/tick-hilos.test.ts` y
- * `test/infra/kv/threads.test.ts`, contra un KV REAL con JetStream): lo unico que necesitan es que
- * el write que el tick hace despues de cada alta no falle y no las obligue a levantar otro
- * contenedor. Ver la cabecera de `./fake-threads-kv.ts`.
+ * Ninguna de ellas es sobre el KV (esas son `test/ingesta/tick-hilos.test.ts`,
+ * `test/ingesta/tick-mapa-tickets.test.ts` y `test/infra/kv/*.test.ts`): lo unico que necesitan es
+ * que la consulta del slug resuelva `alfa` a su proyecto —`tickets.alfa` → `42`, el mismo mapa que
+ * hasta S-032 viajaba en `config.ruteo.ticketMap`— y que el write del hilo que el tick hace despues
+ * de cada alta no falle, sin levantar otro contenedor. Ver la cabecera de `./fake-kv-space.ts`.
  */
-const THREADS_KV = fakeThreadsKv().kv;
+const SPACE = fakeKvSpace({ 'tickets.alfa': '42' }).space;
 
 /**
  * Suite del tick: TS-1 a TS-14, TS-19 a TS-24 (los que no dependen de un fallo de conexion — esos
@@ -86,7 +87,6 @@ const BASE_CONFIG: AppConfig = {
   },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
   ruteo: {
-    ticketMap: new Map([['alfa', 42]]),
     subaddressPrefix: 'tickets',
     placeholderTitle: 'Ticket recibido por mail',
     placeholderBody: '(mail sin contenido)',
@@ -96,12 +96,6 @@ const BASE_CONFIG: AppConfig = {
     allowedMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'application/pdf'],
     maxSizeBytes: 10_485_760,
     putTimeoutMs: 30_000,
-  },
-  kv: {
-    ticketsBucket: 'TICKETS',
-    threadsBucket: 'MAIL_THREADS',
-    threadsTtlDays: 90,
-    watchRetryMs: 30_000,
   },
 };
 
@@ -151,8 +145,9 @@ function fakeMailSource(config: {
 /**
  * Construye un mail RFC 822 valido y parseable con un Message-Id distinto por UID.
  *
- * `To: tickets+alfa@grava.io` (S-014): `alfa` esta mapeado en `BASE_CONFIG.ruteo.ticketMap`, asi que
- * este mail siempre resuelve via `routeMail()` — no se descarta. Los tests que usan este helper
+ * `To: tickets+alfa@grava.io` (S-014): `alfa` esta cargado en el Espacio KV de esta suite
+ * (`tickets.alfa` → `42`, ver `SPACE`; hasta S-032, en `BASE_CONFIG.ruteo.ticketMap`), asi que este
+ * mail siempre resuelve — no se descarta. Los tests que usan este helper
  * afirman mecanica de ingesta (orden, marcado, contadores), no ruteo; que resuelva es lo que
  * preserva su intencion original tras cablear el ruteo en el tick.
  */
@@ -209,7 +204,7 @@ describe('runTick — TickCounters and control structure (Tarea 1)', () => {
       },
     };
 
-    await expect(runTick(source, configWithMax(50), logger, bus.client, THREADS_KV)).rejects.toThrow('connection lost');
+    await expect(runTick(source, configWithMax(50), logger, bus.client, SPACE)).rejects.toThrow('connection lost');
 
     expect(tickLine(capture)).toMatchObject({
       ingestados: 0,
@@ -237,7 +232,7 @@ describe('runTick — happy path (CA-1)', () => {
     ]);
     const source = fakeMailSource({ uidsUnseen: [3, 2, 1], sources });
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     expect(source.seen).toEqual([3, 2, 1]);
     expect(tickLine(capture)).toMatchObject({
@@ -261,7 +256,7 @@ describe('runTick — happy path (CA-1)', () => {
     ]);
     const source = fakeMailSource({ uidsUnseen: [3, 2, 1], sources });
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     const perMailLines = capture
       .lines()
@@ -283,7 +278,7 @@ describe('runTick — the cap takes the newest and defers the rest (CA-2)', () =
     const uids = Array.from({ length: 60 }, (_, i) => 60 - i); // [60, 59, ..., 1]
     const source = fakeMailSource({ uidsUnseen: uids });
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     expect(source.fetchCalls).toEqual(Array.from({ length: 50 }, (_, i) => 60 - i)); // 60..11
     const warnLine = capture.lines().find((line) => line['msg'] === 'mails diferidos por el cap');
@@ -296,7 +291,7 @@ describe('runTick — the cap takes the newest and defers the rest (CA-2)', () =
     const source = fakeMailSource({ uidsUnseen: uids });
     const { logger } = testLoggerWithCapture();
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     for (let uid = 1; uid <= 10; uid += 1) {
       expect(source.seen).not.toContain(uid);
@@ -311,7 +306,7 @@ describe('runTick — processing order is strictly newest-to-oldest and sequenti
     const source = fakeMailSource({ uidsUnseen: uids });
     const { logger } = testLoggerWithCapture();
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     expect(source.fetchCalls).toEqual(uids);
   });
@@ -338,7 +333,7 @@ describe('runTick — processing order is strictly newest-to-oldest and sequenti
     };
     const { logger } = testLoggerWithCapture();
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     for (let i = 1; i < intervals.length; i += 1) {
       const previous = intervals[i - 1]!;
@@ -354,7 +349,7 @@ describe('runTick — empty mailbox (CA-4)', () => {
     const { logger, capture } = testLoggerWithCapture();
     const source = fakeMailSource({ uidsUnseen: [] });
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     expect(tickLine(capture)).toMatchObject({
       ingestados: 0,
@@ -396,7 +391,7 @@ describe('runTick — an unparseable mail does not abort the batch (CA-5)', () =
       },
     };
 
-    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, THREADS_KV, failingNormalize);
+    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, SPACE, failingNormalize);
 
     const tick = tickLine(capture);
     expect(tick).toMatchObject({ ingestados: 10, parseados: 9, fallidos: 1 });
@@ -419,7 +414,7 @@ describe('runTick — an unparseable mail does not abort the batch (CA-5)', () =
       return normalize(raw, log);
     });
 
-    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, THREADS_KV, failingNormalize);
+    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, SPACE, failingNormalize);
 
     expect(source.fetchCalls).toEqual(uids);
   });
@@ -441,7 +436,7 @@ describe('runTick — an unparseable mail does not abort the batch (CA-5)', () =
       return normalize(raw, log);
     });
 
-    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, THREADS_KV, failingNormalize);
+    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, SPACE, failingNormalize);
 
     expect(source.seen).toContain(7);
   });
@@ -454,7 +449,7 @@ describe('runTick — a failed download is skipped without marking (CA-6)', () =
     const uids = [5, 4, 3];
     const source = fakeMailSource({ uidsUnseen: uids, failFetchFor: new Set([5]) });
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     expect(source.seen).not.toContain(5);
     const warnLine = capture.lines().find((line) => line['msg'] === 'no se pudo descargar el mensaje');
@@ -475,7 +470,7 @@ describe('runTick — a failed download is skipped without marking (CA-6)', () =
       },
     };
 
-    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, SPACE);
 
     expect(source.seen).toEqual([4, 3]);
     expect(tickLine(capture)).toMatchObject({ ingestados: 3, parseados: 2, fallidos: 0 });
@@ -504,7 +499,7 @@ describe('runTick — marking happens right after download, one at a time (CA-8)
     });
     const { logger } = testLoggerWithCapture();
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV, spiedNormalize);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE, spiedNormalize);
 
     expect(order).toEqual(['fetch', 'markSeen', 'normalize']);
   });
@@ -522,7 +517,7 @@ describe('runTick — marking happens right after download, one at a time (CA-8)
     };
     const { logger } = testLoggerWithCapture();
 
-    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, SPACE);
 
     expect(source.markSeenCalls).toEqual(uids);
     expect(source.markSeenCalls).toHaveLength(5);
@@ -551,7 +546,7 @@ describe('runTick — the five counters, one line (CA-14)', () => {
       return normalize(raw, log);
     });
 
-    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, THREADS_KV, failingNormalize);
+    await runTick(sourceWithRealMails, configWithMax(50), logger, bus.client, SPACE, failingNormalize);
 
     const tickLines = capture.lines().filter((line) => line['msg'] === 'tick completado');
     expect(tickLines).toHaveLength(1);
@@ -579,7 +574,7 @@ describe('runTick — the five counters, one line (CA-14)', () => {
       },
     };
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     expect(tickLine(capture)).toMatchObject({ fallidos: 0, descartados: 1 });
   });
@@ -602,7 +597,7 @@ describe('runTick — no mail is left untraced (CA-15)', () => {
       },
     };
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     const lines = capture.lines();
     expect(lines.some((l) => l['messageId'] === '<uid-3@fixtures.local>')).toBe(true);
@@ -626,7 +621,7 @@ describe('runTick — no mail is left untraced (CA-15)', () => {
       },
     };
 
-    await runTick(source, configWithMax(50), logger, bus.client, THREADS_KV);
+    await runTick(source, configWithMax(50), logger, bus.client, SPACE);
 
     const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
     expect(discardLine).toMatchObject({ motivo: 'sin_message_id' });
@@ -706,7 +701,7 @@ describe('runTick — es_respuesta se descarta sin slug en la linea (CA-1, CA-2,
       sources: new Map([[1, fixture('in-reply-to.eml')]]),
     });
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
     // `routeMail()` sigue devolviendo `es_respuesta` — su arbol no cambio (S-026 CA-14). Lo que
@@ -732,7 +727,7 @@ describe('runTick — sin_slug se descarta sin slug en la linea (CA-1, CA-2, CA-
       sources: new Map([[1, mailTo({ uid: 1, recipient: 'soporte@grava.io' })]]),
     });
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
     expect(discardLine).toMatchObject({
@@ -753,7 +748,7 @@ describe('runTick — slug_no_mapeado incluye el slug en la linea (CA-1, CA-2, C
       sources: new Map([[1, mailTo({ uid: 1, recipient: 'tickets+beta@grava.io' })]]),
     });
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
     expect(discardLine).toMatchObject({
@@ -778,7 +773,7 @@ describe('runTick — slug_no_mapeado incluye el slug en la linea (CA-1, CA-2, C
       sources: new Map([[1, mailTo({ uid: 1, recipient: 'tickets+beta@grava.io' })]]),
     });
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     const rawDiscardLine = capture.raw().find((line) => line.includes('mail descartado'));
     expect(rawDiscardLine).toBeDefined();
@@ -805,7 +800,7 @@ describe('runTick — los descartes cuentan como descartados, nunca fallidos (CA
     ]);
     const source = sourceWithMails(mails);
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     expect(tickLine(capture)).toMatchObject({ descartados: 3, fallidos: 0, parseados: 10 });
   });
@@ -827,7 +822,7 @@ describe('runTick — MissingMessageIdError pasa a descartados (CA-8)', () => {
       },
     };
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     expect(tickLine(capture)).toMatchObject({
       descartados: 5,
@@ -850,7 +845,7 @@ describe('runTick — la distincion es por clase, no por texto (CA-9)', () => {
       throw new Error('El mail no tiene header Message-Id: se descarta.');
     });
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV, impostorNormalize);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE, impostorNormalize);
 
     expect(tickLine(capture)).toMatchObject({ fallidos: 1, descartados: 0 });
   });
@@ -868,7 +863,7 @@ describe('runTick — no_parseable sigue siendo fallido, con el uid (CA-10)', ()
       throw new Error('parseo roto simulado');
     });
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV, brokenNormalize);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE, brokenNormalize);
 
     const warnLine = capture.lines().find((l) => l['msg'] === 'mail no se pudo normalizar');
     expect(warnLine).toMatchObject({ uid: 1 });
@@ -895,7 +890,7 @@ describe('runTick — un descarte no crea nada observable (CA-6)', () => {
       },
     };
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     expect(calls).toEqual(['searchUnseen', 'fetch', 'markSeen']);
   });
@@ -927,7 +922,7 @@ describe('runTick — el tick continua con el siguiente UID tras un descarte (CA
     ]);
     const source = sourceWithMails(mails);
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     expect(source.fetchCalls).toEqual([3, 2, 1]);
     expect(source.seen).toEqual([3, 2, 1]);
@@ -954,7 +949,7 @@ describe('runTick — creados cuenta las altas reales junto a los descartes (CA-
     ]);
     const source = sourceWithMails(mails);
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     expect(tickLine(capture)).toMatchObject({ creados: 7, descartados: 3, fallidos: 0 });
   });
@@ -979,7 +974,7 @@ describe('runTick — nunca se loguea el contenido del mail en un descarte (CA-1
       ]),
     });
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
     expect(discardLine).not.toHaveProperty('body');
@@ -994,8 +989,8 @@ describe('runTick — nunca se loguea el contenido del mail en un descarte (CA-1
 });
 
 describe('runTick — el orden de evaluacion del ruteo no se reimplementa (CA-2)', () => {
-  // TS-14: In-Reply-To poblado Y recipient con un slug tambien no-mapeado (`beta`, ausente de
-  // ticketMap) — el mail calificaria independientemente como slug_no_mapeado, pero routeMail()
+  // TS-14: In-Reply-To poblado Y recipient con un slug tambien no-mapeado (`beta`, ausente del
+  // Espacio KV) — el mail calificaria independientemente como slug_no_mapeado, pero routeMail()
   // prioriza es_respuesta (Integration Points, orden de evaluacion paso 1 antes que paso 3). El
   // tick no reimplementa ese orden, solo reporta lo que el ruteo decidio.
   it('es_respuesta sobre un slug tambien no-mapeado NO reporta el slug (S-026: el motivo final lo resuelve el lookup)', async () => {
@@ -1016,7 +1011,7 @@ describe('runTick — el orden de evaluacion del ruteo no se reimplementa (CA-2)
       sources: new Map([[1, mailReplyToUnmappedSlug]]),
     });
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
     // Desde S-026 el motivo FINAL de una respuesta lo resuelve el lookup al Mapa de Hilos: con el
@@ -1042,7 +1037,7 @@ describe('runTick — escenarios de publicacion de S-015 (Tarea 4)', () => {
     const mail = mailTo({ uid: 1, recipient: 'tickets+alfa@grava.io', subject: 'Re: Fwd:' });
     const source = sourceWithMails(new Map([[1, mail]]));
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     expect(capture.lines().some((l) => l['msg'] === 'mail descartado')).toBe(false);
     const successLine = capture.lines().find((l) => l['msg'] === 'requisito creado en Jiku');
@@ -1077,7 +1072,7 @@ describe('runTick — escenarios de publicacion de S-015 (Tarea 4)', () => {
     const local = await respondTo(bus.connection, 'requirements.new', sequence);
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
       expect(local.count()).toBe(10);
       expect(tickLine(capture)).toMatchObject({ creados: 9, fallidos: 1, descartados: 0 });
@@ -1108,7 +1103,7 @@ describe('runTick — escenarios de publicacion de S-015 (Tarea 4)', () => {
     });
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
     } finally {
       await failing.stop();
     }
@@ -1136,7 +1131,7 @@ describe('runTick — escenarios de publicacion de S-015 (Tarea 4)', () => {
     });
     try {
       const { logger: nextLogger, capture: nextCapture } = testLoggerWithCapture();
-      await runTick(nextSource, BASE_CONFIG, nextLogger, bus.client, THREADS_KV);
+      await runTick(nextSource, BASE_CONFIG, nextLogger, bus.client, SPACE);
 
       expect(responderForNextTick.count()).toBe(0);
       expect(tickLine(nextCapture)).toMatchObject({ ingestados: 0, creados: 0, fallidos: 0 });
@@ -1160,17 +1155,14 @@ describe('runTick — escenarios de publicacion de S-015 (Tarea 4)', () => {
     await responder?.stop();
 
     const { logger, capture } = testLoggerWithCapture();
-    const configWithThreeSlugs: AppConfig = {
-      ...BASE_CONFIG,
-      ruteo: {
-        ...BASE_CONFIG.ruteo,
-        ticketMap: new Map([
-          ['alfa', 42],
-          ['beta', 7],
-          ['gamma', 15],
-        ]),
-      },
-    };
+    // Los tres slugs cargados en un espacio PROPIO de este caso (S-032: hasta entonces, un
+    // `ruteo.ticketMap` con las tres entradas): `beta` no esta en el `SPACE` compartido, y tiene que
+    // seguir sin estarlo para los casos de `slug_no_mapeado` de este archivo.
+    const spaceWithThreeSlugs = fakeKvSpace({
+      'tickets.alfa': '42',
+      'tickets.beta': '7',
+      'tickets.gamma': '15',
+    }).space;
     const mails = new Map([
       [30, mailTo({ uid: 30, recipient: 'tickets+alfa@grava.io' })],
       [20, mailTo({ uid: 20, recipient: 'tickets+beta@grava.io' })],
@@ -1185,7 +1177,7 @@ describe('runTick — escenarios de publicacion de S-015 (Tarea 4)', () => {
     ]);
 
     try {
-      await runTick(source, configWithThreeSlugs, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, spaceWithThreeSlugs);
 
       expect(local.payloads()).toEqual([
         expect.objectContaining({ projectId: 42 }),
@@ -1226,10 +1218,8 @@ describe('runTick — el escenario de extremo a extremo: mail de un cliente exte
     await responder?.stop();
 
     const { logger, capture } = testLoggerWithCapture();
-    const configWithAlfa: AppConfig = {
-      ...BASE_CONFIG,
-      ruteo: { ...BASE_CONFIG.ruteo, ticketMap: new Map([['alfa', 42]]) },
-    };
+    // `alfa` cargado en el Espacio KV (S-032: hasta entonces, en `ruteo.ticketMap`).
+    const spaceWithAlfa = fakeKvSpace({ 'tickets.alfa': '42' }).space;
 
     const messageId = '<s016-e2e-alfa@fixtures.local>';
     const source: MailSource = {
@@ -1264,7 +1254,7 @@ describe('runTick — el escenario de extremo a extremo: mail de un cliente exte
     });
 
     try {
-      await runTick(source, configWithAlfa, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, spaceWithAlfa);
 
       // El payload observado por el responder -- lo que REALMENTE viajo por el bus, no una
       // reimplementacion en el test de lo que buildRequirementPayload() deberia producir.
@@ -1359,7 +1349,7 @@ describe('runTick — un adjunto fallido no cancela el requisito ni agrega un se
       },
     };
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     // CA-7: el mail se cuenta CREADO, no fallido -- el fallo de subida del adjunto no cancela el
     // requisito.
@@ -1424,7 +1414,7 @@ describe('runTick — ninguna linea de un tick con adjuntos incluye uploadUrl (S
       },
     };
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     const raw = capture.raw().join('\n');
     expect(raw).not.toContain('uploadUrl');
@@ -1513,7 +1503,7 @@ describe('runTick — archivos huerfanos: tres adjuntos suben bien y requirement
     };
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
       // Los tres adjuntos SI llegaron a subir (3 request-upload observados).
       expect(uploadResponder.count()).toBe(3);
@@ -1600,7 +1590,7 @@ describe('runTick — rechazo local (.exe) no cancela el requisito: se cuenta cr
     };
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0, descartados: 0 });
 

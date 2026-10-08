@@ -1,27 +1,31 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { Client } from '@gravadigital/jiku';
-// El cliente NATS y el KV salen del subpath del SDK, nunca de `@nats-io/*` ni de `nats`: no son
-// dependencias de este proyecto (ADR-002 / S-023) y el subpath garantiza una sola copia de
-// `nats-core` en el arbol. Es la misma regla que sigue `test/bus/helpers.ts`.
-import { Kvm, connect, type KV, type NatsConnection } from '@gravadigital/jiku/nats';
+// El cliente NATS crudo sale del subpath del SDK, nunca de `@nats-io/*` ni de `nats`: no son
+// dependencias de este proyecto (ADR-002) y el subpath garantiza una sola copia de `nats-core` en
+// el arbol. Es la misma regla que sigue `test/bus/helpers.ts`. Desde S-032 el subpath ya no trae
+// ningun KV: el bucket se crea con la API de JetStream, igual que lo hace el SDK en sus tests.
+import { connect, type NatsConnection } from '@gravadigital/jiku/nats';
 import { GenericContainer, Wait } from 'testcontainers';
+
+import type { KvSpace } from '#infra/kv/space.js';
 
 import { TEST_INSTANCE, TEST_USER_ID } from '../../bus/helpers.js';
 
 /**
- * Un NATS **con JetStream habilitado**, que es infraestructura de test nueva y no negociable.
+ * Un NATS **con JetStream habilitado** y el bucket `JIKU_KV` creado, que es infraestructura de test
+ * no negociable.
  *
  * # POR QUE NO SE USA EL CONTENEDOR COMPARTIDO
  *
  * El NATS de `test/global-setup.ts` arranca SIN `-js`, asi que no tiene JetStream y por lo tanto
- * no tiene KV: contra el, `status()` sobre cualquier bucket falla con `JetStreamNotEnabled`. El
- * camino feliz de esta story —los dos buckets existen y se abren— es INEXPRESABLE contra el.
+ * no tiene KV: contra el, `client.kv()` rechaza con `JikuNoBucket`. El camino feliz —el espacio se
+ * abre, se escribe y se lee— es INEXPRESABLE contra el.
  *
  * Y no se le agrega `-js` al compartido, por dos razones:
  *
- * 1. Cambiaria la infraestructura de TODA la suite en una story que no lo necesita.
- * 2. El bus compartido es, justamente, compartido: los buckets que sembrara un archivo de test
+ * 1. Cambiaria la infraestructura de TODA la suite.
+ * 2. El bus compartido es, justamente, compartido: las entradas que sembrara un archivo de test
  *    serian visibles para los demas. La contaminacion cruzada seria real, no teorica.
  *
  * El precedente autorizado de levantar un contenedor propio para un escenario que el compartido
@@ -31,25 +35,50 @@ import { TEST_INSTANCE, TEST_USER_ID } from '../../bus/helpers.js';
  * Usa un TAG de imagen distinto del compartido — ver el comentario en `startJetStreamNats()`, que
  * explica por que eso no es una decision de version.
  *
+ * # POR QUE LA CONFIGURACION DEL STREAM ES LA DEL SDK
+ *
+ * `JIKU_KV` lo crea el deploy de Jiku, nunca el conector. Aca lo crea el test, representando a ese
+ * deploy, con la MISMA configuracion que usa `jiku-ts/test/integration/kv.test.ts` (la que produce
+ * `nats kv add JIKU_KV --history 1`, con los limites fijados): `allow_direct: true`, que el SDK
+ * exige para leer, y SIN `max_age`, porque la precondicion de despliegue es un bucket sin TTL
+ * (REQ-008: los hilos no expiran). Copiarla del SDK y no inventarla es lo que hace que lo que pasa
+ * aca pase tambien contra el bucket real.
+ *
+ * # POR QUE UN ESPACIO FRESCO POR IDENTIDAD Y NO UN BUCKET POR TEST
+ *
+ * Con dos buckets propios, cada test creaba el suyo. Con el Espacio KV el bucket es UNO y fijo
+ * (`JIKU_KV`), y lo que aisla es el prefijo `{instance}.{userId}.` que agrega el SDK: un test que
+ * pide `spaceFor('tk-1')` no ve ninguna entrada de `spaceFor('tk-2')`. Es el mismo aislamiento que
+ * da en produccion, y el `KV` del SDK no lista claves, asi que no hay otra forma de empezar limpio.
+ *
  * # BENEFICIO COLATERAL
  *
  * El contenedor compartido, por NO tener JetStream, es el doble perfecto y gratis del escenario
- * "JetStream deshabilitado" (TS-15). No hay que simular nada para probarlo.
+ * "JetStream apagado". No hay que simular nada para probarlo.
  */
 export interface JetStreamNats {
   readonly url: string;
+  /** La conexion CRUDA, de `@gravadigital/jiku/nats`. */
   readonly connection: NatsConnection;
+  /** `Client.fromConnection(connection, { instance: TEST_INSTANCE, userId: TEST_USER_ID })`. */
   readonly client: Client;
-  /** Crea buckets ANTES de que corra el codigo bajo test. Es el unico lugar que llama a `create()`. */
-  readonly seedBucket: (name: string, ttlDays?: number) => Promise<void>;
   /**
-   * Abre un bucket ya sembrado y devuelve su handle, para que un test pueda sembrarle entradas y
-   * pasarselo al codigo bajo test.
-   *
-   * Es `open()` y NO `create()`: representa lo mismo que hace el codigo de produccion, y por eso
-   * no rompe la propiedad de que el unico `create()` del repo vive en `seedBucket`.
+   * Crea `JIKU_KV` (`$JS.API.STREAM.CREATE.KV_JIKU_KV`). Es el UNICO lugar del repo que crea un
+   * bucket: el codigo de produccion no lo hace (un test de propiedad escanea `src/` para
+   * afirmarlo). Aca representa al deploy de Jiku. `overrides` existe para los escenarios de un
+   * bucket mal configurado (`{ allow_direct: false }`).
    */
-  readonly openBucket: (name: string) => Promise<KV>;
+  readonly createBucket: (overrides?: Record<string, unknown>) => Promise<void>;
+  /** Borra `JIKU_KV`, para los escenarios que arrancan sin el bucket. Quien lo usa lo recrea. */
+  readonly deleteBucket: () => Promise<void>;
+  /** Si `JIKU_KV` existe: `false` cuando JetStream contesta "stream not found" (`err_code 10059`). */
+  readonly bucketExists: () => Promise<boolean>;
+  /**
+   * Un espacio FRESCO de otra identidad sobre el mismo bucket: `client.kv()` de un
+   * `Client.fromConnection(connection, { instance, userId })` nuevo. El `userId` tiene que ser un
+   * segmento valido de clave (`[A-Za-z0-9\-/_=]+`), p. ej. `tick-t1`.
+   */
+  readonly spaceFor: (userId: string, instance?: string) => Promise<KvSpace>;
   /**
    * Si `startJetStreamNats()` rechazo en el `beforeAll`, la variable del archivo nunca se asigno:
    * los `afterAll` llaman `nats?.stop()` para que un `TypeError` no tape el error original.
@@ -57,8 +86,27 @@ export interface JetStreamNats {
   readonly stop: () => Promise<void>;
 }
 
-/** Milisegundos en un dia. Duplicado a proposito: el test no debe importar la constante que verifica. */
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
+/**
+ * La configuracion del stream de `JIKU_KV`, copiada de `jiku-ts/test/integration/kv.test.ts`, con
+ * `max_msg_size: -1` y SIN `max_age` (sin TTL, como exige la precondicion de despliegue).
+ */
+const JIKU_KV_STREAM = {
+  name: 'KV_JIKU_KV',
+  subjects: ['$KV.JIKU_KV.>'],
+  storage: 'memory',
+  retention: 'limits',
+  discard: 'new',
+  max_msgs_per_subject: 1,
+  max_msg_size: -1,
+  max_bytes: -1,
+  allow_rollup_hdrs: true,
+  deny_delete: true,
+  allow_direct: true,
+  num_replicas: 1,
+} as const;
+
+/** El `err_code` de JetStream para "stream not found". */
+const STREAM_NOT_FOUND = 10059;
 
 /**
  * Errores de socket que se reintentan en la PRIMERA conexion al contenedor recien levantado.
@@ -101,6 +149,32 @@ async function connectWithRetry(url: string): Promise<NatsConnection> {
   }
 }
 
+interface JetStreamApiReply {
+  readonly error?: { readonly code?: number; readonly err_code?: number; readonly description?: string };
+}
+
+/** Un request a la API de JetStream, con la respuesta ya parseada. */
+async function jetStreamApi(
+  connection: NatsConnection,
+  subject: string,
+  body: string,
+): Promise<JetStreamApiReply> {
+  const reply = await connection.request(subject, body);
+  return JSON.parse(reply.string()) as JetStreamApiReply;
+}
+
+/**
+ * Lo mismo, pero una respuesta con `error` es un fallo del HELPER y no un estado a afirmar: un
+ * `createBucket` que JetStream rechazo en silencio dejaria a todo el archivo probando contra un
+ * bucket que no existe, y el sintoma seria un `bucket_no_usable` inexplicable lejos de la causa.
+ */
+async function jetStreamApiOk(connection: NatsConnection, subject: string, body: string): Promise<void> {
+  const reply = await jetStreamApi(connection, subject, body);
+  if (reply.error !== undefined) {
+    throw new Error(`La API de JetStream rechazo ${subject}: ${JSON.stringify(reply.error)}`);
+  }
+}
+
 export async function startJetStreamNats(): Promise<JetStreamNats> {
   // El TAG es DISTINTO del `nats:2.10-alpine` del contenedor compartido a proposito, y no es una
   // decision de version: `test/bus/shared-container.test.ts` afirma que el compartido es el UNICO
@@ -111,7 +185,8 @@ export async function startJetStreamNats(): Promise<JetStreamNats> {
   // corren en workers paralelos, asi que el total observado depende del instante en que se mire.
   //
   // Un tag distinto hace que el filtro `ancestor=` del test compartido no lo vea, y esa suite
-  // queda como estaba: un conteo simple, sin manejo de carreras.
+  // queda como estaba: un conteo simple, sin manejo de carreras. Ademas el direct get del Espacio
+  // KV lleva la clave en el subject, y eso exige un NATS 2.10+ (ADR-007).
   const image = new GenericContainer('nats:2.11-alpine')
     .withExposedPorts(4222)
     // `-js` habilita JetStream, y sin JetStream no hay KV. El compartido arranca sin este flag.
@@ -149,23 +224,41 @@ export async function startJetStreamNats(): Promise<JetStreamNats> {
     userId: TEST_USER_ID,
   });
 
+  const createBucket = async (overrides: Record<string, unknown> = {}): Promise<void> => {
+    await jetStreamApiOk(
+      connection,
+      '$JS.API.STREAM.CREATE.KV_JIKU_KV',
+      JSON.stringify({ ...JIKU_KV_STREAM, ...overrides }),
+    );
+  };
+
+  try {
+    await createBucket();
+  } catch (cause) {
+    await connection.close().catch(() => undefined);
+    await container.stop().catch(() => undefined);
+    throw new Error('No se pudo crear JIKU_KV en el NATS con JetStream de los tests del KV.', { cause });
+  }
+
   return {
     url,
     connection,
     client,
+    createBucket,
 
-    // El sembrado usa `create()`, y es el UNICO lugar de todo el repo que puede: el codigo de
-    // produccion no crea buckets (CA-3, con un test de propiedad que escanea `src/` para
-    // afirmarlo). Aca representa al operador que corrio `nats kv add`.
-    seedBucket: async (name: string, ttlDays?: number): Promise<void> => {
-      const kvm = new Kvm(connection);
-      // El `ttl` de las opciones va en MILISEGUNDOS, igual que el que reporta `status()`.
-      await kvm.create(name, ttlDays === undefined ? {} : { ttl: ttlDays * MS_PER_DAY });
+    deleteBucket: async (): Promise<void> => {
+      await jetStreamApiOk(connection, '$JS.API.STREAM.DELETE.KV_JIKU_KV', '');
     },
 
-    openBucket: async (name: string): Promise<KV> => {
-      const kvm = new Kvm(connection);
-      return kvm.open(name);
+    bucketExists: async (): Promise<boolean> => {
+      const reply = await jetStreamApi(connection, '$JS.API.STREAM.INFO.KV_JIKU_KV', '');
+      if (reply.error === undefined) return true;
+      if (reply.error.err_code === STREAM_NOT_FOUND) return false;
+      throw new Error(`La API de JetStream rechazo STREAM.INFO: ${JSON.stringify(reply.error)}`);
+    },
+
+    spaceFor: async (userId: string, instance: string = TEST_INSTANCE): Promise<KvSpace> => {
+      return Client.fromConnection(connection, { instance, userId }).kv();
     },
 
     stop: async (): Promise<void> => {

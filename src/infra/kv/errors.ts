@@ -1,260 +1,155 @@
-import { AppError } from '#shared/errors/index.js';
+import { JikuKVPermissionDenied, JikuNoBucket, KV_BUCKET } from '@gravadigital/jiku';
 
 import { causeChain } from '#infra/bus/errors.js';
+import { AppError } from '#shared/errors/index.js';
 
 /**
- * Los errores de apertura del KV y su diagnostico.
+ * El error de apertura del Espacio KV y su diagnostico.
  *
  * Mismo motivo que `src/infra/bus/errors.ts` y misma forma: el log tiene que decir QUE hay que
  * arreglar, porque los arreglos estan en lugares distintos. "Fallo el KV" a secas obliga a revisar
- * el nombre del bucket, si el bucket existe, si JetStream esta habilitado y si la cuenta tiene
- * permisos de KV — cuatro sistemas, y en un worker sin nadie mirando una pantalla esa ambiguedad
- * se paga en horas.
+ * el bucket, JetStream y los grants del rol a la vez — tres sistemas, y en un worker sin nadie
+ * mirando una pantalla esa ambiguedad se paga en horas.
  *
  * ---
  *
- * HALLAZGO 3: las clases de error del KV NO son importables, asi que la clasificacion es
- * ESTRUCTURAL y no por `instanceof`.
+ * POR QUE EL DIAGNOSTICO ES POR CLASE DEL SDK (REQ-008).
  *
- * `@gravadigital/jiku/nats` re-exporta `@nats-io/kv`, y ese paquete expone `Kvm`, `Bucket` y
- * `KvWatchInclude` — pero NO sus clases de error. `StreamNotFoundError`, `JetStreamNotEnabled` y
- * `JetStreamApiError` viven en `@nats-io/jetstream`, que este proyecto NO declara y NO debe
- * declarar (ADR-002 / S-023: el KV entra por el subpath del SDK para que haya UNA sola copia de
- * `nats-core` en el arbol).
+ * Con el KV crudo de `@nats-io/kv` las clases de error no eran importables y "sin permisos" era
+ * indistinguible de "JetStream apagado", asi que se clasificaba por `name` y `code`. Con el Espacio
+ * KV las dos cosas cambiaron: el SDK EXPORTA sus clases desde la entrada principal
+ * (`@gravadigital/jiku`, con una sola copia en el arbol) y DISTINGUE los casos — `JikuNoBucket`
+ * (no existe, sin `allow_direct`, JetStream apagado) contra `JikuKVPermissionDenied` (el bus rechazo
+ * el subject). ADR-002 manda manejar los errores del bus por las clases del SDK, asi que el
+ * diagnostico es un `instanceof` y NADA mas:
  *
- * Y NO hay que "resolverlo" importandolas de `@nats-io/jetstream` ni de su subpath `/internal`:
+ * - NO se lee el `message`: el texto del SDK es para humanos y puede cambiar en cualquier patch.
+ * - NO se compara `name` ni `code`: cualquier `Error` puede llevar un `name` copiado, y una
+ *   clasificacion que se deja enganar por un `name` es una clasificacion por texto con otro nombre.
  *
- * 1. Seria una dependencia FANTASMA — no declarada en `package.json`, presente solo por hoisting
- *    de npm, y por lo tanto rota en silencio ante cualquier de-hoisting futuro.
- * 2. Traeria una SEGUNDA copia de `nats-core` si npm decidiera no deduplicar, y entonces el
- *    `instanceof` que se buscaba daria `false` contra la copia que lanzo el error. Es exactamente
- *    la falla que S-023 existe para hacer imposible.
- *
- * Asi que se clasifica por `name` y por `code`, que son datos ESTRUCTURADOS del error, igual que
- * `diagnoseConnectFailure()` clasifica por `constructor.name` y por los `code` de `errno`. Lo que
- * NO se hace, en ninguna rama, es comparar el TEXTO del mensaje: ver el comentario de
- * `diagnoseKvFailure()`.
- *
- * ---
- *
- * HALLAZGO 4: "sin permisos de KV" es INDISTINGUIBLE de "JetStream deshabilitado", y no hay que
- * intentar distinguirlos.
- *
- * Una violacion de permisos sobre un subject de JetStream (`$JS.API.>`) no llega como respuesta a
- * la request: llega como un `-ERR` ASINCRONICO por el stream de status de la conexion, y la
- * request en curso muere por timeout. El cliente la envuelve entonces igual que cuando el servidor
- * no tiene JetStream: como `JetStreamNotEnabled`.
- *
- * Correlacionar el error asincronico con la request para separarlos exigiria suscribirse al stream
- * de status de la conexion y adivinar cual `-ERR` corresponde a cual llamada. CA-6 no lo pide, y
- * el remedio no lo necesita: `kv_no_disponible` nombra LAS DOS cosas a revisar, que es lo unico
- * que el operador necesita saber para arreglarlo.
+ * Un `JikuError` de timeout NO es ninguno de los dos casos conocidos: es `desconocido`, y se loguea
+ * como tal.
  */
 
 /**
- * El diagnostico de un fallo al abrir o verificar un bucket del KV.
+ * El diagnostico de un fallo de `client.kv()`.
  *
- * Union de literales y no un `enum`, igual que `ConnectDiagnosis`: es lo que hace que un `switch`
- * en el punto de log sea exhaustivo para el typechecker cuando se agregue el quinto caso.
+ * Union de literales y no un `enum`: es lo que hace que un `switch` en el punto de log sea
+ * exhaustivo para el typechecker cuando se agregue el cuarto caso.
  *
- * Cada valor nombra UN arreglo distinto:
- *
- * - `bucket_inexistente`        -> el bucket no existe. Lo crea el OPERADOR con `nats kv add`.
- * - `kv_no_disponible`          -> JetStream deshabilitado, o sin permisos de KV en el
- *                                 auth-callout. Indistinguibles (Hallazgo 4): el remedio nombra
- *                                 las dos.
- * - `nombre_de_bucket_invalido` -> el nombre configurado no puede ser un bucket. Es un error de
- *                                 configuracion y se detecta ANTES de cualquier I/O.
- * - `desconocido`               -> no encaja en ninguna. Se loguea como tal, SIN mapearse a otra.
+ * - `bucket_no_usable` -> `JIKU_KV` no existe, no tiene `allow_direct`, o JetStream esta apagado.
+ *                        Lo arregla el deploy de Jiku. NO es un problema de grants.
+ * - `kv_sin_permisos`  -> el bus rechazo un subject del espacio: al rol le faltan los grants.
+ * - `desconocido`      -> no encaja en ninguna. Se loguea como tal, SIN mapearse a otra.
  */
-export type KvDiagnosis =
-  | 'bucket_inexistente'
-  | 'kv_no_disponible'
-  | 'nombre_de_bucket_invalido'
-  | 'desconocido';
+export type KvDiagnosis = 'bucket_no_usable' | 'kv_sin_permisos' | 'desconocido';
 
 /**
- * El `err_code` de la API de JetStream para "el stream no existe".
- *
- * Un bucket del KV ES un stream (`KV_<nombre>`), asi que "el bucket no existe" llega desde el
- * servidor como este codigo. Se lee del campo `code` del error, que es un dato estructurado de la
- * API y no prosa.
- */
-const STREAM_NOT_FOUND_CODE = 10059;
-
-/**
- * El regex de nombre de bucket valido, copiado de `@nats-io/kv` (`lib/kv.js:88`).
- *
- * Se valida ACA, antes de llamar a `open()`, en vez de reconocer el error que lanza la libreria.
- * `validateBucket()` (`lib/kv.js:126-128`) lanza un `Error` PLANO y sincronico —
- * `invalid bucket name: <name>` — sin `name` ni `code` distintivos, asi que reconocerlo obligaria
- * a leer el texto del mensaje, que es precisamente lo que este modulo no hace.
- *
- * Validando antes, el diagnostico es POSITIVO: se sabe que el nombre es invalido porque se
- * comprobo, no porque un error se parezca a otro.
- *
- * Si esta constante y la de la libreria divergen, el sintoma es benigno: la libreria rechaza igual
- * y el diagnostico cae en `desconocido`. Nunca se acepta un nombre que la libreria rechazaria.
- */
-const VALID_BUCKET_RE = /^[-\w]+$/;
-
-/** Si el nombre configurado puede ser un bucket del KV. No hace ningun I/O. */
-export function isValidBucketName(name: string): boolean {
-  return VALID_BUCKET_RE.test(name);
-}
-
-function codeOf(error: Error): number | undefined {
-  // `code` es un getter sobre un campo privado en las clases de error de JetStream, asi que se lee
-  // DIRECTAMENTE del error y nunca de una copia serializada (un `structuredClone` o un
-  // `JSON.parse(JSON.stringify(...))` lo perderian).
-  const { code } = error as { code?: unknown };
-  return typeof code === 'number' ? code : undefined;
-}
-
-/**
- * Clasifica un fallo del KV por ESTRUCTURA.
- *
- * NINGUNA rama compara el texto del mensaje con un literal, y no es purismo: el propio
- * `Kvm.create()` de la libreria lo hace (`err.message === "stream not found"`) y es un bug latente
- * — el dia que el servidor cambie esa cadena, o que llegue traducida, la comparacion falla en
- * silencio. Esa es la razon de que este modulo lea `name` y `code`, que son campos.
- *
- * TS-24 es el test que protege esta decision: un `Error` con el mensaje `'stream not found'` pero
- * SIN `name` ni `code` da `'desconocido'`, no `'bucket_inexistente'`.
- *
- * Recorre la CADENA de causas y no solo el error de arriba: `JetStreamNotEnabled` puede llegar
- * envuelto, y ser uniforme evita que un envoltorio nuevo de la libreria rompa el diagnostico.
+ * Clasifica un fallo de `client.kv()` por CLASE del SDK.
  *
  * Devolver `'desconocido'` es un resultado LEGITIMO y no se mapea a otro por descarte (ADR-006).
  * Un diagnostico equivocado es peor que uno ausente: manda a revisar el sistema equivocado, que es
  * el fallo exacto que ADR-006 existe para evitar.
  */
 export function diagnoseKvFailure(error: unknown): KvDiagnosis {
-  const chain = causeChain(error);
-
-  if (chain.length === 0) return 'desconocido';
-
-  // 1. El bucket no existe. El `name` de la clase de JetStream O el `err_code` de la API: cualquiera
-  //    de los dos alcanza por si solo, asi que un renombre de la clase no rompe el diagnostico y un
-  //    cambio de codigo tampoco.
-  if (
-    chain.some(
-      (cause) => cause.name === 'StreamNotFoundError' || codeOf(cause) === STREAM_NOT_FOUND_CODE,
-    )
-  ) {
-    return 'bucket_inexistente';
-  }
-
-  // 2. No hay KV disponible: JetStream deshabilitado o sin permisos de KV. Los dos escenarios
-  //    llegan aca (Hallazgo 4) y el remedio nombra los dos.
-  if (chain.some((cause) => cause.name === 'JetStreamNotEnabled')) {
-    return 'kv_no_disponible';
-  }
-
-  // 3. Cualquier otra cosa es DESCONOCIDA, y se devuelve como tal.
-  //
-  //    `nombre_de_bucket_invalido` NO se decide aca: se decide ANTES de cualquier I/O, validando el
-  //    nombre con `isValidBucketName()`. Llegar a este punto con un nombre invalido es imposible
-  //    por construccion, y por eso no hay una rama que lo adivine.
+  if (error instanceof JikuNoBucket) return 'bucket_no_usable';
+  if (error instanceof JikuKVPermissionDenied) return 'kv_sin_permisos';
   return 'desconocido';
 }
 
-/** Que revisar para cada diagnostico. Es lo unico que el operador necesita del mensaje. */
+/**
+ * El nombre de la clase de un error, para el log.
+ *
+ * De `constructor.name`: sirve para leer el log, no para decidir nada — las decisiones se toman
+ * con `instanceof` en `diagnoseKvFailure()`. Un valor que no es `Error` se nombra por su `typeof`.
+ */
+export function errorClassOf(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : typeof error;
+}
+
+/** Que revisar para cada diagnostico. Textos del CONECTOR; la causa exacta va en `causes`. */
 const KV_REMEDIES: Record<KvDiagnosis, string> = {
-  bucket_inexistente:
-    'El bucket no existe en el bus. Lo crea el OPERADOR, no el conector: ' +
-    '`nats kv add <bucket>` (y el de hilos con su TTL, `--ttl=90d`). El conector no lo crea a ' +
-    'proposito: un typo en el nombre crearia un bucket vacio en silencio, y el sintoma seria que ' +
-    'el conector descarta todo sin decir por que.',
+  // NO menciona grants ni permisos (CA-4): sugerirlos seria mandar a arreglar el sistema
+  // equivocado. Y el conector no crea el bucket a proposito: lo crea y lo configura el deploy.
+  bucket_no_usable:
+    'El bucket no existe, no tiene allow_direct, o JetStream esta apagado en el bus (la causa ' +
+    'exacta va en `causes`). Lo crea y lo configura el deploy de Jiku: el conector nunca lo crea.',
 
-  kv_no_disponible:
-    'El KV no esta disponible. Revisa LAS DOS cosas, porque desde el cliente son ' +
-    'indistinguibles: que JetStream este habilitado en el bus, y que la cuenta del conector tenga ' +
-    'permisos de KV ($JS.API.>) en el auth-callout. La conexion al bus funciona — si no, el ' +
-    'arranque habria fallado antes, en el paso de conexion.',
-
-  nombre_de_bucket_invalido:
-    'El nombre configurado no puede ser un bucket del KV: solo se aceptan letras, digitos, ' +
-    'guion y guion bajo. Revisa KV_TICKETS_BUCKET y KV_THREADS_BUCKET.',
+  kv_sin_permisos:
+    'El bus rechazo un subject del Espacio KV: al rol del conector le faltan los grants del ' +
+    'espacio, y los que faltan van en `causes`. La conexion al bus funciona — si no, el arranque ' +
+    'habria fallado antes, en el paso de conexion.',
 
   desconocido:
     'El fallo no encaja en ninguna causa conocida. La clase del error y la cadena de causas van ' +
     'en el contexto de esta linea.',
 };
 
-/** Los cuatro valores con los que se construye el error. Nombrados y no posicionales: ver Notas. */
-export interface KvBucketMissingErrorInput {
+/** Lo que se necesita para construir el error. Nombrado y no posicional. */
+export interface KvSpaceUnavailableErrorInput {
   readonly diagnosis: KvDiagnosis;
-  readonly bucket: string;
-  /** La operacion del KV que fallo (`'open'`, `'status'`, o `'validate'` si no hubo I/O). */
-  readonly operation: string;
   readonly cause: unknown;
 }
 
 /**
- * Un bucket del KV no esta usable al arrancar.
+ * El Espacio KV no esta usable al arrancar.
  *
- * Expone `diagnosis`, `bucket`, `operation`, `errorClass` y `causes` como CAMPOS y no solo dentro
- * del `message`, imitando a `BusConnectError` con su `diagnosis`: asi el punto de log y los tests
+ * Expone `diagnosis`, `bucket`, `subject`, `errorClass` y `causes` como CAMPOS y no solo dentro del
+ * `message`, imitando a `BusConnectError` con su `diagnosis`: asi el punto de log y los tests
  * afirman sobre estructura en vez de sobre texto capturado, que es lo que permite reescribir el
  * mensaje sin romper nada.
  *
- * `bucket` es el campo que hace verificable el fail-fast de la story: el error tiene que nombrar
- * CUAL bucket falta, porque con dos buckets un "falta un bucket" no dice donde esta el arreglo.
+ * Tiene su PROPIA rama en `reportStartupFailure()`, separada de `BusConnectError`: cuando falla el
+ * KV la conexion al bus funciono, y decir lo contrario manda a revisar la red.
  */
-export class KvBucketMissingError extends AppError {
-  readonly code = 'KV_BUCKET_MISSING_ERROR';
+export class KvSpaceUnavailableError extends AppError {
+  readonly code = 'KV_SPACE_UNAVAILABLE_ERROR';
 
   // El servicio no expone HTTP (ADR-001), pero la convencion `error-handling` declara httpStatus
-  // abstracto y no se diverge de ella. 500 porque un bucket ausente es un fallo del despliegue.
+  // abstracto y no se diverge de ella. 500 porque un espacio no usable es un fallo del despliegue.
   readonly httpStatus = 500;
 
   /** Que hay que arreglar. */
   readonly diagnosis: KvDiagnosis;
 
-  /** CUAL de los dos buckets. Es el dato que convierte el fallo en accionable. */
+  /** Siempre `JIKU_KV` (`KV_BUCKET` del SDK): el bucket es fijo, no configuracion. */
   readonly bucket: string;
 
-  /** La operacion del KV que fallo, para ubicar el punto exacto de la secuencia. */
-  readonly operation: string;
+  /** El subject que el bus rechazo. Solo con `JikuKVPermissionDenied`. */
+  readonly subject: string | undefined;
 
-  /**
-   * El nombre de la clase del error subyacente.
-   *
-   * De `constructor.name` y no de un `instanceof` por clase: sirve para el log y no depende de la
-   * identidad de constructor entre copias del paquete — que es justamente lo que no se puede
-   * asumir aca (Hallazgo 3).
-   */
+  /** La clase del error subyacente (`errorClassOf()`), para el log. */
   readonly errorClass: string;
 
   /**
-   * Los mensajes de la cadena de causas, del mas externo al mas interno, primera linea de cada uno.
+   * Los mensajes COMPLETOS de la cadena de causas, del mas externo al mas interno.
+   *
+   * SIN truncar a la primera linea: el mensaje de `JikuKVPermissionDenied` es multilinea, y los
+   * grants que faltan (`requiredKVPermissions()`) vienen DESPUES de la primera linea. Truncar
+   * perderia justo el dato que hace accionable el fallo. Ninguno de estos mensajes trae
+   * credenciales: nombran el bucket, subjects y el placeholder `{{user_id}}`.
    *
    * Van como campo de strings —y no como el `Error` entero— porque el contexto de log tiene que ser
-   * PLANO: la redaccion de S-003 no tiene comodin profundo, asi que un objeto anidado podria dejar
-   * un valor sin redactar. Ninguno de estos mensajes contiene credenciales: los errores del KV
-   * nombran streams y subjects, nunca tokens ni rutas de archivos.
+   * PLANO: la redaccion de S-003 no tiene comodin profundo.
    */
   readonly causes: string[];
 
-  constructor({ diagnosis, bucket, operation, cause }: KvBucketMissingErrorInput) {
-    const chain = causeChain(cause);
-    const errorClass = cause instanceof Error ? cause.constructor.name : typeof cause;
+  constructor({ diagnosis, cause }: KvSpaceUnavailableErrorInput) {
+    const errorClass = errorClassOf(cause);
+    const subject = cause instanceof JikuKVPermissionDenied ? cause.subject : undefined;
 
-    // El nombre del bucket va en el mensaje ADEMAS de en el campo: el campo es para consultar el
-    // log estructurado, y el mensaje es lo que alguien lee en una terminal a las tres de la mañana.
-    super(`El bucket "${bucket}" del KV no esta usable. ${KV_REMEDIES[diagnosis]}`, {
+    super(`El espacio KV (bucket "${KV_BUCKET}") no esta usable. ${KV_REMEDIES[diagnosis]}`, {
       diagnosis,
-      bucket,
-      operation,
+      bucket: KV_BUCKET,
       errorClass,
+      ...(subject !== undefined ? { subject } : {}),
     });
 
     this.diagnosis = diagnosis;
-    this.bucket = bucket;
-    this.operation = operation;
+    this.bucket = KV_BUCKET;
+    this.subject = subject;
     this.errorClass = errorClass;
-    this.causes = chain.map((error) => error.message.split('\n')[0] ?? '');
+    this.causes = causeChain(cause).map((error) => error.message);
     this.cause = cause;
   }
 }

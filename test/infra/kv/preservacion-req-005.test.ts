@@ -108,15 +108,18 @@ describe('CA-5: los dos tests de propiedad del bus siguen vigentes y no se debil
 
     // El patron literal que busca el import prohibido. DOS COPIAS DE `nats-core` EN EL ARBOL SON
     // DOS JUEGOS DE CLASES DE ERROR, y `error instanceof X` falla contra la copia que lanzo
-    // (ADR-002). Es la razon por la que el KV entra por el subpath y no por `@nats-io/kv`.
+    // (ADR-002). Es la razon por la que el KV es el del SDK (`client.kv()`, S-032) y no el de
+    // `@nats-io/kv`.
     expect(body).toContain("'nats'");
     // Y sigue afirmando que la lista de infractores esta VACIA: es la forma que hace que el test
     // nombre el archivo culpable cuando falla, en vez de un `false` sin contexto.
     expect(body).toMatch(/toEqual\(\[\]\)/);
   });
 
-  // TS-48: la razon POSITIVA de que los dos de arriba sigan pasando con el KV agregado.
-  it('TS-48: el modulo del KV no importa connect ni nats — su unico import del bus es el subpath', () => {
+  // TS-48: la razon POSITIVA de que los dos de arriba sigan pasando con el KV agregado. Desde S-032
+  // el import del bus del modulo del KV es la ENTRADA PRINCIPAL del SDK (`client.kv()`, el tipo `KV`
+  // y sus clases de error), ya no el subpath `./nats`, que no re-exporta ningun KV.
+  it('TS-48: el modulo del KV no importa connect ni nats — su unico import del bus es la entrada principal del SDK', () => {
     const kvFiles = sourceFiles().filter((file) => file.relativePath.startsWith('infra/kv'));
 
     // Sanity del escaner: sin esto, un filtro que no matchea nada haria pasar el bucle vacio.
@@ -137,51 +140,56 @@ describe('CA-5: los dos tests de propiedad del bus siguen vigentes y no se debil
       ).toBe(false);
     }
 
-    // Y el unico import del bus en el modulo es el SUBPATH, del que solo se toman `Kvm` y TIPOS.
-    const stores = kvFiles.find((file) => file.relativePath.endsWith('stores.ts'));
-    expect(stores?.code).toMatch(/from\s*'@gravadigital\/jiku\/nats'/);
+    // Y el import del bus del modulo es la ENTRADA PRINCIPAL: ningun archivo toma nada del subpath
+    // `./nats`, y el que abre el espacio importa de `'@gravadigital/jiku'`.
+    for (const file of kvFiles) {
+      expect(
+        /from\s*'@gravadigital\/jiku\/nats'/.test(file.code),
+        `${file.relativePath} importa del subpath ./nats: el KV es el de la entrada principal (S-032)`,
+      ).toBe(false);
+    }
+    const space = kvFiles.find((file) => file.relativePath.endsWith('space.ts'));
+    expect(space?.code).toMatch(/from\s*'@gravadigital\/jiku'/);
   });
 
-  // TS-39, la mitad que faltaba: `stores.test.ts` ya afirma que ningun archivo de `src/` llama a
-  // `create()`. Lo que no estaba afirmado es que el UNICO `create()` del REPO —tests incluidos—
-  // viva en `seedBucket()`, que es el que representa al operador corriendo `nats kv add`.
-  it('TS-39: el unico create() de KV del repo vive en seedBucket() de test/infra/kv/helpers.ts', () => {
-    const helpers = read('infra/kv/helpers.ts');
+  // TS-39, la mitad que faltaba: `infra/kv/source-properties.test.ts` ya afirma que ningun archivo
+  // de `src/` crea un bucket. Lo que no estaba afirmado es que el UNICO lugar del REPO —tests
+  // incluidos— que lo crea viva en `createBucket()`, que es el que representa al deploy de Jiku
+  // creando `JIKU_KV`. (Hasta S-032 era `seedBucket()` con `kvm.create()`: dos buckets propios
+  // creados con el KV crudo. Desde REQ-008 hay un solo bucket, y se crea con la API de JetStream.)
+  it('TS-39: el unico lugar del repo que crea un bucket es createBucket() de test/infra/kv/helpers.ts', () => {
+    // Sin comentarios: la cabecera del helper nombra el subject para explicar que hace.
+    const helpers = read('infra/kv/helpers.ts').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 
-    // Se ancla a la IMPLEMENTACION, no a la declaracion de la interfaz: `seedBucket` aparece dos
-    // veces en el archivo (el campo de `JetStreamNats` y la funcion que lo cumple), y la primera
-    // ocurrencia es solo el tipo.
-    const seedIdx = helpers.indexOf('seedBucket: async (');
-    expect(seedIdx, 'seedBucket debe seguir siendo el que crea los buckets').toBeGreaterThan(-1);
-    const openIdx = helpers.indexOf('openBucket: async (', seedIdx);
-    expect(openIdx).toBeGreaterThan(seedIdx);
+    // Se ancla a la IMPLEMENTACION, no a la declaracion de la interfaz: `createBucket` aparece dos
+    // veces en el archivo (el campo de `JetStreamNats` y la funcion que lo cumple).
+    const createIdx = helpers.indexOf('const createBucket = async (');
+    expect(createIdx, 'createBucket debe seguir siendo el que crea el bucket').toBeGreaterThan(-1);
+    const createBody = helpers.slice(createIdx, helpers.indexOf('};', createIdx));
+    expect(createBody).toMatch(/STREAM\.CREATE\.KV_JIKU_KV/);
 
-    const seedBody = helpers.slice(seedIdx, openIdx);
-    expect(seedBody).toMatch(/kvm\s*\.\s*create\s*\(/);
-
-    // Y `openBucket` usa `open()`, NO `create()`: es lo mismo que hace produccion, y por eso no
-    // rompe la propiedad de que el unico `create()` vive en `seedBucket`.
-    const openBody = helpers.slice(openIdx, helpers.indexOf('stop: async (', openIdx));
-    expect(openBody).toMatch(/kvm\s*\.\s*open\s*\(/);
-    expect(openBody).not.toMatch(/\.\s*create\s*\(/);
-
-    // Y `create()` aparece en el archivo EXACTAMENTE una vez: si hubiera una segunda, la excepcion
+    // Y el subject aparece en el archivo EXACTAMENTE una vez: si hubiera una segunda, la excepcion
     // habria dejado de ser una.
-    expect(helpers.match(/kvm\s*\.\s*create\s*\(/g) ?? []).toHaveLength(1);
+    expect(helpers.match(/STREAM\.CREATE/g) ?? []).toHaveLength(1);
 
-    // Ningun archivo de `src/` lo llama. (`infra/kv/source-properties.test.ts` ya lo afirma con sus
-    // propios patrones; acá se afirma la contraparte de la excepcion, para que el conjunto
-    // "prohibido en src, permitido SOLO en ese helper" quede completo y nombrado.)
+    // Ningun archivo de `src/` crea un bucket, ni con la API de JetStream ni con el KV crudo.
+    // (`infra/kv/source-properties.test.ts` ya lo afirma con sus propios patrones; aca se afirma la
+    // contraparte de la excepcion, para que el conjunto "prohibido en src, permitido SOLO en ese
+    // helper" quede completo y nombrado.)
     for (const file of sourceFiles()) {
       expect(
+        /STREAM\.CREATE/.test(file.code),
+        `${file.relativePath} crea un stream: el conector NO crea buckets (ADR-004)`,
+      ).toBe(false);
+      expect(
         /\bkvm\s*\.\s*create\s*\(/.test(file.code),
-        `${file.relativePath} llama a kvm.create(): el conector NO crea buckets (ADR-004)`,
+        `${file.relativePath} crea un bucket con el KV crudo`,
       ).toBe(false);
     }
   });
 });
 
-describe('CA-6: el AppConfig completo sigue sin loguearse, con el bloque kv presente', () => {
+describe('CA-6: el AppConfig completo sigue sin loguearse', () => {
   const CONFIG = read('config/source-properties.test.ts');
 
   it('sanity: el archivo del escaner de configuracion se pudo leer y tiene contenido real', () => {
@@ -230,20 +238,23 @@ describe('CA-6: el AppConfig completo sigue sin loguearse, con el bloque kv pres
     }
   });
 
-  it('TS-50: las lineas del KV enumeran sus campos A MANO, no el bloque entero', () => {
-    const stores = readSource('infra/kv/stores.ts');
+  // Desde S-032 la unica linea del KV es la de `openKvSpace()` (`'espacio KV abierto'`): ya no hay
+  // bloque `kv` en el `AppConfig`, pero la propiedad es la misma — los campos se enumeran a mano.
+  it('TS-50: la linea del espacio KV enumera sus campos A MANO, no un bloque entero', () => {
+    const space = readSource('infra/kv/space.ts');
 
-    // La linea de exito: los dos nombres de bucket, enumerados. No `config.kv`.
-    expect(stores).toMatch(/ticketsBucket/);
-    expect(stores).toMatch(/threadsBucket/);
-    // La del TTL discrepante: el bucket y los dos valores, enumerados.
-    expect(stores).toMatch(/expectedTtlDays/);
-    expect(stores).toMatch(/actualTtlMs/);
+    // La linea de exito: el bucket y el prefijo de la identidad, enumerados.
+    const lineIdx = space.indexOf("'espacio KV abierto'");
+    expect(lineIdx).toBeGreaterThan(-1);
+    const call = space.slice(space.lastIndexOf('logger.info(', lineIdx), lineIdx);
+    expect(call).toMatch(/\bbucket\s*:/);
+    expect(call).toMatch(/\bkvPrefix\s*:/);
 
-    // Y NINGUNA de las dos pasa el bloque: enumerarlos a mano es lo que hace que agregar una clave
-    // al bloque `kv` NO la vuelque al log por accidente. Es la propiedad, no una preferencia de
-    // estilo.
-    expect(stores).not.toMatch(/logger\s*\.\s*\w+\s*\(\s*\{\s*\.\.\.\s*config\.kv/);
-    expect(stores).not.toMatch(/logger\s*\.\s*\w+\s*\(\s*\{\s*kv\s*[,}]/);
+    // Y NO pasa un objeto armado afuera ni un spread: enumerarlos a mano es lo que hace que un campo
+    // nuevo no termine en el log por accidente. Ni un campo llamado `key`, que `REDACT_PATHS`
+    // censuraria sin avisar.
+    expect(call).not.toMatch(/\.\.\./);
+    expect(call).not.toMatch(/\bkey\s*:/);
+    expect(space).not.toMatch(/logger\s*\.\s*\w+\s*\(\s*\{\s*config\b/);
   });
 });

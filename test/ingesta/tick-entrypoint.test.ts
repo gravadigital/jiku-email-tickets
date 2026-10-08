@@ -8,10 +8,14 @@ import { runIngestaTick } from '#domain/ingesta/tick.js';
 import type { ImapFlowCtor, ImapFlowLike } from '#infra/imap/client.js';
 
 import { testLoggerWithCapture } from './test-logger.js';
-import { fakeThreadsKv } from './fake-threads-kv.js';
+import { fakeKvSpace } from './fake-kv-space.js';
 
-/** El handle del bucket de hilos, que estas suites propagan pero no ejercitan (S-026). */
-const THREADS_KV = fakeThreadsKv().kv;
+/**
+ * El Espacio KV, que estas suites propagan hasta el tick (S-032; hasta entonces, el handle del bucket
+ * de hilos de S-026). Lleva `tickets.alfa` → `42`, el mismo mapa que hasta S-032 viajaba en
+ * `config.ruteo.ticketMap`, para que los mails de estas suites ruteen igual que antes.
+ */
+const SPACE = fakeKvSpace({ 'tickets.alfa': '42' }).space;
 
 /**
  * TS-15 a TS-18: el punto de entrada del modulo (`runIngestaTick`), que compone `withMailSource()`
@@ -45,7 +49,6 @@ const BASE_CONFIG: AppConfig = {
   },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
   ruteo: {
-    ticketMap: new Map([['alfa', 42]]),
     subaddressPrefix: 'tickets',
     placeholderTitle: 'Ticket recibido por mail',
     placeholderBody: '(mail sin contenido)',
@@ -55,12 +58,6 @@ const BASE_CONFIG: AppConfig = {
     allowedMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'application/pdf'],
     maxSizeBytes: 10_485_760,
     putTimeoutMs: 30_000,
-  },
-  kv: {
-    ticketsBucket: 'TICKETS',
-    threadsBucket: 'MAIL_THREADS',
-    threadsTtlDays: 90,
-    watchRetryMs: 30_000,
   },
 };
 
@@ -123,7 +120,7 @@ describe('runIngestaTick — credenciales incorrectas (CA-9)', () => {
     const client = createFakeClient({ connectError: new AuthenticationFailure('LOGIN failed') });
     const { logger, capture } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, THREADS_KV, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, SPACE, ctorFor(client));
 
     const errorLine = capture.lines().find((line) => line['level'] === 'error' || line['msg'] === 'el tick fallo');
     expect(errorLine).toBeDefined();
@@ -160,7 +157,7 @@ describe('runIngestaTick — credenciales incorrectas (CA-9)', () => {
     const client = createFakeClient({ lockError });
     const { logger, capture } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, THREADS_KV, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, SPACE, ctorFor(client));
 
     expect(client.messageFlagsAdd).not.toHaveBeenCalled();
     const tickLines = capture.lines().filter((line) => line['msg'] === 'tick completado');
@@ -185,7 +182,7 @@ describe('runIngestaTick — host inalcanzable (CA-10)', () => {
     const client = createFakeClient({ connectError: networkError });
     const { logger, capture } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, THREADS_KV, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, SPACE, ctorFor(client));
 
     expect(client.messageFlagsAdd).not.toHaveBeenCalled();
     const tickLine = capture.lines().find((line) => line['msg'] === 'tick completado');
@@ -215,7 +212,7 @@ describe('runIngestaTick — corte de red a mitad de camino (CA-11, CA-12)', () 
     });
     const { logger, capture } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, THREADS_KV, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, SPACE, ctorFor(client));
 
     const tickLine = capture.lines().find((line) => line['msg'] === 'tick completado');
     expect(tickLine).toMatchObject({ ingestados: 5, parseados: 4, fallidos: 0 });
@@ -231,7 +228,7 @@ describe('runIngestaTick — corte de red a mitad de camino (CA-11, CA-12)', () 
     });
     const { logger } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, THREADS_KV, ctorFor(client));
+    await runIngestaTick(BASE_CONFIG, logger, FAKE_CLIENT, SPACE, ctorFor(client));
 
     // La 5ta llamada (uid 6) se invoco pero RECHAZO — no cuenta como "marcado con exito". Los
     // primeros 4 uids son los unicos efectivamente vistos por el proximo tick.
@@ -245,7 +242,7 @@ describe('runIngestaTick — corte de red a mitad de camino (CA-11, CA-12)', () 
     const client2 = createFakeClient({ searchResult: [6, 5, 4, 3, 2, 1] });
     const { logger: logger2 } = testLoggerWithCapture();
 
-    await runIngestaTick(BASE_CONFIG, logger2, FAKE_CLIENT, THREADS_KV, ctorFor(client2));
+    await runIngestaTick(BASE_CONFIG, logger2, FAKE_CLIENT, SPACE, ctorFor(client2));
 
     const fetchedInSecondRun = client2.download.mock.calls.length;
     expect(fetchedInSecondRun).toBe(6);

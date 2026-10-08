@@ -26,11 +26,12 @@ FROM node:22-alpine AS test
 WORKDIR /app
 # `package*.json` + `npm ci` ANTES de `COPY . .`: invertirlo hace que cualquier cambio de codigo
 # invalide la capa de instalacion de dependencias.
-# TEMPORAL (REQ-005 / S-024): `vendor/` viaja junto a `package*.json` porque el rango del SDK
-# apunta a un tarball local mientras el minor 1.1.0 de S-023 no este publicado en el registry. Sin
-# esta copia, `npm ci` falla con ENOENT sobre el .tgz y la imagen NO SE CONSTRUYE — verificado
-# corriendo el build. Cuando 1.1.0 se publique, el rango vuelve a `^1.1.0`, `vendor/` se elimina y
-# estas tres copias se borran con el.
+# TEMPORAL (REQ-008 / S-032): `vendor/` viaja junto a `package*.json` porque el rango del SDK
+# apunta a un tarball local, el `npm pack` del build de jiku-ts@edd1064 (el que trae el Espacio KV,
+# `client.kv()`), mientras ese SDK no este publicado en el registry. Sin esta copia, `npm ci` falla
+# con ENOENT sobre el .tgz y la imagen NO SE CONSTRUYE — verificado corriendo el build. Cuando el
+# SDK con el Espacio KV se publique, el rango vuelve al registry, `vendor/` se elimina y estas tres
+# copias se borran con el.
 COPY package*.json ./
 COPY vendor ./vendor
 RUN npm ci

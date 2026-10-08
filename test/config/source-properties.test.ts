@@ -39,31 +39,31 @@ describe('src/ source properties', () => {
     expect(readers.sort()).toEqual([`${CONFIG_DIR}dotenv.ts`, `${CONFIG_DIR}env.ts`]);
   });
 
-  // TS-10 (S-024). Las cuatro claves del KV son INDEPENDIENTES entre si: ninguna es cross-field, a
-  // diferencia de TICKET_MAP/TICKET_MAP_FILE, asi que ninguna toca `src/config/env.ts` ni la regla
-  // de `createFinalSchema`.
-  //
-  // Esto NO es un detalle de implementacion, y por eso hay un test: cuando S-025 elimine las dos
-  // fuentes del Mapa de Tickets y su regla cross-field, va a ser tentador "unificar" estas cuatro
-  // con lo que quede ahi. No hay nada que unificar — son cuatro valores sueltos sin ninguna
-  // relacion entre si, y meterlos en la regla cross-field crearia un acoplamiento inventado.
-  it('keeps the four KV keys out of the cross-field rule in config/env.ts', () => {
+  // TS-10 (S-024), INVERTIDO por S-032 (TS-53). Hasta REQ-008 este caso afirmaba que las cuatro
+  // claves del KV no tocaban la regla cross-field de `config/env.ts`. Desde S-032 las cuatro NO
+  // EXISTEN: el Espacio KV del SDK tiene el bucket fijo (`JIKU_KV`), no tiene TTL que comparar y no
+  // hay `watch()` que reintentar. Lo que se afirma ahora es que ningun archivo de `src/config/` las
+  // nombra — ni el schema, ni `EXPECTATIONS`, ni `AppConfig` — para que no vuelvan como "un default
+  // razonable" que nadie consume.
+  it('keeps the four removed KV keys out of every file of src/config/', () => {
     const env = FILES.find((file) => file.relativePath === `${CONFIG_DIR}env.ts`);
     expect(env).toBeDefined();
 
-    for (const key of [
-      'KV_TICKETS_BUCKET',
-      'KV_THREADS_BUCKET',
-      'KV_THREADS_TTL_DAYS',
-      'KV_WATCH_RETRY_MS',
-    ]) {
-      expect(env?.code, `${key} no debe aparecer en env.ts`).not.toContain(key);
+    const configFiles = FILES.filter((file) => file.relativePath.startsWith(CONFIG_DIR));
+    for (const file of configFiles) {
+      for (const key of [
+        'KV_TICKETS_BUCKET',
+        'KV_THREADS_BUCKET',
+        'KV_THREADS_TTL_DAYS',
+        'KV_WATCH_RETRY_MS',
+      ]) {
+        expect(file.code, `${key} no debe aparecer en ${file.relativePath}`).not.toContain(key);
+      }
     }
 
-    // La sanidad del caso. Hasta S-025 era "la unica regla cross-field sigue siendo la del Mapa de
-    // Tickets"; S-025 elimino esa regla —y con ella el `createFinalSchema` que existia solo para
-    // hospedarla— asi que el ancla pasa a ser que el modulo sigue siendo el validador del entorno.
-    // Sin alguna linea asi, el caso pasaria igual sobre un `env.ts` vaciado.
+    // La sanidad del caso: el escaner encontro los archivos de configuracion, y `env.ts` sigue
+    // siendo el validador del entorno. Sin esto, el caso pasaria igual sobre un `src/config/` vacio.
+    expect(configFiles.map((file) => file.relativePath)).toContain(`${CONFIG_DIR}schema.ts`);
     expect(env?.code).toContain('createEnv');
     expect(env?.code).toContain('envSchema');
   });

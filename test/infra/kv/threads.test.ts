@@ -1,33 +1,45 @@
 import { createHash } from 'node:crypto';
 
-import type { KV } from '@gravadigital/jiku/nats';
+import { JikuBucketFull } from '@gravadigital/jiku';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { AppConfig } from '#config/index.js';
-import { lookupThread, recordThreadEntry, sha256hex } from '#infra/kv/threads.js';
+import { threadKey } from '#infra/kv/keys.js';
+import type { KvSpace } from '#infra/kv/space.js';
+import { lookupThread, recordThreadEntry } from '#infra/kv/threads.js';
 import { createLogger } from '#shared/logger.js';
 
 import { createLogCapture, type LogCapture } from '../../shared/log-capture.js';
 import { startJetStreamNats, type JetStreamNats } from './helpers.js';
+import { spyOnSpace, withFailingGet, withFailingPut } from './space-doubles.js';
 
 /**
- * TS-1 a TS-16 del Story Plan de S-026: las tres operaciones del Mapa de Hilos, contra un NATS
- * **real con JetStream** (convencion `testing`: el bus no se mockea).
+ * TS-35 a TS-43 del Story Plan de S-032 (las operaciones del Mapa de Hilos de S-026, TS-5 a TS-16,
+ * adaptadas al Espacio KV), contra el `JIKU_KV` **real** (convencion `testing`: el bus no se mockea).
+ *
+ * Lo que cambio respecto de S-026 es solo a que apuntan: el handle es el ESPACIO de la identidad
+ * (no el bucket `MAIL_THREADS`), la clave gana el prefijo `hilos.`, y `get()` devuelve `undefined`
+ * en lugar de `null`. Las propiedades son las mismas.
+ *
+ * Cada test usa un ESPACIO FRESCO (otra identidad sobre el mismo bucket) en lugar de un bucket por
+ * test: el prefijo aisla igual, y el `KV` del SDK no lista claves. Por eso "escribio UNA entrada"
+ * se afirma con el espia de `put()` y un `get()` dirigido, no contando claves.
  *
  * Lo unico que se dobla es el borde que no se puede provocar contra un bucket sano: un `put()` o un
- * `get()` que RECHAZAN. Para eso hay dos dobles minimos de `KV`, porque tirar abajo el contenedor a
- * mitad de un test seria lento y no determinista.
+ * `get()` que RECHAZAN (`space-doubles.ts`). El espia envuelve el espacio REAL y solo registra.
  *
- * El `KV` ESPIA de TS-10/TS-11/TS-13 es distinto: envuelve el handle REAL y solo registra las
- * claves consultadas antes de delegar. No reemplaza el KV — la asercion de orden y de corte tiene
- * que valer contra el KV de verdad, no contra un doble que devuelve lo que el test quiera.
+ * Los hashes se calculan en el test con `createHash` propio, nunca importados de `src/`.
  */
 
 const BASE_CONFIG = {
   logLevel: 'info',
   nodeEnv: 'production',
-  instance: 'dev',
+  instance: 'test',
 } as unknown as AppConfig;
+
+const WRITE_FAILED_MESSAGE =
+  'no se pudo escribir la entrada del Mapa de Hilos; el requisito ya se creo y no se compensa';
+const MALFORMED_MESSAGE = 'una entrada del Mapa de Hilos tiene un requirementId invalido y se saltea';
 
 function loggerWithCapture(): { logger: ReturnType<typeof createLogger>; capture: LogCapture } {
   const capture = createLogCapture();
@@ -39,62 +51,17 @@ function expectedHash(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-/**
- * Envuelve un handle REAL y registra las claves de cada `get()`, en orden, antes de delegar.
- *
- * Un doble completo no serviria: la asercion "corta en el primer hit" tiene que valer contra el KV
- * de verdad, no contra un objeto que devuelve lo que el test le diga.
- */
-function spyOnGets(real: KV): { kv: KV; gets: string[] } {
-  const gets: string[] = [];
-  const kv = new Proxy(real, {
-    get(target, prop, receiver) {
-      if (prop === 'get') {
-        return async (key: string) => {
-          gets.push(key);
-          return target.get(key);
-        };
-      }
-      const value = Reflect.get(target, prop, receiver) as unknown;
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  }) as KV;
-  return { kv, gets };
-}
-
-/** Un `KV` cuyo `put()` rechaza siempre. El unico modo de provocar el bucket inaccesible en caliente. */
-function kvWithFailingPut(): KV {
-  return {
-    put: (): Promise<number> => Promise.reject(new Error('bucket inaccesible')),
-  } as unknown as KV;
-}
-
-/** Un `KV` cuyo `get()` rechaza siempre. */
-function kvWithFailingGet(): { kv: KV; calls: number } {
-  const state = { calls: 0 };
-  const kv = {
-    get: (): Promise<never> => {
-      state.calls += 1;
-      return Promise.reject(new Error('bucket inaccesible'));
-    },
-  } as unknown as KV;
-  return {
-    kv,
-    get calls(): number {
-      return state.calls;
-    },
-  };
+function decode(entry: { value: Uint8Array } | undefined): string | undefined {
+  return entry === undefined ? undefined : new TextDecoder().decode(entry.value);
 }
 
 let nats: JetStreamNats;
-let bucketCounter = 0;
+let spaceCounter = 0;
 
-/** Un bucket VACIO propio por test: sin aislamiento, el conteo de entradas de un test ve el del otro. */
-async function freshBucket(): Promise<{ handle: KV; name: string }> {
-  bucketCounter += 1;
-  const name = `THREADS_T${String(bucketCounter)}`;
-  await nats.seedBucket(name);
-  return { handle: await nats.openBucket(name), name };
+/** Un espacio VACIO propio por test: otra identidad sobre el mismo `JIKU_KV`. */
+async function freshSpace(): Promise<KvSpace> {
+  spaceCounter += 1;
+  return nats.spaceFor(`hilos-t${String(spaceCounter)}`);
 }
 
 beforeAll(async () => {
@@ -105,250 +72,191 @@ afterAll(async () => {
   await nats?.stop();
 });
 
-describe('sha256hex — la clave del Mapa de Hilos', () => {
-  // TS-1
-  it('TS-1: es el sha256 en hex y coincide con el valor de referencia', () => {
-    const messageId = '<abc@cliente.com>';
-    expect(sha256hex(messageId)).toBe(expectedHash(messageId));
-    expect(sha256hex(messageId)).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  // TS-2
-  it('TS-2: la clave siempre matchea validKeyRe de la libreria', () => {
-    // `validKeyRe` de `@nats-io/kv` (`lib/kv.js:86`). Copiado aca a proposito: el test no debe
-    // importar la constante que verifica.
-    const validKeyRe = /^[-/=.\w]+$/;
-    const entradas = [
-      '<abc@cliente.com>',
-      '<CAF=+7Kx_9@mail.gmail.com>',
-      '<a<b>c@x>',
-      '<>',
-      'sin-brackets@x.com',
-      '<ñ-acentos@cliente.com>',
-    ];
-
-    for (const entrada of entradas) {
-      const key = sha256hex(entrada);
-      expect(key, `${entrada} produjo una clave que la libreria rechazaria`).toMatch(validKeyRe);
-      expect(key).toMatch(/^[0-9a-f]{64}$/);
-    }
-  });
-
-  // TS-3
-  it('TS-3: el hash se calcula sobre el Message-Id CRUDO, con brackets', () => {
-    expect(sha256hex('<abc@cliente.com>')).not.toBe(sha256hex('abc@cliente.com'));
-    expect(sha256hex('<abc@cliente.com>')).toBe(expectedHash('<abc@cliente.com>'));
-  });
-
-  // TS-4
-  it('TS-4: no hay normalizacion — el caso y los espacios cambian la clave', () => {
-    expect(sha256hex('<ABC@cliente.com>')).not.toBe(sha256hex('<abc@cliente.com>'));
-    expect(sha256hex(' <abc@cliente.com> ')).not.toBe(sha256hex('<abc@cliente.com>'));
-  });
-});
-
 describe('recordThreadEntry — el write despues del alta', () => {
-  // TS-5
-  it('TS-5: escribe la entrada bajo la clave hasheada', async () => {
-    const { handle } = await freshBucket();
-    const { logger } = loggerWithCapture();
-
-    await recordThreadEntry({
-      threads: handle,
-      messageId: '<abc@cliente.com>',
-      requirementId: 500,
-      logger,
-    });
-
-    const entry = await handle.get(sha256hex('<abc@cliente.com>'));
-    expect(entry).not.toBeNull();
-    expect(Number.parseInt(entry?.string() ?? '', 10)).toBe(500);
-  });
-
-  // TS-6
-  it('TS-6: no escribe bajo el Message-Id sin hashear — el bucket tiene UNA entrada, de 64 hex', async () => {
-    const { handle } = await freshBucket();
-    const { logger } = loggerWithCapture();
-
-    await recordThreadEntry({
-      threads: handle,
-      messageId: '<abc@cliente.com>',
-      requirementId: 500,
-      logger,
-    });
-
-    const keys: string[] = [];
-    for await (const key of await handle.keys()) keys.push(key);
-
-    expect(keys).toHaveLength(1);
-    expect(keys[0]).toMatch(/^[0-9a-f]{64}$/);
-    expect(keys[0]).toBe(sha256hex('<abc@cliente.com>'));
-  });
-
-  // TS-7
-  it('TS-7: un put() que rechaza NO propaga: se loguea warn y se sigue', async () => {
+  // TS-35 (S-026 TS-5 y TS-6)
+  it('TS-35: escribe UNA entrada, bajo hilos.<sha256>, nunca bajo el Message-Id crudo', async () => {
+    const space = await freshSpace();
     const { logger, capture } = loggerWithCapture();
+    const spy = spyOnSpace(space);
+    const hashedKey = 'hilos.7482ad61199c790f5aa60568566e4a3973cc2f5ebabfbe57fd0a279ce7eef47e';
+    expect(hashedKey).toBe(`hilos.${expectedHash('<abc@cliente.com>')}`);
+
+    await recordThreadEntry({ space: spy.space, messageId: '<abc@cliente.com>', requirementId: 1234, logger });
+
+    expect(decode(await space.get(hashedKey))).toBe('1234');
+    expect(spy.puts).toEqual([{ key: hashedKey, value: '1234' }]);
+    expect(capture.lines()).toEqual([]);
+  });
+
+  // TS-36 (S-026 TS-7 y TS-8)
+  it('TS-36: un put() que rechaza (bucket lleno incluido) NO propaga y loguea errorClass', async () => {
+    const space = await freshSpace();
+    const { logger, capture } = loggerWithCapture();
+    const failing = withFailingPut(
+      space,
+      new JikuBucketFull(
+        'jiku: kv: put "hilos.7482ad61199c790f5aa60568566e4a3973cc2f5ebabfbe57fd0a279ce7eef47e" was refused because the bucket reached its limit.',
+      ),
+    );
 
     await expect(
-      recordThreadEntry({
-        threads: kvWithFailingPut(),
-        messageId: '<abc@cliente.com>',
-        requirementId: 500,
-        logger,
-      }),
+      recordThreadEntry({ space: failing, messageId: '<abc@cliente.com>', requirementId: 1234, logger }),
     ).resolves.toBeUndefined();
 
     const warns = capture.lines().filter((line) => line['level'] === 'warn');
     expect(warns).toHaveLength(1);
-    expect(warns[0]).toMatchObject({ messageId: '<abc@cliente.com>', requirementId: 500 });
-  });
-
-  // TS-8
-  it('TS-8: el warn del write fallido lleva messageIdHash y NO lleva contenido del mail', async () => {
-    const { logger, capture } = loggerWithCapture();
-
-    await recordThreadEntry({
-      threads: kvWithFailingPut(),
+    expect(warns[0]).toMatchObject({
       messageId: '<abc@cliente.com>',
-      requirementId: 500,
-      logger,
+      // El hash SOLO (64 hex), como hoy: es lo que se cruza con el bucket, sin el prefijo.
+      messageIdHash: '7482ad61199c790f5aa60568566e4a3973cc2f5ebabfbe57fd0a279ce7eef47e',
+      requirementId: 1234,
+      errorClass: 'JikuBucketFull',
+      msg: WRITE_FAILED_MESSAGE,
     });
-
-    const warn = capture.lines().find((line) => line['level'] === 'warn');
-    expect(warn?.['messageIdHash']).toBe(sha256hex('<abc@cliente.com>'));
-    // El campo NO se llama `key`: `REDACT_PATHS` incluye `'key'` y saldria `[REDACTED]`.
+    // El campo NO se llama `key`: `REDACT_PATHS` incluye `'key'` y saldria `[REDACTED]`. Y no viaja
+    // contenido del mail.
     for (const prohibido of ['body', 'subject', 'senderEmail', 'recipient', 'key', 'text', 'html']) {
-      expect(warn?.[prohibido], `el warn lleva ${prohibido}`).toBeUndefined();
+      expect(warns[0]?.[prohibido], `el warn lleva ${prohibido}`).toBeUndefined();
     }
-    expect(JSON.stringify(warn)).not.toContain('[REDACTED]');
+    expect(JSON.stringify(warns[0])).not.toContain('[REDACTED]');
   });
 });
 
 describe('lookupThread — el lookup ordenado que corta en el primer hit', () => {
-  // TS-9
-  it('TS-9: devuelve el requirementId cuando la unica referencia matchea', async () => {
-    const { handle } = await freshBucket();
+  // TS-37 (S-026 TS-9)
+  it('TS-37: devuelve el requirementId cuando la unica referencia matchea', async () => {
+    const space = await freshSpace();
     const { logger } = loggerWithCapture();
-    await handle.put(sha256hex('<r1@x>'), '77');
+    const key = 'hilos.f5e704b3f744e5aa2d287e872a9d8a11d41bd938e1165e0bd6902ceeb013bb99';
+    expect(key).toBe(`hilos.${expectedHash('<r1@x>')}`);
+    await space.put(key, '77');
+    const spy = spyOnSpace(space);
 
-    const result = await lookupThread({ threads: handle, referenceIds: ['<r1@x>'], logger });
+    const result = await lookupThread({ space: spy.space, referenceIds: ['<r1@x>'], logger });
 
     expect(result).toEqual({ found: true, requirementId: 77 });
+    expect(spy.gets).toEqual([key]);
   });
 
-  // TS-10
-  it('TS-10: itera en ORDEN y corta en el primer hit', async () => {
-    const { handle } = await freshBucket();
+  // TS-38 (S-026 TS-10)
+  it('TS-38: itera en ORDEN y corta en el primer hit', async () => {
+    const space = await freshSpace();
     const { logger } = loggerWithCapture();
-    await handle.put(sha256hex('<r2@x>'), '88');
+    await space.put(threadKey('<b@x>'), '5');
+    await space.put(threadKey('<c@x>'), '6');
+    const spy = spyOnSpace(space);
 
-    const { kv, gets } = spyOnGets(handle);
-    const result = await lookupThread({ threads: kv, referenceIds: ['<r1@x>', '<r2@x>'], logger });
+    const result = await lookupThread({ space: spy.space, referenceIds: ['<a@x>', '<b@x>', '<c@x>'], logger });
 
-    expect(result).toEqual({ found: true, requirementId: 88 });
-    expect(gets).toEqual([sha256hex('<r1@x>'), sha256hex('<r2@x>')]);
+    expect(result).toEqual({ found: true, requirementId: 5 });
+    expect(spy.gets).toEqual([`hilos.${expectedHash('<a@x>')}`, `hilos.${expectedHash('<b@x>')}`]);
   });
 
-  // TS-11
-  it('TS-11: con hit en la primera, NO se consulta el resto', async () => {
-    const { handle } = await freshBucket();
+  // TS-38 (S-026 TS-11)
+  it('TS-38b: con hit en la primera, NO se consulta el resto', async () => {
+    const space = await freshSpace();
     const { logger } = loggerWithCapture();
-    await handle.put(sha256hex('<r1@x>'), '99');
-    await handle.put(sha256hex('<r2@x>'), '11');
+    await space.put(threadKey('<r1@x>'), '99');
+    await space.put(threadKey('<r2@x>'), '11');
+    const spy = spyOnSpace(space);
 
-    const { kv, gets } = spyOnGets(handle);
-    const result = await lookupThread({ threads: kv, referenceIds: ['<r1@x>', '<r2@x>'], logger });
+    const result = await lookupThread({ space: spy.space, referenceIds: ['<r1@x>', '<r2@x>'], logger });
 
     expect(result).toEqual({ found: true, requirementId: 99 });
-    expect(gets).toEqual([sha256hex('<r1@x>')]);
+    expect(spy.gets).toEqual([`hilos.${expectedHash('<r1@x>')}`]);
   });
 
-  // TS-12
-  it('TS-12: ninguna referencia matchea es "sin match", distinguible de un error', async () => {
-    const { handle } = await freshBucket();
+  // TS-39 (S-026 TS-12)
+  it('TS-39: undefined es "no esta" y sigue con la siguiente; sin match es distinguible de un error', async () => {
+    const space = await freshSpace();
     const { logger } = loggerWithCapture();
+    const spy = spyOnSpace(space);
 
-    const { kv, gets } = spyOnGets(handle);
-    const result = await lookupThread({ threads: kv, referenceIds: ['<r1@x>', '<r2@x>'], logger });
+    const result = await lookupThread({ space: spy.space, referenceIds: ['<x1@x>', '<x2@x>'], logger });
 
     expect(result).toEqual({ found: false, consultable: true });
-    expect(gets).toEqual([sha256hex('<r1@x>'), sha256hex('<r2@x>')]);
+    expect(spy.gets).toEqual([`hilos.${expectedHash('<x1@x>')}`, `hilos.${expectedHash('<x2@x>')}`]);
   });
 
-  // TS-13
-  it('TS-13: referenceIds vacio no paga ningun round-trip', async () => {
-    const { handle } = await freshBucket();
+  // TS-40 (S-026 TS-13)
+  it('TS-40: referenceIds vacio no paga ningun round-trip', async () => {
+    const space = await freshSpace();
     const { logger } = loggerWithCapture();
+    const spy = spyOnSpace(space);
 
-    const { kv, gets } = spyOnGets(handle);
-    const result = await lookupThread({ threads: kv, referenceIds: [], logger });
+    const result = await lookupThread({ space: spy.space, referenceIds: [], logger });
 
     expect(result).toEqual({ found: false, consultable: true });
-    expect(gets).toEqual([]);
+    expect(spy.gets).toEqual([]);
   });
 
-  // TS-14
-  it('TS-14: un get() que rechaza es "no se pudo consultar", no "sin match"', async () => {
+  // TS-41 (S-026 TS-14 y TS-14b)
+  it('TS-41: un get() que rechaza es "no se pudo consultar" y CORTA', async () => {
+    const space = await freshSpace();
     const { logger, capture } = loggerWithCapture();
-    const failing = kvWithFailingGet();
+    const spy = spyOnSpace(withFailingGet(space));
 
-    const result = await lookupThread({
-      threads: failing.kv,
-      referenceIds: ['<r1@x>'],
-      logger,
-    });
+    const result = await lookupThread({ space: spy.space, referenceIds: ['<r1@x>', '<r2@x>'], logger });
 
     expect(result).toEqual({ found: false, consultable: false });
-    expect(capture.lines().filter((line) => line['level'] === 'warn')).toHaveLength(1);
-  });
-
-  it('TS-14b: un get() que rechaza CORTA — no sigue con las referencias restantes', async () => {
-    const { logger } = loggerWithCapture();
-    const failing = kvWithFailingGet();
-
-    await lookupThread({
-      threads: failing.kv,
-      referenceIds: ['<r1@x>', '<r2@x>', '<r3@x>'],
-      logger,
+    // Un espacio inaccesible no se vuelve accesible en la referencia siguiente.
+    expect(spy.gets).toHaveLength(1);
+    const warns = capture.lines().filter((line) => line['level'] === 'warn');
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatchObject({
+      messageId: '<r1@x>',
+      messageIdHash: 'f5e704b3f744e5aa2d287e872a9d8a11d41bd938e1165e0bd6902ceeb013bb99',
     });
-
-    // Un bucket inaccesible no se vuelve accesible en la referencia siguiente.
-    expect(failing.calls).toBe(1);
   });
 
-  // TS-15
-  it('TS-15: un valor mal formado no es un hit y la iteracion CONTINUA', async () => {
-    const { handle } = await freshBucket();
+  // TS-42 (S-026 TS-15)
+  it('TS-42: un valor mal formado no es un hit y la iteracion CONTINUA', async () => {
+    const space = await freshSpace();
     const { logger, capture } = loggerWithCapture();
-    await handle.put(sha256hex('<r1@x>'), 'no-es-un-numero');
-    await handle.put(sha256hex('<r2@x>'), '55');
+    await space.put(threadKey('<a@x>'), 'no-es-id');
+    await space.put(threadKey('<b@x>'), '9');
 
-    const result = await lookupThread({
-      threads: handle,
-      referenceIds: ['<r1@x>', '<r2@x>'],
-      logger,
-    });
+    const result = await lookupThread({ space, referenceIds: ['<a@x>', '<b@x>'], logger });
 
-    expect(result).toEqual({ found: true, requirementId: 55 });
-    const warn = capture.lines().find((line) => line['level'] === 'warn');
-    expect(warn?.['messageIdHash']).toBe(sha256hex('<r1@x>'));
+    expect(result).toEqual({ found: true, requirementId: 9 });
+    const warns = capture.lines().filter((line) => line['level'] === 'warn');
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatchObject({ messageIdHash: expectedHash('<a@x>'), msg: MALFORMED_MESSAGE });
+    for (const raw of capture.raw()) expect(raw).not.toContain('no-es-id');
   });
 
-  // TS-16
-  it('TS-16: un valor 0, negativo o no entero tampoco es un hit', async () => {
-    const { handle } = await freshBucket();
+  // TS-42 (S-026 TS-16)
+  it('TS-42b: un valor 0, negativo o no entero tampoco es un hit', async () => {
+    const space = await freshSpace();
     const { logger, capture } = loggerWithCapture();
-    await handle.put(sha256hex('<r1@x>'), '0');
-    await handle.put(sha256hex('<r2@x>'), '-3');
-    await handle.put(sha256hex('<r3@x>'), '4.5');
+    await space.put(threadKey('<r1@x>'), '0');
+    await space.put(threadKey('<r2@x>'), '-1');
+    await space.put(threadKey('<r3@x>'), '4.5');
 
-    const result = await lookupThread({
-      threads: handle,
-      referenceIds: ['<r1@x>', '<r2@x>', '<r3@x>'],
-      logger,
-    });
+    const result = await lookupThread({ space, referenceIds: ['<r1@x>', '<r2@x>', '<r3@x>'], logger });
 
     expect(result).toEqual({ found: false, consultable: true });
     expect(capture.lines().filter((line) => line['level'] === 'warn')).toHaveLength(3);
+  });
+
+  // TS-43
+  it('TS-43: una entrada de CUALQUIER antiguedad matchea (invariante 32: sin TTL)', async () => {
+    const { logger } = loggerWithCapture();
+    // Un doble que devuelve una entrada de 2020: nada en el conector lee `created`, asi que la edad
+    // no cambia el resultado.
+    const space: KvSpace = {
+      get: (key) =>
+        Promise.resolve({
+          key,
+          value: new TextEncoder().encode('1234'),
+          revision: 1,
+          created: new Date('2020-01-01T00:00:00.000Z'),
+        }),
+      put: () => Promise.resolve(1),
+    };
+
+    const result = await lookupThread({ space, referenceIds: ['<viejo@x>'], logger });
+
+    expect(result).toEqual({ found: true, requirementId: 1234 });
   });
 });

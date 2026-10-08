@@ -14,17 +14,18 @@ import type { ImapFlowCtor, ImapFlowLike } from '#infra/imap/client.js';
 import { setupTestBus, type TestBusContext } from '../bus/helpers.js';
 import { type CoreResponder, respondTo } from '../bus/responder.js';
 import { testLoggerWithCapture } from './test-logger.js';
-import { fakeThreadsKv } from './fake-threads-kv.js';
+import { fakeKvSpace } from './fake-kv-space.js';
 
 /**
- * El bucket de hilos que estas suites le pasan al tick.
+ * El Espacio KV que estas suites le pasan al tick (S-032; hasta entonces, el bucket de hilos).
  *
- * Ninguna de ellas es sobre el Mapa de Hilos (esas son `test/ingesta/tick-hilos.test.ts` y
- * `test/infra/kv/threads.test.ts`, contra un KV REAL con JetStream): lo unico que necesitan es que
- * el write que el tick hace despues de cada alta no falle y no las obligue a levantar otro
- * contenedor. Ver la cabecera de `./fake-threads-kv.ts`.
+ * Ninguna de ellas es sobre el KV (esas son `test/ingesta/tick-hilos.test.ts`,
+ * `test/ingesta/tick-mapa-tickets.test.ts` y `test/infra/kv/*.test.ts`): lo unico que necesitan es
+ * que la consulta del slug resuelva `alfa` a su proyecto —`tickets.alfa` → `42`, el mismo mapa que
+ * hasta S-032 viajaba en `config.ruteo.ticketMap`— y que el write del hilo que el tick hace despues
+ * de cada alta no falle, sin levantar otro contenedor. Ver la cabecera de `./fake-kv-space.ts`.
  */
-const THREADS_KV = fakeThreadsKv().kv;
+const SPACE = fakeKvSpace({ 'tickets.alfa': '42' }).space;
 
 /**
  * Tarea 4 — TS-25, TS-26, TS-27: un tick completo con mails, adjuntos y un fallo de credenciales
@@ -68,8 +69,9 @@ function tickLine(capture: { lines(): Record<string, unknown>[] }): Record<strin
  * `with-attachments.eml` trae `To: soporte@grava.io`, que con `routeMail()` cableado en el tick
  * (S-014) resuelve como `sin_slug` (no matchea el subaddress). Esta suite no es sobre ruteo (es
  * CA-17/CA-18: nada sensible se filtra en un ciclo con adjuntos) y su intencion original era un mail
- * EXITOSO, asi que se reescribe el recipient a un slug mapeado (`alfa`, ya declarado en
- * `BASE_CONFIG.ruteo.ticketMap` de este archivo) sin tocar el fixture compartido por otras suites.
+ * EXITOSO, asi que se reescribe el recipient a un slug mapeado (`alfa`, ya cargado en el `SPACE` de
+ * este archivo; hasta S-032, en `BASE_CONFIG.ruteo.ticketMap`) sin tocar el fixture compartido por
+ * otras suites.
  */
 function withResolvableRecipient(raw: Buffer): Buffer {
   return Buffer.from(
@@ -94,7 +96,6 @@ const BASE_CONFIG: AppConfig = {
   imap: { host: 'imap.gmail.com', port: 993, user: TEST_USER, password: TEST_PASSWORD },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
   ruteo: {
-    ticketMap: new Map([['alfa', 42]]),
     subaddressPrefix: 'tickets',
     placeholderTitle: 'Ticket recibido por mail',
     placeholderBody: '(mail sin contenido)',
@@ -104,12 +105,6 @@ const BASE_CONFIG: AppConfig = {
     allowedMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'application/pdf'],
     maxSizeBytes: 10_485_760,
     putTimeoutMs: 30_000,
-  },
-  kv: {
-    ticketsBucket: 'TICKETS',
-    threadsBucket: 'MAIL_THREADS',
-    threadsTtlDays: 90,
-    watchRetryMs: 30_000,
   },
 };
 
@@ -137,7 +132,7 @@ describe('tick — un ciclo completo no filtra nada sensible por stdout (CA-17)'
         // no-op
       },
     };
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     // 2) Una invocacion separada que simula un fallo de credenciales.
     class AuthenticationFailure extends Error {}
@@ -147,7 +142,7 @@ describe('tick — un ciclo completo no filtra nada sensible por stdout (CA-17)'
           throw new AuthenticationFailure('LOGIN failed');
         },
       }) as unknown as ImapFlowLike;
-    await runIngestaTick(BASE_CONFIG, logger, {} as unknown as Client, THREADS_KV, failingCtor);
+    await runIngestaTick(BASE_CONFIG, logger, {} as unknown as Client, SPACE, failingCtor);
 
     const rawLines = capture.raw();
     expect(rawLines.length).toBeGreaterThan(0);
@@ -179,7 +174,7 @@ describe('tick — todas las lineas estan estructuradas y a stdout (CA-17)', () 
       },
     };
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     for (const line of capture.raw()) {
       expect(() => JSON.parse(line)).not.toThrow();
@@ -202,7 +197,7 @@ describe('tick — nunca loguea metadatos de adjunto en este alcance (CA-18)', (
       },
     };
 
-    await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
     for (const line of capture.lines()) {
       expect(line).not.toHaveProperty('filename');
@@ -267,7 +262,7 @@ describe('tick — contenido real de cliente nunca se filtra, en exito y en fall
     });
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
     } finally {
       await local.stop();
       responder = await respondTo(bus.connection, 'requirements.new', {
@@ -305,7 +300,7 @@ describe('tick — contenido real de cliente nunca se filtra, en exito y en fall
     });
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
     } finally {
       await local.stop();
       responder = await respondTo(bus.connection, 'requirements.new', {
@@ -462,7 +457,7 @@ describe('tick — un tick completo con alta, descartes y rechazo del bus no fil
     ]);
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
     } finally {
       await local.stop();
       responder = await respondTo(bus.connection, 'requirements.new', {
@@ -653,7 +648,7 @@ describe('tick — ningun log de un tick con adjuntos aceptado/rechazado/fallido
     };
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
       const raw = capture.raw().join('\n');
       expect(raw).not.toContain(SECRET_A);

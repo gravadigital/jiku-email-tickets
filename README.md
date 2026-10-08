@@ -110,7 +110,7 @@ está en un lugar distinto.
 | 5 | **Red al bus:** el conector va **dentro** de la red del bus, que **no está expuesta al ingress** | …no arranca. `diagnosis: bus_inalcanzable` |
 | 6 | **La casilla acepta subaddress** (`+slug`, p. ej. `tickets+alfa@grava.io`) y tiene **IMAP habilitado**. En Gmail hace falta **App Password**, no la contraseña de la cuenta | …arranca igual —el conector no verifica la casilla al arrancar— pero la ingesta **no funciona**: sin IMAP habilitado el `connect()` del tick falla en cada disparo del cron, y sin subaddress el slug del proyecto destino no se puede extraer (FG-3) |
 | 7 | **El storage S3-compatible es alcanzable por red** desde donde corre el conector (FG-4) | …arranca igual —el conector no verifica el storage al arrancar— pero la subida de adjuntos falla: cada `PUT` a la `uploadUrl` prefirmada agota su timeout (`PUT_TIMEOUT_MS`) y el adjunto queda con aviso de fallo en la description, sin cancelar el requisito |
-| 8 | **JetStream habilitado en el bus, permisos de KV para la cuenta del conector en el auth-callout, y los dos buckets creados** (REQ-005) | …**no arranca**. `code: KV_BUCKET_MISSING_ERROR`. Si falta un bucket, `diagnosis: bucket_inexistente` y el log **nombra cuál**; si falta JetStream o los permisos, `diagnosis: kv_no_disponible` (son indistinguibles desde el cliente, así que el mensaje nombra las dos cosas) |
+| 8 | **JetStream habilitado en el bus, permisos de KV para la cuenta del conector en el auth-callout, y los dos buckets creados** (REQ-005) | …**no arranca**. `code: KV_SPACE_UNAVAILABLE_ERROR`. Si falta un bucket, `diagnosis: bucket_inexistente` y el log **nombra cuál**; si falta JetStream o los permisos, `diagnosis: kv_no_disponible` (son indistinguibles desde el cliente, así que el mensaje nombra las dos cosas) |
 
 Cinco aclaraciones que no son obvias:
 
@@ -152,7 +152,7 @@ dos copias de la misma tabla divergen, y la que se lee termina siendo la vieja.
 
 ### Configuración: variables y montajes
 
-Las veintiséis variables que valida el arranque. Las dos credenciales del bus son **rutas a archivos
+Las veinticuatro variables que valida el arranque. Las dos credenciales del bus son **rutas a archivos
 montados**, no su contenido. **`IMAP_PASSWORD` es la única que lleva un secreto en su valor** — y por
 eso llega por entorno y nunca se hornea en la imagen (NFR-S05).
 
@@ -205,10 +205,13 @@ declarada, y su ausencia sólo es un error para el proceso que la necesita.
 | `ATTACHMENT_ALLOWED_MIME_TYPES` | No | `image/png,image/jpeg,image/gif,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,application/zip` | MIME permitidos por la política local de adjuntos |
 | `ATTACHMENT_MAX_SIZE_BYTES` | No | `10485760` (10 MB) | Tamaño máximo de un adjunto, evaluado sobre el `Buffer` real descargado |
 | `PUT_TIMEOUT_MS` | No | `30000` | Timeout del `PUT` directo del byte del adjunto al storage S3-compatible |
-| `KV_TICKETS_BUCKET` | No | `TICKETS` | Nombre del bucket KV del Mapa de Tickets. **El conector no lo crea:** lo crea el operador con `nats kv add` |
-| `KV_THREADS_BUCKET` | No | `MAIL_THREADS` | Nombre del bucket KV del Mapa de Hilos. **El conector no lo crea** |
-| `KV_THREADS_TTL_DAYS` | No | `90` | TTL **esperado** del bucket de hilos, en **días**. El conector lo **compara** contra el real y avisa con un `warn` si difiere; **no lo fija** |
-| `KV_WATCH_RETRY_MS` | No | `30000` | Cada cuánto reintenta el `watch()` del Mapa de Tickets si se cae. Mientras tanto el mapa **se conserva** y el ruteo sigue funcionando con la última copia buena |
+
+> **Variables eliminadas (REQ-008):** `KV_TICKETS_BUCKET`, `KV_THREADS_BUCKET`,
+> `KV_THREADS_TTL_DAYS` y `KV_WATCH_RETRY_MS` ya no existen. El estado del conector vive en su
+> **Espacio KV**, dentro del bucket `JIKU_KV` que crea el deploy de Jiku, y no tiene nada
+> configurable: ni nombre de bucket, ni TTL que verificar, ni `watch()` que reintentar. Si alguna
+> quedó declarada en el entorno de un despliegue viejo, **se ignora**: no hace fallar el arranque ni
+> cambia ningún comportamiento.
 
 #### El Mapa de Tickets vive en un bucket KV del bus
 

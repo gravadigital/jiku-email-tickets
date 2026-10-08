@@ -1,208 +1,170 @@
+import {
+  JikuError,
+  JikuKVPermissionDenied,
+  JikuNoBucket,
+  JikuNotConnected,
+  requiredKVPermissions,
+} from '@gravadigital/jiku';
 import { describe, expect, it } from 'vitest';
 
-import {
-  KvBucketMissingError,
-  diagnoseKvFailure,
-  isValidBucketName,
-} from '#infra/kv/errors.js';
+import { KvSpaceUnavailableError, diagnoseKvFailure } from '#infra/kv/errors.js';
 import { AppError } from '#shared/errors/index.js';
 
+import { readSource, sourceFiles } from '../../shared/source-scan.js';
+
 /**
- * TS-20 a TS-26 del Story Plan de S-024.
+ * TS-12 a TS-20 del Story Plan de S-032: el diagnostico del fallo de `client.kv()` y el error del
+ * arranque.
  *
- * Las formas de error que este archivo construye a mano imitan las de `@nats-io/jetstream`
- * VERIFICADAS contra el paquete instalado: `StreamNotFoundError` con `code === 10059` para un
- * bucket ausente, y `JetStreamNotEnabled` para JetStream deshabilitado o sin permisos de KV. Las
- * clases reales NO son importables desde el subpath del SDK (Hallazgo 3), que es exactamente el
- * motivo de que la clasificacion sea estructural y de que estos tests puedan construir la forma a
- * mano. Los escenarios contra un bus REAL —donde el error lo produce el servidor y no este
- * archivo— estan en `stores.test.ts`: sin ese par, estos unit tests podrian estar afirmando sobre
- * una forma que el servidor no produce nunca.
+ * Desde REQ-008 las clases de error del KV SON importables desde la entrada principal del SDK
+ * (`JikuNoBucket`, `JikuKVPermissionDenied`), asi que el diagnostico es por `instanceof` y los tests
+ * construyen las clases REALES con sus constructores publicos. Es la forma de cubrir
+ * `kv_sin_permisos` sin un servidor con permisos (el E2E real de permisos es S-033). Los escenarios
+ * contra un JetStream REAL —donde el error lo produce el servidor y no este archivo— estan en
+ * `space.test.ts`.
  */
 
-/** Un bucket que no existe, como lo reporta la API de JetStream. */
-const streamNotFound = (): Error =>
-  Object.assign(new Error('stream not found'), {
-    name: 'StreamNotFoundError',
-    code: 10059,
+const NO_BUCKET_MESSAGE =
+  'jiku: kv: binding the bucket: the bucket JIKU_KV does not exist on this deployment.';
+const TIMEOUT_MESSAGE = 'jiku: kv: binding the bucket: JetStream did not answer within 15000ms.';
+const STREAM_INFO_SUBJECT = '$JS.API.STREAM.INFO.KV_JIKU_KV';
+
+describe('diagnoseKvFailure — por clase del SDK', () => {
+  // TS-12
+  it('TS-12: JikuNoBucket es bucket_no_usable', () => {
+    expect(diagnoseKvFailure(new JikuNoBucket(NO_BUCKET_MESSAGE))).toBe('bucket_no_usable');
   });
 
-/** JetStream deshabilitado — o sin permisos de KV, que es indistinguible (Hallazgo 4). */
-const jetStreamNotEnabled = (): Error =>
-  Object.assign(new Error('jetstream is not enabled'), { name: 'JetStreamNotEnabled' });
+  // TS-13
+  it('TS-13: JikuKVPermissionDenied es kv_sin_permisos', () => {
+    const error = new JikuKVPermissionDenied(
+      `jiku: kv: the bus refused binding the bucket (${STREAM_INFO_SUBJECT})`,
+      STREAM_INFO_SUBJECT,
+    );
 
-describe('diagnoseKvFailure', () => {
-  // TS-20
-  it('reconoce el bucket inexistente por su clase y su codigo', () => {
-    expect(diagnoseKvFailure(streamNotFound())).toBe('bucket_inexistente');
+    expect(diagnoseKvFailure(error)).toBe('kv_sin_permisos');
   });
 
-  // TS-21
-  it('reconoce el codigo 10059 aunque el name cambie', () => {
-    const renamed = Object.assign(new Error('otro texto'), { name: 'OtroNombre', code: 10059 });
-
-    // El `code` alcanza por si solo: si la libreria renombra la clase, el diagnostico sobrevive.
-    expect(diagnoseKvFailure(renamed)).toBe('bucket_inexistente');
+  // TS-14
+  it('TS-14: todo lo demas es desconocido, sin mapearse a otra causa', () => {
+    // Un timeout del SDK es un `JikuError` (no un `JikuTimeout`), y NO se adivina: puede ser
+    // JetStream caido o un permiso rechazado en silencio, y un diagnostico equivocado manda a
+    // revisar el sistema equivocado (ADR-006).
+    for (const error of [new JikuError(TIMEOUT_MESSAGE), new JikuNotConnected(), new Error('boom'), 'x', undefined]) {
+      expect(diagnoseKvFailure(error)).toBe('desconocido');
+    }
   });
 
-  // TS-21 (el otro lado): el name alcanza por si solo si el codigo no viene.
-  it('reconoce el name aunque el codigo no venga', () => {
-    const noCode = Object.assign(new Error('stream not found'), { name: 'StreamNotFoundError' });
+  // TS-15 — el test mas importante del set.
+  it('TS-15: NO clasifica por el texto del mensaje, ni por name, ni por code', () => {
+    // El mensaje correcto, o el `name` de la clase, o el `err_code` de JetStream, pero NO una
+    // instancia de la clase del SDK. Si alguno de estos diera otra cosa que 'desconocido', la
+    // clasificacion estaria leyendo prosa o campos copiables, y ADR-002 manda las CLASES del SDK.
+    const impostores = [
+      Object.assign(new Error('the bucket JIKU_KV does not exist'), { name: 'JikuNoBucket' }),
+      Object.assign(new Error('stream not found'), { code: 10059 }),
+      Object.assign(new Error('the bus refused … pub: allow:'), { name: 'JikuKVPermissionDenied' }),
+    ];
 
-    expect(diagnoseKvFailure(noCode)).toBe('bucket_inexistente');
-  });
-
-  // TS-22
-  it('reconoce JetStream deshabilitado', () => {
-    expect(diagnoseKvFailure(jetStreamNotEnabled())).toBe('kv_no_disponible');
-  });
-
-  it('reconoce JetStream deshabilitado a traves de la cadena de causas', () => {
-    // Puede llegar envuelto, y por eso la clasificacion recorre la cadena y no solo el error de
-    // arriba.
-    const wrapped = new Error('kv: no se pudo abrir', { cause: jetStreamNotEnabled() });
-
-    expect(diagnoseKvFailure(wrapped)).toBe('kv_no_disponible');
-  });
-
-  // TS-23
-  it('no adivina: lo inclasificable es desconocido', () => {
-    expect(diagnoseKvFailure(new Error('cualquier cosa'))).toBe('desconocido');
-    expect(diagnoseKvFailure('no soy un Error')).toBe('desconocido');
-    expect(diagnoseKvFailure(undefined)).toBe('desconocido');
-    expect(diagnoseKvFailure(null)).toBe('desconocido');
-  });
-
-  // TS-24 — el test mas importante del set.
-  it('NO clasifica por el texto del mensaje', () => {
-    // El mensaje correcto, pero sin `name` ni `code`. Si esto diera 'bucket_inexistente', la
-    // clasificacion estaria leyendo prosa y se romperia el dia que el servidor cambie la cadena.
-    const soloElTexto = new Error('stream not found');
-
-    expect(diagnoseKvFailure(soloElTexto)).toBe('desconocido');
-  });
-
-  it('NO clasifica JetStream por el texto del mensaje', () => {
-    expect(diagnoseKvFailure(new Error('jetstream is not enabled'))).toBe('desconocido');
+    for (const impostor of impostores) {
+      expect(diagnoseKvFailure(impostor)).toBe('desconocido');
+    }
   });
 });
 
-describe('isValidBucketName', () => {
-  it('acepta los nombres de los dos buckets por default', () => {
-    expect(isValidBucketName('TICKETS')).toBe(true);
-    // El `_` esta en `\w`, asi que MAIL_THREADS es valido.
-    expect(isValidBucketName('MAIL_THREADS')).toBe(true);
-  });
+describe('KvSpaceUnavailableError', () => {
+  // TS-16
+  it('TS-16: el bucket no usable expone sus campos y no sugiere grants', () => {
+    const cause = new JikuNoBucket(
+      `${NO_BUCKET_MESSAGE}\n\nJetStream said: stream not found (code 404, err_code 10059)`,
+    );
 
-  it('acepta letras, digitos, guion y guion bajo', () => {
-    expect(isValidBucketName('kv-bucket_9')).toBe(true);
-  });
+    const error = new KvSpaceUnavailableError({ diagnosis: 'bucket_no_usable', cause });
 
-  it('rechaza lo que la libreria rechazaria', () => {
-    // Un espacio, un `.`, un `>` (comodin de subject) y el vacio: los cuatro rompen el regex de
-    // `@nats-io/kv` (lib/kv.js:88), asi que se detectan ANTES de cualquier I/O.
-    expect(isValidBucketName('bad name!')).toBe(false);
-    expect(isValidBucketName('con.punto')).toBe(false);
-    expect(isValidBucketName('con>comodin')).toBe(false);
-    expect(isValidBucketName('')).toBe(false);
-  });
-});
-
-describe('KvBucketMissingError', () => {
-  // TS-25
-  it('expone su diagnostico como campos, no solo en el mensaje', () => {
-    const inner = new Error('la causa mas profunda');
-    const cause = Object.assign(new Error('stream not found'), {
-      name: 'StreamNotFoundError',
-      code: 10059,
-      cause: inner,
-    });
-
-    const error = new KvBucketMissingError({
-      diagnosis: 'bucket_inexistente',
-      bucket: 'TICKETS',
-      operation: 'status',
-      cause,
-    });
-
-    expect(error.code).toBe('KV_BUCKET_MISSING_ERROR');
+    expect(error.code).toBe('KV_SPACE_UNAVAILABLE_ERROR');
     expect(error.httpStatus).toBe(500);
-    expect(error.name).toBe('KvBucketMissingError');
-    expect(error.diagnosis).toBe('bucket_inexistente');
-    expect(error.bucket).toBe('TICKETS');
-    expect(error.operation).toBe('status');
-    expect(error.errorClass).toBe('Error');
+    expect(error.name).toBe('KvSpaceUnavailableError');
+    expect(error.diagnosis).toBe('bucket_no_usable');
+    expect(error.bucket).toBe('JIKU_KV');
+    expect(error.subject).toBeUndefined();
+    expect(error.errorClass).toBe('JikuNoBucket');
+    // COMPLETO, con el `\n`: truncar a la primera linea perderia la explicacion del SDK.
+    expect(error.causes).toEqual([cause.message]);
+    expect(error.cause).toBe(cause);
     expect(error).toBeInstanceOf(AppError);
 
-    // La cadena entera, del mas externo al mas interno, como strings planos.
-    expect(error.causes).toEqual(['stream not found', 'la causa mas profunda']);
-    expect(error.cause).toBe(cause);
+    expect(error.message).toContain('JIKU_KV');
+    // Sugerir grants seria el arreglo EQUIVOCADO: el bucket no existe, no tiene allow_direct o
+    // JetStream esta apagado (CA-4).
+    expect(error.message).not.toMatch(/grant|permis|pub:/i);
   });
 
-  it('registra la clase real del error subyacente', () => {
-    class JetStreamApiError extends Error {}
+  // TS-17
+  it('TS-17: el de permisos trae el subject y los grants completos en causes', () => {
+    const cause = new JikuKVPermissionDenied(
+      `jiku: kv: the bus refused binding the bucket (${STREAM_INFO_SUBJECT})\n` +
+        '  The bus refused the subject before JetStream saw anything…\n\n' +
+        requiredKVPermissions('dev'),
+      STREAM_INFO_SUBJECT,
+    );
 
-    const error = new KvBucketMissingError({
-      diagnosis: 'kv_no_disponible',
-      bucket: 'MAIL_THREADS',
-      operation: 'status',
-      cause: new JetStreamApiError('boom'),
-    });
+    const error = new KvSpaceUnavailableError({ diagnosis: 'kv_sin_permisos', cause });
 
-    expect(error.errorClass).toBe('JetStreamApiError');
+    expect(error.subject).toBe(STREAM_INFO_SUBJECT);
+    expect(error.errorClass).toBe('JikuKVPermissionDenied');
+    // Los grants vienen DESPUES de la primera linea del mensaje del SDK: con `causes` truncados se
+    // perderian, y son el dato que hace accionable el fallo (CA-5).
+    expect(error.causes[0]).toContain('$KV.JIKU_KV.dev.{{user_id}}.>');
+    expect(error.causes[0]).toContain('$JS.API.DIRECT.GET.KV_JIKU_KV.$KV.JIKU_KV.dev.{{user_id}}.>');
+    // La conexion al bus funciono: el remedio no la pone en duda.
+    expect(error.message).not.toMatch(/inalcanzable|no se pudo conectar/i);
   });
 
-  it('tolera una causa que no es un Error', () => {
-    const error = new KvBucketMissingError({
-      diagnosis: 'desconocido',
-      bucket: 'TICKETS',
-      operation: 'open',
-      cause: 'un string suelto',
-    });
+  // TS-18
+  it('TS-18: un timeout es desconocido, con su clase y su cadena', () => {
+    const cause = new JikuError(TIMEOUT_MESSAGE, { cause: new Error('TIMEOUT') });
 
-    expect(error.errorClass).toBe('string');
-    expect(error.causes).toEqual([]);
+    const error = new KvSpaceUnavailableError({ diagnosis: diagnoseKvFailure(cause), cause });
+
+    expect(error.diagnosis).toBe('desconocido');
+    expect(error.errorClass).toBe('JikuError');
+    expect(error.causes).toEqual([TIMEOUT_MESSAGE, 'TIMEOUT']);
   });
 
-  // TS-26
-  it('el mensaje nombra el bucket y su remedio', () => {
-    const message = new KvBucketMissingError({
-      diagnosis: 'bucket_inexistente',
-      bucket: 'MAIL_THREADS',
-      operation: 'status',
-      cause: streamNotFound(),
-    }).message;
+  // TS-19
+  it('TS-19: tolera una causa que no es un Error', () => {
+    const build = (): KvSpaceUnavailableError =>
+      new KvSpaceUnavailableError({ diagnosis: 'desconocido', cause: 'texto' });
 
-    expect(message).toContain('MAIL_THREADS');
-    // El remedio: lo crea el operador con `nats kv add`, y el conector NO lo crea a proposito.
-    expect(message).toContain('nats kv add');
-    expect(message).toMatch(/no lo crea/i);
+    expect(build).not.toThrow();
+    expect(build().errorClass).toBe('string');
+    expect(build().causes).toEqual([]);
   });
+});
 
-  it('el remedio de kv_no_disponible nombra LAS DOS cosas a revisar', () => {
-    const message = new KvBucketMissingError({
-      diagnosis: 'kv_no_disponible',
-      bucket: 'TICKETS',
-      operation: 'status',
-      cause: jetStreamNotEnabled(),
-    }).message;
+describe('lo viejo desaparecio y el diagnostico no inspecciona texto', () => {
+  // TS-20
+  it('TS-20: ningun archivo de src/ nombra el error ni los diagnosticos viejos', () => {
+    const viejos = [
+      'KvBucketMissingError',
+      'KV_BUCKET_MISSING_ERROR',
+      'isValidBucketName',
+      'nombre_de_bucket_invalido',
+      'bucket_inexistente',
+      'kv_no_disponible',
+      'MS_PER_DAY',
+      'expectedTtlDays',
+    ];
 
-    // Hallazgo 4: son indistinguibles desde el cliente, asi que el mensaje nombra las dos.
-    expect(message).toMatch(/JetStream/i);
-    expect(message).toMatch(/permisos/i);
-    // Y NO dice que el bus este inalcanzable: la conexion funciono.
-    expect(message).not.toMatch(/inalcanzable|no se pudo conectar/i);
-  });
+    for (const { relativePath, code } of sourceFiles()) {
+      for (const viejo of viejos) {
+        expect(code, `${relativePath} todavia nombra ${viejo}`).not.toContain(viejo);
+      }
+    }
 
-  it('el mensaje del nombre invalido nombra las dos variables de configuracion', () => {
-    const message = new KvBucketMissingError({
-      diagnosis: 'nombre_de_bucket_invalido',
-      bucket: 'bad name!',
-      operation: 'validate',
-      cause: undefined,
-    }).message;
-
-    expect(message).toContain('KV_TICKETS_BUCKET');
-    expect(message).toContain('KV_THREADS_BUCKET');
+    const errors = readSource('infra/kv/errors.ts');
+    expect(errors).not.toMatch(/\.name\s*===/);
+    expect(errors).not.toMatch(/err_code|10059/);
+    expect(errors).not.toMatch(/\.message\s*(===|\.includes|\.match|\.startsWith)/);
   });
 });

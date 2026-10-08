@@ -241,6 +241,33 @@ const DEFAULT_PUT_TIMEOUT_MS = 30_000;
 
 ---
 
+## TICKETS_KEY_PREFIX / THREADS_KEY_PREFIX
+
+**Location:** `src/infra/kv/keys.ts`
+
+**Description:** The right-hand prefixes of the two maps in the connector's KV Space (S-032):
+`'tickets.'` (Ticket Map, `tickets.<slug>` → `projectId`) and `'hilos.'` (Thread Map,
+`hilos.<sha256(Message-Id)>` → `requirementId`). **Code constants, never configuration**: changing
+them would orphan every loaded entry, and as an environment variable a typo would be enough for that.
+
+**Signature:**
+
+```ts
+export const TICKETS_KEY_PREFIX = 'tickets.';
+export const THREADS_KEY_PREFIX = 'hilos.';
+```
+
+**Usage example:**
+
+```ts
+import { ticketKey } from '#infra/kv/keys.js';
+
+ticketKey('alfa'); // TICKETS_KEY_PREFIX + 'alfa' → 'tickets.alfa'
+// U-02 loads it as: nats kv put JIKU_KV <instance>.<sub>.tickets.alfa 42
+```
+
+---
+
 ## MAX_ATTACHMENTS_PER_REQUIREMENT
 
 **Location:** `src/config/schema.ts`

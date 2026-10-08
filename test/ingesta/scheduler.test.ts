@@ -4,10 +4,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { scheduleTick, triggerTick, waitForCurrentTick } from '#domain/ingesta/scheduler.js';
 
 import { testLoggerWithCapture } from './test-logger.js';
-import { fakeThreadsKv } from './fake-threads-kv.js';
+import { fakeKvSpace } from './fake-kv-space.js';
 
-/** El handle del bucket de hilos que este modulo solo PROPAGA (S-026). Nunca lo toca. */
-const THREADS_KV = fakeThreadsKv().kv;
+/**
+ * El Espacio KV que este modulo solo PROPAGA (S-032; hasta entonces, el handle del bucket de hilos
+ * de S-026). Nunca lo toca.
+ */
+const SPACE = fakeKvSpace({ 'tickets.alfa': '42' }).space;
 
 /**
  * TS-1 a TS-5 y el test adicional de `waitForCurrentTick()` (Tarea 1 del Story Plan de S-011).
@@ -28,10 +31,10 @@ describe('scheduler: triggerTick — el guard de no solapamiento', () => {
     const { logger } = testLoggerWithCapture();
     const fakeTick = vi.fn().mockResolvedValue(undefined);
 
-    await triggerTick(configStub(), logger, FAKE_CLIENT, THREADS_KV, fakeTick);
+    await triggerTick(configStub(), logger, FAKE_CLIENT, SPACE, fakeTick);
 
     expect(fakeTick).toHaveBeenCalledTimes(1);
-    expect(fakeTick).toHaveBeenCalledWith(configStub(), logger, FAKE_CLIENT, THREADS_KV);
+    expect(fakeTick).toHaveBeenCalledWith(configStub(), logger, FAKE_CLIENT, SPACE);
   });
 
   it('TS-2: un disparo mientras hay un tick en curso se saltea con warn y no se encola', async () => {
@@ -44,9 +47,9 @@ describe('scheduler: triggerTick — el guard de no solapamiento', () => {
         }),
     );
 
-    const first = triggerTick(configStub(), logger, FAKE_CLIENT, THREADS_KV, fakeTick);
+    const first = triggerTick(configStub(), logger, FAKE_CLIENT, SPACE, fakeTick);
     // El segundo disparo llega mientras el primero sigue pendiente.
-    await triggerTick(configStub(), logger, FAKE_CLIENT, THREADS_KV, fakeTick);
+    await triggerTick(configStub(), logger, FAKE_CLIENT, SPACE, fakeTick);
 
     expect(fakeTick).toHaveBeenCalledTimes(1); // la segunda invocacion NO llamo al fakeTick
 
@@ -61,8 +64,8 @@ describe('scheduler: triggerTick — el guard de no solapamiento', () => {
     const { logger } = testLoggerWithCapture();
     const fakeTick = vi.fn().mockResolvedValue(undefined);
 
-    await triggerTick(configStub(), logger, FAKE_CLIENT, THREADS_KV, fakeTick);
-    await triggerTick(configStub(), logger, FAKE_CLIENT, THREADS_KV, fakeTick);
+    await triggerTick(configStub(), logger, FAKE_CLIENT, SPACE, fakeTick);
+    await triggerTick(configStub(), logger, FAKE_CLIENT, SPACE, fakeTick);
 
     expect(fakeTick).toHaveBeenCalledTimes(2);
   });
@@ -72,8 +75,8 @@ describe('scheduler: triggerTick — el guard de no solapamiento', () => {
     const failingTick = vi.fn().mockRejectedValue(new Error('tick fallido'));
     const nextTick = vi.fn().mockResolvedValue(undefined);
 
-    await expect(triggerTick(configStub(), logger, FAKE_CLIENT, THREADS_KV, failingTick)).resolves.toBeUndefined();
-    await triggerTick(configStub(), logger, FAKE_CLIENT, THREADS_KV, nextTick);
+    await expect(triggerTick(configStub(), logger, FAKE_CLIENT, SPACE, failingTick)).resolves.toBeUndefined();
+    await triggerTick(configStub(), logger, FAKE_CLIENT, SPACE, nextTick);
 
     expect(nextTick).toHaveBeenCalledTimes(1);
   });
@@ -101,7 +104,7 @@ describe('scheduler: waitForCurrentTick()', () => {
         }),
     );
 
-    const inFlight = triggerTick(configStub(), logger, FAKE_CLIENT, THREADS_KV, fakeTick);
+    const inFlight = triggerTick(configStub(), logger, FAKE_CLIENT, SPACE, fakeTick);
 
     let waited = false;
     const waiter = waitForCurrentTick().then(() => {
@@ -127,7 +130,7 @@ describe('scheduler: scheduleTick() — las dos ramas de POLL_ENABLED (Tarea 2)'
     const fakeScheduledTask = { stop: vi.fn() };
     const cronScheduleFn = vi.fn().mockReturnValue(fakeScheduledTask);
 
-    const task = scheduleTick(config, logger, FAKE_CLIENT, THREADS_KV, vi.fn(), cronScheduleFn);
+    const task = scheduleTick(config, logger, FAKE_CLIENT, SPACE, vi.fn(), cronScheduleFn);
 
     expect(cronScheduleFn).toHaveBeenCalledTimes(1);
     expect(cronScheduleFn).toHaveBeenCalledWith('*/5 * * * *', expect.any(Function));
@@ -147,7 +150,7 @@ describe('scheduler: scheduleTick() — las dos ramas de POLL_ENABLED (Tarea 2)'
     const runTick = vi.fn().mockResolvedValue(undefined);
     const cronScheduleFn = vi.fn().mockReturnValue({ stop: vi.fn() });
 
-    scheduleTick(config, logger, FAKE_CLIENT, THREADS_KV, runTick, cronScheduleFn);
+    scheduleTick(config, logger, FAKE_CLIENT, SPACE, runTick, cronScheduleFn);
 
     expect(runTick).not.toHaveBeenCalled();
   });
@@ -157,7 +160,7 @@ describe('scheduler: scheduleTick() — las dos ramas de POLL_ENABLED (Tarea 2)'
     const config = { ...configStub(), poll: { cron: '*/5 * * * *', enabled: false, maxPerTick: 50 } };
     const cronScheduleFn = vi.fn();
 
-    const task = scheduleTick(config, logger, FAKE_CLIENT, THREADS_KV, vi.fn(), cronScheduleFn);
+    const task = scheduleTick(config, logger, FAKE_CLIENT, SPACE, vi.fn(), cronScheduleFn);
 
     expect(cronScheduleFn).not.toHaveBeenCalled();
     expect(task).toBeUndefined();
@@ -187,7 +190,6 @@ function configStub() {
     },
     poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
     ruteo: {
-      ticketMap: new Map([['alfa', 42]]),
       subaddressPrefix: 'tickets',
       placeholderTitle: 'Ticket recibido por mail',
       placeholderBody: '(mail sin contenido)',
@@ -197,12 +199,6 @@ function configStub() {
       allowedMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'application/pdf'],
       maxSizeBytes: 10_485_760,
       putTimeoutMs: 30_000,
-    },
-    kv: {
-      ticketsBucket: 'TICKETS',
-      threadsBucket: 'MAIL_THREADS',
-      threadsTtlDays: 90,
-      watchRetryMs: 30_000,
     },
   };
 }

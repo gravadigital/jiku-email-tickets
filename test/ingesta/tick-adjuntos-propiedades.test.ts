@@ -12,17 +12,18 @@ import { runTick } from '#domain/ingesta/tick.js';
 import { setupTestBus, type TestBusContext } from '../bus/helpers.js';
 import { type CoreResponder, respondTo } from '../bus/responder.js';
 import { testLoggerWithCapture } from './test-logger.js';
-import { fakeThreadsKv } from './fake-threads-kv.js';
+import { fakeKvSpace } from './fake-kv-space.js';
 
 /**
- * El bucket de hilos que estas suites le pasan al tick.
+ * El Espacio KV que estas suites le pasan al tick (S-032; hasta entonces, el bucket de hilos).
  *
- * Ninguna de ellas es sobre el Mapa de Hilos (esas son `test/ingesta/tick-hilos.test.ts` y
- * `test/infra/kv/threads.test.ts`, contra un KV REAL con JetStream): lo unico que necesitan es que
- * el write que el tick hace despues de cada alta no falle y no las obligue a levantar otro
- * contenedor. Ver la cabecera de `./fake-threads-kv.ts`.
+ * Ninguna de ellas es sobre el KV (esas son `test/ingesta/tick-hilos.test.ts`,
+ * `test/ingesta/tick-mapa-tickets.test.ts` y `test/infra/kv/*.test.ts`): lo unico que necesitan es
+ * que la consulta del slug resuelva `alfa` a su proyecto —`tickets.alfa` → `42`, el mismo mapa que
+ * hasta S-032 viajaba en `config.ruteo.ticketMap`— y que el write del hilo que el tick hace despues
+ * de cada alta no falle, sin levantar otro contenedor. Ver la cabecera de `./fake-kv-space.ts`.
  */
-const THREADS_KV = fakeThreadsKv().kv;
+const SPACE = fakeKvSpace({ 'tickets.alfa': '42' }).space;
 
 /**
  * S-022: las propiedades del sistema completo sobre el modulo de adjuntos, disparadas SIEMPRE
@@ -56,7 +57,6 @@ const BASE_CONFIG: AppConfig = {
   },
   poll: { cron: '*/5 * * * *', enabled: true, maxPerTick: 50 },
   ruteo: {
-    ticketMap: new Map([['alfa', 42]]),
     subaddressPrefix: 'tickets',
     placeholderTitle: 'Ticket recibido por mail',
     placeholderBody: '(mail sin contenido)',
@@ -66,12 +66,6 @@ const BASE_CONFIG: AppConfig = {
     allowedMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'application/pdf'],
     maxSizeBytes: 10_485_760,
     putTimeoutMs: 30_000,
-  },
-  kv: {
-    ticketsBucket: 'TICKETS',
-    threadsBucket: 'MAIL_THREADS',
-    threadsTtlDays: 90,
-    watchRetryMs: 30_000,
   },
 };
 
@@ -188,7 +182,7 @@ describe('runTick — orden particion -> dedup -> tope invariante, sobre el sist
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, SPACE);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
 
@@ -226,7 +220,7 @@ describe('runTick — orden particion -> dedup -> tope invariante, sobre el sist
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, SPACE);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
       expect(uploadResponder.count()).toBe(1);
@@ -279,7 +273,7 @@ describe('runTick — el tope no se recalcula tras un fallo de PUT, sobre el sis
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, SPACE);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
 
@@ -348,7 +342,7 @@ describe('runTick — rechazo local + failure de core + PUT fallido combinados n
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, SPACE);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0 });
 
@@ -398,7 +392,7 @@ describe('runTick — un mail con todos los adjuntos fallidos es publicado, no f
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, SPACE);
 
       expect(tickLine(capture)).toMatchObject({ creados: 1, fallidos: 0, descartados: 0 });
 
@@ -460,7 +454,7 @@ describe('runTick — dos mails identicos con los mismos adjuntos producen descr
     ]);
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
       expect(tickLine(capture)).toMatchObject({ creados: 2, fallidos: 0 });
 
@@ -560,7 +554,7 @@ describe('runTick — la linea de metricas del tick sigue con los cinco contador
     ]);
 
     try {
-      await runTick(source, BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
 
       const tick = tickLine(capture);
       expect(tick).toMatchObject({
@@ -640,7 +634,7 @@ describe('runTick — el escenario de extremo a extremo con adjunto, sin instanc
     });
 
     try {
-      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, THREADS_KV);
+      await runTick(sourceWithSingleMail(mail), BASE_CONFIG, logger, bus.client, SPACE);
 
       // El responder de files.request-upload recibio EXACTAMENTE una solicitud, antes de la de
       // requirements.new (garantizado por estructura: procesarAdjuntosDelMail() corre antes de
