@@ -27,7 +27,9 @@ ever makes — `attachments.list` filtered by the four names that make a reuse s
 that makes "the new mail never queries" structural rather than a conditional) and S-032 (all state
 moves to the SDK's **KV Space** — `openKvSpace()`, `lookupTicket()` with one `get` per mail, the
 single keys module, the startup diagnosis by SDK class — and the raw `@nats-io/kv` buckets, the
-`watch()` and the four `KV_*` variables go away). The service is a
+`watch()` and the four `KV_*` variables go away) and S-033 (test helpers only: the operator's CLI
+writes with the full key, a JetStream server with static permissions, a controlled KV outage and a
+back-dated entry, and stream inspection by last sequence). The service is a
 `worker` in Node.js with no HTTP surface and no database, so several categories do not apply and
 stay empty until a story creates them.
 
@@ -253,7 +255,7 @@ See full details in [services.md](./services.md)
 
 ## Test Helpers
 
-**Total: 13**
+**Total: 16**
 
 - **setupTestBus** (`test/bus/helpers.ts`) - Opens a NATS connection against the suite's shared
   container and builds a bus `Client` with `Client.fromConnection()`, returning a context with
@@ -268,10 +270,21 @@ See full details in [services.md](./services.md)
   **different image tag** than the shared one, so `shared-container.test.ts`'s `ancestor=` count
   never sees it — read its comment: that is not a version decision) and creates `JIKU_KV` with the
   stream configuration of the SDK's own integration test (`allow_direct: true`, no TTL). Exposes
-  `client`, `createBucket(overrides?)`, `deleteBucket()`, `bucketExists()` and `spaceFor(userId)` —
-  a **fresh space of another identity** per test, which replaces the old bucket-per-test (the SDK's
-  `KV` lists no keys). `createBucket` is the **only** place in the repo that creates a bucket
-  (`STREAM.CREATE`) — production code never does. Rewritten in S-032 without `Kvm`.
+  `client`, `createBucket(overrides?)`, `deleteBucket()`, `bucketExists()`, `bucketConfig()`,
+  `lastSequences(filter?)` and `spaceFor(userId)` — a **fresh space of another identity** per test,
+  which replaces the old bucket-per-test (the SDK's `KV` lists no keys). The module-level
+  `createBucket(connection, overrides?)` is the **only** place in the repo that creates a bucket
+  (`STREAM.CREATE`) — production code never does. Rewritten in S-032 without `Kvm`; S-033 added
+  `bucketConfig()` (assert the connector did not fix a bad bucket) and `lastSequences()` (every key
+  written, by last sequence, read from the stream since the SDK cannot list).
+- **startPermissionedJetStreamNats** (`test/infra/kv/permission-helpers.ts`) - A JetStream NATS with
+  **static user permissions** (`deploy`, `sin-grants`, `solo-info`) and `JIKU_KV` created by `deploy`
+  through `createBucket()` (S-033). The first test of a real server denying the KV Space's grants.
+  Does **not** exercise the auth-callout or the real `internal-app` template.
+- **operatorTicketKey / operatorPut / operatorDel / readmeTicketTemplate** (`test/infra/kv/operator.ts`)
+  - What U-02 does with the NATS CLI: the full key built from the **README's template** and the
+  startup line's `kvPrefix`, written as `nats kv put`/`nats kv del` over the raw connection. The only
+  place a `$KV.JIKU_KV.…` subject is built by hand, on purpose (S-033).
 - **fakeKvSpace** (`test/ingesta/fake-kv-space.ts`) - An in-memory double of the KV Space for the tick
   suites that are **not** about the KV (replaces `fakeThreadsKv`, S-032). Seeded with right-hand keys
   (`{ 'tickets.alfa': '42' }`, `threadKey(id)`), `get()` resolves `undefined` or a `KVEntry` with a
@@ -281,6 +294,10 @@ See full details in [services.md](./services.md)
   `KvSpace` (real or fake): a spy that records the keys read and written, and the same space with a
   `get()` or `put()` that rejects (by default with the SDK's timeout, a `JikuError`). Plain objects
   that delegate — never a `Proxy`, which breaks on the SDK `KV`'s private fields.
+- **switchableSpace / withEntryCreated** (`test/infra/kv/space-doubles.ts`) - A controlled KV outage
+  on **the same object** (`down()`/`up()`: `get()` and `put()` reject, then delegate again), and a
+  space that returns every entry with `created` back-dated, recording each read so a test can prove
+  the double was used (S-033).
 - **fakeTokenSource / rotatingTokenSource / failingTokenSource** (`test/bus/auth-helpers.ts`) -
   `TokenSource` doubles at the edge for the connection tests, since the real `ServiceUser` would call
   Zitadel.

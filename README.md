@@ -110,7 +110,7 @@ está en un lugar distinto.
 | 5 | **Red al bus:** el conector va **dentro** de la red del bus, que **no está expuesta al ingress** | …no arranca. `diagnosis: bus_inalcanzable` |
 | 6 | **La casilla acepta subaddress** (`+slug`, p. ej. `tickets+alfa@grava.io`) y tiene **IMAP habilitado**. En Gmail hace falta **App Password**, no la contraseña de la cuenta | …arranca igual —el conector no verifica la casilla al arrancar— pero la ingesta **no funciona**: sin IMAP habilitado el `connect()` del tick falla en cada disparo del cron, y sin subaddress el slug del proyecto destino no se puede extraer (FG-3) |
 | 7 | **El storage S3-compatible es alcanzable por red** desde donde corre el conector (FG-4) | …arranca igual —el conector no verifica el storage al arrancar— pero la subida de adjuntos falla: cada `PUT` a la `uploadUrl` prefirmada agota su timeout (`PUT_TIMEOUT_MS`) y el adjunto queda con aviso de fallo en la description, sin cancelar el requisito |
-| 8 | **JetStream habilitado en el bus, permisos de KV para la cuenta del conector en el auth-callout, y los dos buckets creados** (REQ-005) | …**no arranca**. `code: KV_SPACE_UNAVAILABLE_ERROR`. Si falta un bucket, `diagnosis: bucket_inexistente` y el log **nombra cuál**; si falta JetStream o los permisos, `diagnosis: kv_no_disponible` (son indistinguibles desde el cliente, así que el mensaje nombra las dos cosas) |
+| 8 | **`JIKU_KV` creado por el deploy de Jiku con `allow_direct` y sin TTL, y los tres grants del Espacio KV en la plantilla de `internal-app`**. U-02 la **verifica** antes de desplegar: no la crea U-02 ni el conector | …**no arranca**. `code: KV_SPACE_UNAVAILABLE_ERROR`, con uno de tres `diagnosis`. `bucket_no_usable`: `JIKU_KV` no existe, no tiene `allow_direct` o JetStream está apagado — lo arregla el **deploy de Jiku**, la causa exacta va en `causes`, y **no** es un problema de grants. `kv_sin_permisos`: al rol le faltan los grants — el log trae el `subject` rechazado y los grants que faltan, y se arregla en la **plantilla de `internal-app`**. `desconocido`: no encaja en ninguno — la clase y la cadena de causas van en la línea |
 
 Cinco aclaraciones que no son obvias:
 
@@ -126,24 +126,40 @@ Cinco aclaraciones que no son obvias:
   proceso de servidor (`fetch` nativo de Node), no un navegador — CORS no aplica. La única
   autorización es la `uploadUrl` que `core` firmó: el conector nunca ve ni usa una credencial de S3
   propia (ADR-003).
-- **La precondición 8 la crea el operador, y el conector NO la crea por él.** Los dos buckets se
-  crean a mano, una vez por despliegue:
+- **La precondición 8 la crea el deploy de Jiku: ni U-02 ni el conector crean `JIKU_KV`.** El
+  bucket es **uno** para todo el bus, y cada identidad usa adentro su propio **Espacio KV**: el
+  prefijo `<instance>.<sub>.` que el SDK agrega delante de cada clave. Lo que hace U-02 es
+  **verificarla** antes de desplegar (`nats kv info JIKU_KV`: que exista, con `allow_direct` y sin
+  TTL) y pedir los grants si faltan.
 
-  ```bash
-  nats kv add TICKETS                    # el Mapa de Tickets: slug -> projectId
-  nats kv add MAIL_THREADS --ttl=90d     # el Mapa de Hilos: sha256(Message-Id) -> requirementId
+  **El conector no crea `JIKU_KV`, y es deliberado**: un bucket creado por error —con otro nombre o
+  con otra configuración— queda **vacío** en silencio, y el síntoma sería un conector aparentemente
+  sano que descarta todos los mails sin decir por qué. Un arranque que falla nombrando el bucket es
+  mucho mejor.
+
+  Los **tres grants** que la plantilla de `internal-app` tiene que tener, copiados de
+  `requiredKVPermissions()` del SDK (`<instance>` es la de `JIKU_INSTANCE`; `{{user_id}}` es el
+  placeholder del auth-callout para el `sub` del token, y es lo que confina a cada rol a sus propias
+  claves):
+
+  ```yaml
+  pub:
+    allow:
+      - "$JS.API.STREAM.INFO.KV_JIKU_KV"
+      - "$KV.JIKU_KV.<instance>.{{user_id}}.>"
+      - "$JS.API.DIRECT.GET.KV_JIKU_KV.$KV.JIKU_KV.<instance>.{{user_id}}.>"
   ```
 
-  (los nombres son los defaults; se cambian con `KV_TICKETS_BUCKET` y `KV_THREADS_BUCKET`.)
+  **No** se otorga ninguna forma ancha en su lugar —`$KV.JIKU_KV.>`, `$JS.API.DIRECT.GET.KV_JIKU_KV`,
+  `$JS.API.STREAM.MSG.GET.KV_JIKU_KV` ni `$JS.API.>`—: cada una alcanza las claves de **todas** las
+  identidades. Si el arranque sale con `kv_sin_permisos`, la línea de log ya trae el `subject`
+  rechazado y esta misma lista.
 
-  Que el conector no los cree es deliberado: un typo en el nombre del bucket crearía un bucket
-  **vacío** en silencio, y el síntoma sería un conector aparentemente sano que descarta todos los
-  mails sin decir por qué. Un arranque que falla nombrando el bucket que falta es mucho mejor.
-
-  El **TTL tampoco lo fija el conector**: lo compara contra `KV_THREADS_TTL_DAYS` y avisa con un
-  `warn` si difieren, pero arranca igual. Un TTL distinto no rompe el ruteo —sólo cambia la ventana
-  en la que una respuesta a un hilo viejo sigue encontrando su requisito— y fijarlo exigiría el
-  permiso de escritura de streams que la decisión de no crear buckets existe para evitar.
+  **Un `JIKU_KV` con TTL arranca igual, y el conector no puede detectarlo al arrancar** (el SDK sólo
+  exige `allow_direct`). El síntoma aparece después: descartes `slug_no_mapeado` de slugs que
+  estaban cargados, sin que nadie los haya borrado, y respuestas a hilos viejos descartadas como
+  `hilo_desconocido`. El arreglo es sacarle el TTL al bucket en el deploy de Jiku y volver a cargar
+  los slugs que expiraron.
 
 Cuando el contenedor no arranque, el `diagnosis` de la línea de log dice quién rechazó y dónde está
 el arreglo: la tabla de **diagnósticos** está más arriba, en
@@ -213,43 +229,60 @@ declarada, y su ausencia sólo es un error para el proceso que la necesita.
 > quedó declarada en el entorno de un despliegue viejo, **se ignora**: no hace fallar el arranque ni
 > cambia ningún comportamiento.
 
-#### El Mapa de Tickets vive en un bucket KV del bus
+#### El Mapa de Tickets vive en el Espacio KV del conector
 
 El Mapa de Tickets es lo que traduce el slug del subaddress al `projectId` de Jiku donde se crea el
-requisito. **Desde REQ-005 no es una variable de entorno**: es un bucket KV de NATS, con el slug
-como clave y el `projectId` como valor.
+requisito. No es una variable de entorno: son claves `tickets.<slug>` en el **Espacio KV** del
+conector —su porción del bucket `JIKU_KV`—, con el `projectId` como valor. U-02 las opera con el
+CLI de NATS, siempre con la **clave completa**:
 
 ```bash
-nats kv add TICKETS                 # una vez, al preparar el despliegue
-nats kv put TICKETS alfa 42         # y un put por proyecto
-nats kv put TICKETS beta 7
+nats kv put JIKU_KV <instance>.<sub>.tickets.<slug> <projectId>   # cargar o cambiar
+nats kv del JIKU_KV <instance>.<sub>.tickets.<slug>               # borrar
+nats kv get JIKU_KV <instance>.<sub>.tickets.<slug>               # verificar
 ```
 
-**El cambio que esto compra: agregar un proyecto ya no necesita redeploy.** El conector sigue el
-bucket con `watch()` sobre una copia en memoria, así que un `nats kv put` aparece en el ruteo en
-segundos, con el worker corriendo. Antes había que editar la variable y redesplegar el contenedor.
+**`<instance>.<sub>.` no se adivina: se copia.** Es el campo `kvPrefix` de la línea
+`espacio KV abierto` que el conector emite al arrancar, tal cual, con el punto final incluido:
 
-Seis cosas que conviene saber antes de operarlo:
+```json
+{"bucket":"JIKU_KV","kvPrefix":"prod.387842544790142978.","msg":"espacio KV abierto"}
+```
 
-- **Los slugs se normalizan a minúsculas.** La comparación es en minúsculas en las dos puntas —la
-  del mapa y la del mail—, así que `nats kv put TICKETS Alfa 42` se guarda tal cual pero **no
-  matchea** `tickets+alfa@…`. Usá siempre minúsculas en la clave.
+Con esa línea, cargar el proyecto `42` para el slug `alfa` es
+`nats kv put JIKU_KV prod.387842544790142978.tickets.alfa 42`. `<instance>` es la de
+`JIKU_INSTANCE` y `<sub>` es el `sub` del machine user del conector. Por eso el espacio es
+**por instancia**: `dev` y `prod` tienen prefijos distintos y se cargan por separado, aunque el
+machine user sea el mismo.
+
+**Un alta, un cambio o una baja valen desde el mail siguiente, sin redesplegar ni reiniciar.** El
+conector no guarda ninguna copia del mapa: consulta la clave del slug con un `get` puntual por cada
+mail nuevo, así que lo que está en el KV en ese momento es lo que rutea.
+
+Siete cosas que conviene saber antes de operarlo:
+
+- **La credencial con la que U-02 corre el CLI** tiene que poder escribir bajo el prefijo del
+  conector (`$KV.JIKU_KV.<instance>.<sub>.>`). **No puede ser la de un usuario común**: los grants
+  confinan a cada rol a su propio `{{user_id}}`, así que un usuario común sólo escribe en su propio
+  espacio, nunca en el del conector.
+- **Los slugs van en minúsculas.** La comparación es en minúsculas en las dos puntas —la de la
+  clave y la del mail—, así que una clave `…tickets.Alfa` se guarda tal cual pero **no matchea**
+  `tickets+alfa@…`.
 - **El valor es el entero de Jiku**, nunca el nombre del proyecto ni su slug. Un valor que no sea un
-  entero positivo se **ignora con un `warn`** que nombra la clave: no tumba el watch ni el proceso,
-  porque un dato malo cargado a mano no debe dejar sin ruteo a los demás proyectos.
-- **Un bucket vacío es válido y arranca.** Es el estado de todo despliegue nuevo. El worker arranca
+  entero positivo se **ignora con un `warn`** que nombra el **slug** (nunca el valor), y el mail se
+  descarta como `slug_no_mapeado`: un dato malo cargado a mano no deja sin ruteo a los demás
+  proyectos.
+- **Un espacio vacío es válido y arranca.** Es el estado de todo despliegue nuevo: el worker arranca
   y descarta todo con log hasta que se cargue el primer slug.
-- **El bucket tiene que existir.** Si no existe, el conector **no arranca** y el log nombra cuál
-  falta (S-024). El conector no lo crea a propósito: un typo en el nombre crearía un bucket vacío en
-  silencio, y el síntoma sería que descarta todos los mails sin decir por qué.
-- **Borrar una clave la saca del ruteo**, también en caliente: el `watch()` recibe el `DEL` y la
-  quita de la copia en memoria.
+- **Un slug que no está cargado se descarta con un log que lo nombra** (`slug_no_mapeado`): es el
+  dato que hace falta para cargarlo. El mail queda `\Seen` y no se reintenta.
+- **Si el KV no responde, los mails nuevos se descartan como `slug_no_consultable`**, no como
+  `slug_no_mapeado`: el arreglo es el bus, no cargar el slug. Cada descarte nombra el slug y el
+  `messageId`, así que esos mails se reconstruyen desde la **casilla** (quedaron `\Seen` y no se
+  reintentan solos). Cuando el KV vuelve, el mail siguiente rutea sin reiniciar nada: no hay estado
+  que reconstruir.
 - **Los `projectId` no se verifican contra Jiku.** Uno que apunte a un proyecto inexistente arranca
   igual; el síntoma aparece más tarde, por mail, como `project_not_found`.
-
-**Si el `watch()` se cae, el ruteo sigue funcionando con la última copia buena** y el conector
-reintenta cada `KV_WATCH_RETRY_MS`. Lo que se pierde mientras tanto son las actualizaciones, no el
-mapa: vaciarlo ante una caída del bus dejaría de rutear mails que se podían rutear perfectamente.
 
 Tres cosas de la configuración de la casilla que conviene saber antes de desplegar:
 
@@ -273,13 +306,14 @@ Tres cosas de la configuración de la casilla que conviene saber antes de desple
 
 Las cuatro variables `ATTACHMENT_ALLOWED_EXTENSIONS`, `ATTACHMENT_ALLOWED_MIME_TYPES`,
 `ATTACHMENT_MAX_SIZE_BYTES` y `PUT_TIMEOUT_MS` (tabla de arriba) se leen **una sola vez al
-arrancar**, igual que el Mapa de Tickets: **agregar o cambiar la política local de archivos (listas
+arrancar** —a diferencia del Mapa de Tickets, que se consulta en cada mail—: **agregar o cambiar la política local de archivos (listas
 blancas, tamaño máximo) exige redeploy** — no hay recarga en caliente. El filtro local es
 conveniencia, no autoridad (ADR-003): `core` decide en última instancia, así que una lista
 desactualizada no rompe el sistema, sólo cambia qué se rechaza **antes** de tocar el bus.
 
 Los montajes, y son los únicos — **dos, siempre**. Desde REQ-005 no hay un tercero: el Mapa de
-Tickets dejó de poder declararse como archivo montado y vive en un bucket KV del bus.
+Tickets dejó de poder declararse como archivo montado y vive en el Espacio KV del conector, dentro
+de `JIKU_KV`.
 
 ```
 /run/secrets/machine-user.json   (ro)   <- JIKU_KEY_FILE apunta acá
@@ -312,11 +346,12 @@ docker run --rm \
   jiku-email-tickets:latest
 ```
 
-(El Mapa de Tickets no aparece acá porque ya no es una variable: se carga con `nats kv put` sobre
-el bucket, y el conector lo sigue en caliente.)
+(El Mapa de Tickets no aparece acá porque no es una variable: se carga con `nats kv put JIKU_KV` y
+la clave completa, y vale desde el mail siguiente.)
 
 Con la configuración completa, el arranque emite **tres líneas JSON por stdout** (`configuracion
-valida`, `conectado al bus` y la del Mapa de Tickets cargado desde el KV) y el proceso **queda vivo**
+valida`, `conectado al bus` y `espacio KV abierto`, con el `kvPrefix` que se copia en las claves del
+Mapa de Tickets) y el proceso **queda vivo**
 con la conexión abierta. Con configuración
 incompleta **no arranca**: sale con código distinto de cero e informa por stderr **la lista completa**
 de lo que falta, no la primera variable que encontró.

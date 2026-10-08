@@ -5,7 +5,7 @@ import { Client } from '@gravadigital/jiku';
 // dependencias de este proyecto (ADR-002) y el subpath garantiza una sola copia de `nats-core` en
 // el arbol. Es la misma regla que sigue `test/bus/helpers.ts`. Desde S-032 el subpath ya no trae
 // ningun KV: el bucket se crea con la API de JetStream, igual que lo hace el SDK en sus tests.
-import { connect, type NatsConnection } from '@gravadigital/jiku/nats';
+import { connect, type ConnectionOptions, type NatsConnection } from '@gravadigital/jiku/nats';
 import { GenericContainer, Wait } from 'testcontainers';
 
 import type { KvSpace } from '#infra/kv/space.js';
@@ -74,6 +74,18 @@ export interface JetStreamNats {
   /** Si `JIKU_KV` existe: `false` cuando JetStream contesta "stream not found" (`err_code 10059`). */
   readonly bucketExists: () => Promise<boolean>;
   /**
+   * El `config` del stream `KV_JIKU_KV` (`STREAM.INFO`), para afirmar que el conector NO arreglo un
+   * bucket mal configurado (S-033: `allow_direct === false` despues de un arranque fallido).
+   */
+  readonly bucketConfig: () => Promise<Record<string, unknown>>;
+  /**
+   * Cada subject del stream que matchea `filter` (por defecto, todas las claves de `JIKU_KV`) con la
+   * secuencia de su ULTIMO mensaje. Es como el lado del test lee "todas las claves que escribio" un
+   * conector, que el `KV` del SDK no puede listar (S-033, CA-3). Con `max_msgs_per_subject: 1` la
+   * cantidad por subject siempre es 1, asi que "esta clave no cambio" se afirma por la SECUENCIA.
+   */
+  readonly lastSequences: (filter?: string) => Promise<Map<string, number>>;
+  /**
    * Un espacio FRESCO de otra identidad sobre el mismo bucket: `client.kv()` de un
    * `Client.fromConnection(connection, { instance, userId })` nuevo. El `userId` tiene que ser un
    * segmento valido de clave (`[A-Za-z0-9\-/_=]+`), p. ej. `tick-t1`.
@@ -90,7 +102,7 @@ export interface JetStreamNats {
  * La configuracion del stream de `JIKU_KV`, copiada de `jiku-ts/test/integration/kv.test.ts`, con
  * `max_msg_size: -1` y SIN `max_age` (sin TTL, como exige la precondicion de despliegue).
  */
-const JIKU_KV_STREAM = {
+export const JIKU_KV_STREAM = {
   name: 'KV_JIKU_KV',
   subjects: ['$KV.JIKU_KV.>'],
   storage: 'memory',
@@ -134,10 +146,18 @@ function socketCode(err: unknown): unknown {
   return code ?? cause?.code;
 }
 
-async function connectWithRetry(url: string): Promise<NatsConnection> {
+/**
+ * La PRIMERA conexion a un contenedor recien levantado, con el reintento acotado de arriba.
+ * Exportada para los otros helpers que levantan su propio NATS (`permission-helpers.ts`), que
+ * pasan `user`/`pass` en `options`.
+ */
+export async function connectWithRetry(
+  url: string,
+  options: Omit<ConnectionOptions, 'servers'> = {},
+): Promise<NatsConnection> {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await connect({ servers: url });
+      return await connect({ ...options, servers: url });
     } catch (err) {
       const code = socketCode(err);
       const transient = typeof code === 'string' && TRANSIENT_CONNECT_CODES.has(code);
@@ -151,6 +171,9 @@ async function connectWithRetry(url: string): Promise<NatsConnection> {
 
 interface JetStreamApiReply {
   readonly error?: { readonly code?: number; readonly err_code?: number; readonly description?: string };
+  readonly config?: Record<string, unknown>;
+  readonly state?: { readonly subjects?: Record<string, number> };
+  readonly message?: { readonly seq?: number };
 }
 
 /** Un request a la API de JetStream, con la respuesta ya parseada. */
@@ -168,11 +191,56 @@ async function jetStreamApi(
  * `createBucket` que JetStream rechazo en silencio dejaria a todo el archivo probando contra un
  * bucket que no existe, y el sintoma seria un `bucket_no_usable` inexplicable lejos de la causa.
  */
-async function jetStreamApiOk(connection: NatsConnection, subject: string, body: string): Promise<void> {
+async function jetStreamApiOk(
+  connection: NatsConnection,
+  subject: string,
+  body: string,
+): Promise<JetStreamApiReply> {
   const reply = await jetStreamApi(connection, subject, body);
   if (reply.error !== undefined) {
     throw new Error(`La API de JetStream rechazo ${subject}: ${JSON.stringify(reply.error)}`);
   }
+  return reply;
+}
+
+/**
+ * Crea `JIKU_KV` sobre `connection`, con la configuracion del SDK. Es el UNICO lugar del repo que
+ * crea un bucket (lo afirman `preservacion-req-005.test.ts` TS-39 y `source-properties.test.ts`
+ * TS-82): `startJetStreamNats()` lo usa sobre su conexion, y `permission-helpers.ts` sobre la del
+ * usuario `deploy` de su servidor con permisos. Los dos representan al deploy de Jiku.
+ */
+export const createBucket = async (
+  connection: NatsConnection,
+  overrides: Record<string, unknown> = {},
+): Promise<void> => {
+  await jetStreamApiOk(
+    connection,
+    '$JS.API.STREAM.CREATE.KV_JIKU_KV',
+    JSON.stringify({ ...JIKU_KV_STREAM, ...overrides }),
+  );
+};
+
+/** `STREAM.INFO` con `subjects_filter`, y `STREAM.MSG.GET` con `last_by_subj` por cada subject. */
+async function lastSequencesOn(connection: NatsConnection, filter: string): Promise<Map<string, number>> {
+  const info = await jetStreamApiOk(
+    connection,
+    '$JS.API.STREAM.INFO.KV_JIKU_KV',
+    JSON.stringify({ subjects_filter: filter }),
+  );
+  const sequences = new Map<string, number>();
+  for (const subject of Object.keys(info.state?.subjects ?? {})) {
+    const reply = await jetStreamApiOk(
+      connection,
+      '$JS.API.STREAM.MSG.GET.KV_JIKU_KV',
+      JSON.stringify({ last_by_subj: subject }),
+    );
+    const seq = reply.message?.seq;
+    if (typeof seq !== 'number') {
+      throw new Error(`STREAM.MSG.GET no devolvio la secuencia de ${subject}: ${JSON.stringify(reply)}`);
+    }
+    sequences.set(subject, seq);
+  }
+  return sequences;
 }
 
 export async function startJetStreamNats(): Promise<JetStreamNats> {
@@ -224,16 +292,8 @@ export async function startJetStreamNats(): Promise<JetStreamNats> {
     userId: TEST_USER_ID,
   });
 
-  const createBucket = async (overrides: Record<string, unknown> = {}): Promise<void> => {
-    await jetStreamApiOk(
-      connection,
-      '$JS.API.STREAM.CREATE.KV_JIKU_KV',
-      JSON.stringify({ ...JIKU_KV_STREAM, ...overrides }),
-    );
-  };
-
   try {
-    await createBucket();
+    await createBucket(connection);
   } catch (cause) {
     await connection.close().catch(() => undefined);
     await container.stop().catch(() => undefined);
@@ -244,7 +304,7 @@ export async function startJetStreamNats(): Promise<JetStreamNats> {
     url,
     connection,
     client,
-    createBucket,
+    createBucket: (overrides?: Record<string, unknown>) => createBucket(connection, overrides),
 
     deleteBucket: async (): Promise<void> => {
       await jetStreamApiOk(connection, '$JS.API.STREAM.DELETE.KV_JIKU_KV', '');
@@ -256,6 +316,13 @@ export async function startJetStreamNats(): Promise<JetStreamNats> {
       if (reply.error.err_code === STREAM_NOT_FOUND) return false;
       throw new Error(`La API de JetStream rechazo STREAM.INFO: ${JSON.stringify(reply.error)}`);
     },
+
+    bucketConfig: async (): Promise<Record<string, unknown>> => {
+      const reply = await jetStreamApiOk(connection, '$JS.API.STREAM.INFO.KV_JIKU_KV', '');
+      return reply.config ?? {};
+    },
+
+    lastSequences: (filter: string = '$KV.JIKU_KV.>') => lastSequencesOn(connection, filter),
 
     spaceFor: async (userId: string, instance: string = TEST_INSTANCE): Promise<KvSpace> => {
       return Client.fromConnection(connection, { instance, userId }).kv();

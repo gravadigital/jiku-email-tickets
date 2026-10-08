@@ -972,9 +972,9 @@ describe('runTick — el write que falla NO cancela el alta (CA-10)', () => {
     );
 
     // LA DISTINCION IMPORTA, y es la razon de que `ThreadLookupResult` tenga TRES estados y no
-    // `number | undefined`: `hilo_desconocido` se arregla CARGANDO EL HILO (o aceptando que expiro);
-    // `es_respuesta` se arregla ARREGLANDO EL BUCKET. Colapsarlos mandaria al operador al lugar
-    // equivocado.
+    // `number | undefined`: `hilo_desconocido` se arregla CARGANDO EL HILO (o aceptando que es
+    // anterior al despliegue: desde REQ-008 los hilos no expiran); `es_respuesta` se arregla
+    // ARREGLANDO EL BUCKET. Colapsarlos mandaria al operador al lugar equivocado.
     expect(discardLines(capture)[0]).toMatchObject({
       messageId: '<reply-1@fixtures.local>',
       motivo: 'es_respuesta',
