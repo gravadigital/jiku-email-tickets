@@ -204,14 +204,14 @@ const result = fileUploadRequestSchema.safeParse(payload);
 
 **Location:** `src/domain/publicacion/files.schema.ts`
 
-**Description:** The success reply of `files.request-upload`: `{ fileId, uploadUrl }`, validated.
+**Description:** The success reply of `files.request-upload`: `{ id, uploadUrl }` (the bus contract name; `fileId` is the api HTTP name), validated.
 Named literally `fileUploadReplySchema` — the story's acceptance criteria require this exact name.
 
 **Signature:**
 
 ```ts
 const fileUploadReplySchema: z.ZodObject<{
-  fileId: z.ZodNumber;      // int, positive
+  id: z.ZodNumber;          // int, positive
   uploadUrl: z.ZodString;   // min 1 — NOT z.string().url()
 }>; // loose
 ```
@@ -219,7 +219,7 @@ const fileUploadReplySchema: z.ZodObject<{
 **Notes:**
 
 - Same verified finding as `newRequirementReplySchema`: `command<T>()` does not validate `reply.data`
-  against `T`. A success reply with no usable `fileId`/`uploadUrl` is a **failure**
+  against `T`. A success reply with no usable `id`/`uploadUrl` is a **failure**
   (`respuesta_ilegible`), not a success with a hole.
 - **`uploadUrl` is `z.string().min(1)`, deliberately NOT `z.string().url()`**: a signed S3 URL can carry
   long/odd query params some URL validators reject. The connector never navigates the URL, only forwards

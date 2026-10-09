@@ -250,7 +250,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
     // afirmar que el ciclo se corto de verdad.
     responderUpload = await respondTo(bus.connection, UPLOAD_COMMAND, {
       status: 'success',
-      data: { fileId: 9999, uploadUrl: 'https://storage.example/put/nunca' },
+      data: { id: 9999, uploadUrl: 'https://storage.example/put/nunca' },
     });
     responderComment = await respondTo(bus.connection, COMMENT_COMMAND, {
       status: 'success',
@@ -334,7 +334,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
     responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, conMatch(1000));
     responderUpload = await respondTo(bus.connection, UPLOAD_COMMAND, {
       status: 'success',
-      data: { fileId: 9999, uploadUrl: 'https://storage.example/put/nunca' },
+      data: { id: 9999, uploadUrl: 'https://storage.example/put/nunca' },
     });
     // El requisito se borro ENTRE la consulta y la publicacion del comentario.
     responderComment = await respondTo(bus.connection, COMMENT_COMMAND, {
@@ -377,7 +377,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
     responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, conMatch(1000));
     responderUpload = await respondTo(bus.connection, UPLOAD_COMMAND, {
       status: 'success',
-      data: { fileId: 2000, uploadUrl: 'https://storage.example/put/abc' },
+      data: { id: 2000, uploadUrl: 'https://storage.example/put/abc' },
     });
     responderComment = await respondTo(bus.connection, 'requirements.new', {
       status: 'success',
@@ -416,7 +416,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
     responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, conMatch(1000));
     responderUpload = await respondTo(bus.connection, UPLOAD_COMMAND, {
       status: 'success',
-      data: { fileId: 9999, uploadUrl: 'https://storage.example/put/nunca' },
+      data: { id: 9999, uploadUrl: 'https://storage.example/put/nunca' },
     });
     responderComment = await respondTo(bus.connection, COMMENT_COMMAND, {
       status: 'success',
@@ -460,7 +460,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
     responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, SIN_MATCH);
     responderUpload = await respondTo(bus.connection, UPLOAD_COMMAND, {
       status: 'success',
-      data: { fileId: 3000, uploadUrl: 'https://storage.example/put/nuevo' },
+      data: { id: 3000, uploadUrl: 'https://storage.example/put/nuevo' },
     });
     responderComment = await respondTo(bus.connection, COMMENT_COMMAND, {
       status: 'success',
@@ -516,7 +516,7 @@ describe('runTick — la consulta de reuso de adjuntos contra el hilo (S-029)', 
     ]);
     responderUpload = await respondTo(bus.connection, UPLOAD_COMMAND, {
       status: 'success',
-      data: { fileId: 4000, uploadUrl: 'https://storage.example/put/falla' },
+      data: { id: 4000, uploadUrl: 'https://storage.example/put/falla' },
     });
     responderComment = await respondTo(bus.connection, COMMENT_COMMAND, {
       status: 'success',

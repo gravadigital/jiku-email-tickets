@@ -1476,9 +1476,9 @@ describe('runTick — archivos huerfanos: tres adjuntos suben bien y requirement
     // Responder LOCAL para files.request-upload (el permanente del beforeAll no contesta este
     // subject): concede permiso para los tres adjuntos, con fileId incremental.
     const uploadResponder = await respondTo(bus.connection, 'files.request-upload', [
-      { status: 'success', data: { fileId: 201, uploadUrl: localUploadUrl } },
-      { status: 'success', data: { fileId: 202, uploadUrl: localUploadUrl } },
-      { status: 'success', data: { fileId: 203, uploadUrl: localUploadUrl } },
+      { status: 'success', data: { id: 201, uploadUrl: localUploadUrl } },
+      { status: 'success', data: { id: 202, uploadUrl: localUploadUrl } },
+      { status: 'success', data: { id: 203, uploadUrl: localUploadUrl } },
     ]);
 
     // requirements.new falla DESPUES de que los tres adjuntos ya subieron -- se da de baja el

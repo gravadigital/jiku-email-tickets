@@ -546,7 +546,7 @@ See full details in [constants.md](./constants.md)
   payload contract: exactly four fields (`fileName`, `mimeType`, `fileSize`, `checksum`),
   **`.strict()`** so a stray `uploader`/`actor` **fails** instead of being silently dropped.
 - **fileUploadReplySchema** (`src/domain/publicacion/files.schema.ts`) - The success reply,
-  `{ fileId, uploadUrl }`. `uploadUrl` is `z.string().min(1)`, deliberately **not**
+  `{ id, uploadUrl }` (core also sends `expiresIn`). `uploadUrl` is `z.string().min(1)`, deliberately **not**
   `z.string().url()` (a signed S3 URL's query params can trip URL validators), and `.loose()` so a
   field `core` starts sending tomorrow does not break the connector.
 

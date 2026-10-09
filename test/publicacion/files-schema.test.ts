@@ -90,30 +90,42 @@ describe('parseFileUploadRequest', () => {
 });
 
 describe('fileUploadReplySchema', () => {
-  it('accepts a success reply carrying a positive fileId and a non-empty uploadUrl', () => {
+  it('accepts the reply exactly as core sends it: { id, uploadUrl, expiresIn }', () => {
+    // El contrato del bus (core/docs/apis/core.yaml, `files.request-upload`) nombra `id` al
+    // archivo. `fileId` es el nombre que la api le pone en HTTP para el navegador, no el del bus.
     expect(
-      fileUploadReplySchema.safeParse({ fileId: 99, uploadUrl: 'https://storage.example/put/xyz' })
-        .success,
+      fileUploadReplySchema.safeParse({
+        id: 99,
+        uploadUrl: 'https://storage.example/put/xyz',
+        expiresIn: 900,
+      }).success,
     ).toBe(true);
   });
 
-  it('rejects a success reply with no fileId or uploadUrl at all', () => {
+  it('rejects the api HTTP shape { fileId, uploadUrl }, which core never sends over the bus', () => {
+    expect(
+      fileUploadReplySchema.safeParse({ fileId: 99, uploadUrl: 'https://storage.example/put/xyz' })
+        .success,
+    ).toBe(false);
+  });
+
+  it('rejects a success reply with no id or uploadUrl at all', () => {
     expect(fileUploadReplySchema.safeParse({}).success).toBe(false);
-    expect(fileUploadReplySchema.safeParse({ fileId: 1 }).success).toBe(false);
+    expect(fileUploadReplySchema.safeParse({ id: 1 }).success).toBe(false);
     expect(fileUploadReplySchema.safeParse({ uploadUrl: 'https://x' }).success).toBe(false);
   });
 
-  it('rejects a fileId that is not a positive integer, without coercing it', () => {
-    for (const fileId of ['no-es-numero', 0, -1, 1.5]) {
+  it('rejects an id that is not a positive integer, without coercing it', () => {
+    for (const id of ['no-es-numero', 0, -1, 1.5]) {
       expect(
-        fileUploadReplySchema.safeParse({ fileId, uploadUrl: 'https://x' }).success,
-        `fileId ${String(fileId)} must be rejected`,
+        fileUploadReplySchema.safeParse({ id, uploadUrl: 'https://x' }).success,
+        `id ${String(id)} must be rejected`,
       ).toBe(false);
     }
   });
 
   it('rejects an empty uploadUrl', () => {
-    expect(fileUploadReplySchema.safeParse({ fileId: 1, uploadUrl: '' }).success).toBe(false);
+    expect(fileUploadReplySchema.safeParse({ id: 1, uploadUrl: '' }).success).toBe(false);
   });
 
   it('accepts an uploadUrl with signature query params, using plain string validation', () => {
@@ -121,13 +133,13 @@ describe('fileUploadReplySchema', () => {
     // validadores de URL rechazan. Solo se exige no-vacio.
     const signedUrl =
       'https://bucket.s3.amazonaws.com/key?X-Amz-Signature=abc&X-Amz-Expires=900&X-Amz-SignedHeaders=host';
-    expect(fileUploadReplySchema.safeParse({ fileId: 1, uploadUrl: signedUrl }).success).toBe(true);
+    expect(fileUploadReplySchema.safeParse({ id: 1, uploadUrl: signedUrl }).success).toBe(true);
   });
 
   it('tolerates extra fields core might start sending', () => {
     // Inversa deliberada del `.strict()` del payload: la respuesta la manda `core`.
     expect(
-      fileUploadReplySchema.safeParse({ fileId: 1, uploadUrl: 'https://x', extra: 'algo' }).success,
+      fileUploadReplySchema.safeParse({ id: 1, uploadUrl: 'https://x', extra: 'algo' }).success,
     ).toBe(true);
   });
 });

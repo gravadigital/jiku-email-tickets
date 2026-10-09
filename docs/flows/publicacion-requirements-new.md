@@ -244,7 +244,7 @@ Ninguna de las dos ramas es un error del SDK ni del bus: es un rechazo de **nego
 caso esperado (el filtro local del conector es conveniencia, no autoridad — ADR-003) y anotado como
 aviso en la `description` del requisito, nunca como `fallidos` del tick.
 
-**Éxito:** `success { fileId, uploadUrl }` — el `fileId` se acumula para el `fileIds` del payload de
+**Éxito:** `success { id, uploadUrl, expiresIn }` — el `id` se acumula para el `fileIds` del payload de
 `requirements.new` (Paso 2), y la `uploadUrl` se usa **una sola vez**, para el `PUT` inmediato del
 byte, y **nunca se loguea**.
 

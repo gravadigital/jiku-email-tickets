@@ -627,8 +627,8 @@ describe('tick — ningun log de un tick con adjuntos aceptado/rechazado/fallido
     // informe.exe se rechaza LOCALMENTE (extension no permitida) -- nunca pide permiso de subida.
     // Solo datos-cliente.png y factura.pdf llegan a files.request-upload, en ese orden.
     const uploadResponder = await respondTo(bus.connection, 'files.request-upload', [
-      { status: 'success', data: { fileId: 700, uploadUrl: okUploadUrl } },
-      { status: 'success', data: { fileId: 701, uploadUrl: failingUploadUrl } },
+      { status: 'success', data: { id: 700, uploadUrl: okUploadUrl } },
+      { status: 'success', data: { id: 701, uploadUrl: failingUploadUrl } },
     ]);
     const local = await respondTo(bus.connection, 'requirements.new', {
       status: 'success',

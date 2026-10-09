@@ -129,7 +129,7 @@ sequenceDiagram
                     ADJ->>LOG: warn { code, nombre, mime } 'core rechazo el adjunto por politica de archivos'
                     ADJ->>ADJ: avisosDeRechazo.push(aviso)
                 else core concede
-                    CORE-->>ADJ: success { fileId, uploadUrl }
+                    CORE-->>ADJ: success { id, uploadUrl, expiresIn }
                     ADJ->>ADJ: PUT directo a uploadUrl (fetch, sin credenciales de S3)
                     alt PUT falla
                         ADJ->>LOG: warn { nombre, mime } 'fallo el PUT del adjunto al storage'

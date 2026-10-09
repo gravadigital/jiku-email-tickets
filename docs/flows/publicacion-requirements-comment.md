@@ -79,7 +79,7 @@ sequenceDiagram
             else items: [] o consulta fallida
                 CORE-->>MC: items: []
                 MC->>CORE: files.request-upload
-                CORE-->>MC: fileId + uploadUrl prefirmada
+                CORE-->>MC: id + uploadUrl prefirmada
                 MC->>S3: PUT del byte
             end
         end
