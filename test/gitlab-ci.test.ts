@@ -538,9 +538,14 @@ describe('version.txt', () => {
 
   // TS-22
   it('holds a single semver line with a trailing newline', () => {
-    expect(content).toBe('0.1.0\n');
-    expect(content.split('\n')).toEqual(['0.1.0', '']);
-    expect(content.trim()).toMatch(SEMVER);
+    // La version NO se fija aca: cada release cambia `version.txt`, y un literal convertiria el
+    // primer bump en un CI rojo. Lo que se exige es la FORMA: una sola linea semver y su newline.
+    const lines = content.split('\n');
+
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toBe('');
+    expect(lines[0]).toMatch(SEMVER);
+    expect(content).toBe(`${lines[0]}\n`);
     // A proposito NO se compara con `package.json#version`: son independientes (RF-7).
   });
 });
