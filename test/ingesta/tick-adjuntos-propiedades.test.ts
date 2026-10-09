@@ -212,7 +212,7 @@ describe('runTick — orden particion -> dedup -> tope invariante, sobre el sist
     const httpServer = await startHttpServer(() => 200);
     const uploadResponder = await respondTo(bus.connection, 'files.request-upload', {
       status: 'success',
-      data: { fileId: 900, uploadUrl: httpServer.url },
+      data: { id: 900, uploadUrl: httpServer.url },
     });
     const local = await respondTo(bus.connection, 'requirements.new', {
       status: 'success',
@@ -264,7 +264,7 @@ describe('runTick — el tope no se recalcula tras un fallo de PUT, sobre el sis
       'files.request-upload',
       Array.from({ length: 10 }, (_, i) => ({
         status: 'success' as const,
-        data: { fileId: 810 + i, uploadUrl: httpServer.url },
+        data: { id: 810 + i, uploadUrl: httpServer.url },
       })),
     );
     const local = await respondTo(bus.connection, 'requirements.new', {
@@ -334,7 +334,7 @@ describe('runTick — rechazo local + failure de core + PUT fallido combinados n
     // (permiso concedido, PUT falla despues).
     const uploadResponder = await respondTo(bus.connection, 'files.request-upload', [
       { status: 'failure', errorCode: 'file_type_not_allowed' },
-      { status: 'success', data: { fileId: 820, uploadUrl: httpServer.url } },
+      { status: 'success', data: { id: 820, uploadUrl: httpServer.url } },
     ]);
     const local = await respondTo(bus.connection, 'requirements.new', {
       status: 'success',
@@ -384,7 +384,7 @@ describe('runTick — un mail con todos los adjuntos fallidos es publicado, no f
 
     const uploadResponder = await respondTo(bus.connection, 'files.request-upload', {
       status: 'success',
-      data: { fileId: 830, uploadUrl: httpServer.url },
+      data: { id: 830, uploadUrl: httpServer.url },
     });
     const local = await respondTo(bus.connection, 'requirements.new', {
       status: 'success',
@@ -445,8 +445,8 @@ describe('runTick — dos mails identicos con los mismos adjuntos producen descr
 
     const httpServer = await startHttpServer(() => 200);
     const uploadResponder = await respondTo(bus.connection, 'files.request-upload', [
-      { status: 'success', data: { fileId: 900, uploadUrl: httpServer.url } },
-      { status: 'success', data: { fileId: 901, uploadUrl: httpServer.url } },
+      { status: 'success', data: { id: 900, uploadUrl: httpServer.url } },
+      { status: 'success', data: { id: 901, uploadUrl: httpServer.url } },
     ]);
     const local = await respondTo(bus.connection, 'requirements.new', [
       { status: 'success', data: { id: 9006 } },
@@ -536,7 +536,7 @@ describe('runTick — la linea de metricas del tick sigue con los cinco contador
       'files.request-upload',
       Array.from({ length: 3 }, (_, i) => ({
         status: 'success' as const,
-        data: { fileId: 940 + i, uploadUrl: httpServer.url },
+        data: { id: 940 + i, uploadUrl: httpServer.url },
       })),
     );
 
@@ -626,7 +626,7 @@ describe('runTick — el escenario de extremo a extremo con adjunto, sin instanc
 
     const uploadResponder = await respondTo(bus.connection, 'files.request-upload', {
       status: 'success',
-      data: { fileId: 500, uploadUrl },
+      data: { id: 500, uploadUrl },
     });
     const local = await respondTo(bus.connection, 'requirements.new', {
       status: 'success',

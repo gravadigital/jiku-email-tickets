@@ -125,7 +125,7 @@ export async function requestFileUpload(
 
   // La respuesta SE VALIDA. `command<T>()` devuelve `reply.data` tal cual, sin comprobar que
   // coincida con `T` -- mismo hallazgo verificado que motiva la validacion en
-  // `publish-requirement.ts`. Una respuesta de exito sin `fileId`/`uploadUrl` usables es un
+  // `publish-requirement.ts`. Una respuesta de exito sin `id`/`uploadUrl` usables es un
   // FALLO, no un exito parcial (CA-3).
   const reply = fileUploadReplySchema.safeParse(data);
 
@@ -146,5 +146,8 @@ export async function requestFileUpload(
   // NUNCA se loguea el exito de ESTA funcion: `fileId` solo es informativo hasta que S-021 lo
   // vincule con un requisito, y `uploadUrl` es una credencial de escritura de corta duracion que
   // NUNCA se loguea en ningun caso (RF-23, RF-39 de REQ-004).
-  return { tipo: 'concedido', fileId: reply.data.fileId, uploadUrl: reply.data.uploadUrl };
+  //
+  // `id` es el nombre del contrato del bus; `fileId` es el del resultado del conector, el mismo que
+  // usa `requirements.new` en su `fileIds` para vincular este archivo.
+  return { tipo: 'concedido', fileId: reply.data.id, uploadUrl: reply.data.uploadUrl };
 }

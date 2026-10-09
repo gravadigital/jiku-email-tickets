@@ -452,7 +452,7 @@ describe('runTick — ninguna linea de log filtra contenido del cliente, con el 
 
     await responderFor('files.request-upload', {
       status: 'success' as const,
-      data: { fileId: 7, uploadUrl: http.url },
+      data: { id: 7, uploadUrl: http.url },
     });
     await responderFor('requirements.new', { status: 'success' as const, data: { id: 610 } });
 
@@ -1469,8 +1469,8 @@ describe('runTick — el dedup contra el hilo NO existe, y es DELIBERADO (CA-14)
     const http = await startHttpServer(() => 200);
 
     const uploads = await responderFor('files.request-upload', [
-      { status: 'success' as const, data: { fileId: 7, uploadUrl: http.url } },
-      { status: 'success' as const, data: { fileId: 8, uploadUrl: http.url } },
+      { status: 'success' as const, data: { id: 7, uploadUrl: http.url } },
+      { status: 'success' as const, data: { id: 8, uploadUrl: http.url } },
     ]);
     const altas = await responderFor('requirements.new', {
       status: 'success' as const,
@@ -1557,8 +1557,8 @@ describe('runTick — el dedup contra el hilo NO existe, y es DELIBERADO (CA-14)
     const http = await startHttpServer(() => 200);
 
     const uploads = await responderFor('files.request-upload', [
-      { status: 'success' as const, data: { fileId: 20, uploadUrl: http.url } },
-      { status: 'success' as const, data: { fileId: 21, uploadUrl: http.url } },
+      { status: 'success' as const, data: { id: 20, uploadUrl: http.url } },
+      { status: 'success' as const, data: { id: 21, uploadUrl: http.url } },
     ]);
     const comentarios = await responderFor('requirements.*.comment', {
       status: 'success' as const,

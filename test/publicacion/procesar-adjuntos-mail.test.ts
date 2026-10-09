@@ -148,8 +148,8 @@ describe('procesarAdjuntosDelMail', () => {
   it('dos adjuntos aceptables suben ambos: fileIds con ambos ids y placeholders en orden', async () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, [
-      { status: 'success', data: { fileId: 101, uploadUrl } },
-      { status: 'success', data: { fileId: 102, uploadUrl } },
+      { status: 'success', data: { id: 101, uploadUrl } },
+      { status: 'success', data: { id: 102, uploadUrl } },
     ]);
 
     const resultado = await procesarAdjuntosDelMail(
@@ -208,7 +208,7 @@ describe('procesarAdjuntosDelMail', () => {
         fileIdSeq += 1;
         message.respond(
           encoder.encode(
-            JSON.stringify({ status: 'success', data: { fileId: fileIdSeq, uploadUrl: urlFor(payload.fileName) } }),
+            JSON.stringify({ status: 'success', data: { id: fileIdSeq, uploadUrl: urlFor(payload.fileName) } }),
           ),
         );
       }
@@ -272,7 +272,7 @@ describe('procesarAdjuntosDelMail', () => {
       COMMAND,
       Array.from({ length: 10 }, (_, i) => ({
         status: 'success' as const,
-        data: { fileId: 800 + i, uploadUrl: localUploadUrl },
+        data: { id: 800 + i, uploadUrl: localUploadUrl },
       })),
     );
 
@@ -319,7 +319,7 @@ describe('procesarAdjuntosDelMail', () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, {
       status: 'success',
-      data: { fileId: 301, uploadUrl: 'http://127.0.0.1:1/no-existe' },
+      data: { id: 301, uploadUrl: 'http://127.0.0.1:1/no-existe' },
     });
 
     const resultado = await procesarAdjuntosDelMail(
@@ -345,7 +345,7 @@ describe('procesarAdjuntosDelMail', () => {
   it('una excepcion inesperada de programacion procesando un adjunto no detiene el procesamiento de los siguientes', async () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, [
-      { status: 'success', data: { fileId: 401, uploadUrl } }, // el segundo adjunto sube normalmente
+      { status: 'success', data: { id: 401, uploadUrl } }, // el segundo adjunto sube normalmente
     ]);
 
     let llamadas = 0;
@@ -411,7 +411,7 @@ describe('procesarAdjuntosDelMail', () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, {
       status: 'success',
-      data: { fileId: 501, uploadUrl },
+      data: { id: 501, uploadUrl },
     });
 
     await procesarAdjuntosDelMail(
@@ -436,8 +436,8 @@ describe('procesarAdjuntosDelMail', () => {
     // adjunto 3 (roto.pdf): permiso concedido, PUT falla (503).
     responder = await respondTo(bus.connection, COMMAND, [
       { status: 'failure', errorCode: 'file_type_not_allowed' },
-      { status: 'success', data: { fileId: 850, uploadUrl: 'http://127.0.0.1:1/no-existe' } },
-      { status: 'success', data: { fileId: 851, uploadUrl } },
+      { status: 'success', data: { id: 850, uploadUrl: 'http://127.0.0.1:1/no-existe' } },
+      { status: 'success', data: { id: 851, uploadUrl } },
     ]);
 
     // adjunto 4 (raro.png): un doble de uploadFileContent que lanza una excepcion arbitraria de
@@ -477,8 +477,8 @@ describe('procesarAdjuntosDelMail', () => {
   it('adjunto image/png produce placeholder con !, adjunto application/pdf produce placeholder sin !', async () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, [
-      { status: 'success', data: { fileId: 601, uploadUrl } },
-      { status: 'success', data: { fileId: 602, uploadUrl } },
+      { status: 'success', data: { id: 601, uploadUrl } },
+      { status: 'success', data: { id: 602, uploadUrl } },
     ]);
 
     const resultado = await procesarAdjuntosDelMail(
@@ -547,7 +547,7 @@ describe('procesarAdjuntosDelMail', () => {
       // timeout y el test diagnosticaria otra cosa.
       responder = await respondTo(bus.connection, COMMAND, {
         status: 'success',
-        data: { fileId: 9999, uploadUrl },
+        data: { id: 9999, uploadUrl },
       });
 
       const resultado = await procesarAdjuntosDelMail(
@@ -574,7 +574,7 @@ describe('procesarAdjuntosDelMail', () => {
       responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, SIN_MATCH);
       responder = await respondTo(bus.connection, COMMAND, {
         status: 'success',
-        data: { fileId: 2000, uploadUrl },
+        data: { id: 2000, uploadUrl },
       });
 
       const resultado = await procesarAdjuntosDelMail(
@@ -626,7 +626,7 @@ describe('procesarAdjuntosDelMail', () => {
       responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, SIN_MATCH);
       responder = await respondTo(bus.connection, COMMAND, {
         status: 'success',
-        data: { fileId: 3000, uploadUrl },
+        data: { id: 3000, uploadUrl },
       });
 
       const resultado = await procesarAdjuntosDelMail(
@@ -682,7 +682,7 @@ describe('procesarAdjuntosDelMail', () => {
       );
       responder = await respondTo(bus.connection, COMMAND, {
         status: 'success',
-        data: { fileId: 4000, uploadUrl },
+        data: { id: 4000, uploadUrl },
       });
 
       // TRES ARGUMENTOS. Es la rama del alta, y su "no consultar" es ESTRUCTURAL.
@@ -702,7 +702,7 @@ describe('procesarAdjuntosDelMail', () => {
       capture = createLogCapture();
       responder = await respondTo(bus.connection, COMMAND, {
         status: 'success',
-        data: { fileId: 5000, uploadUrl },
+        data: { id: 5000, uploadUrl },
       });
 
       // LA CONSULTA REAL NUNCA LANZA (CA-11), asi que el unico modo de ejercitar el `try/catch` de
@@ -743,7 +743,7 @@ describe('procesarAdjuntosDelMail', () => {
       capture = createLogCapture();
       responder = await respondTo(bus.connection, COMMAND, {
         status: 'success',
-        data: { fileId: 5100, uploadUrl },
+        data: { id: 5100, uploadUrl },
       });
 
       // El doble lanza SOLO para `captura.png`; para el resto devuelve `sin_match` y el adjunto
@@ -780,7 +780,7 @@ describe('procesarAdjuntosDelMail', () => {
       responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, SIN_MATCH);
       responder = await respondTo(bus.connection, COMMAND, {
         status: 'success',
-        data: { fileId: 7000, uploadUrl },
+        data: { id: 7000, uploadUrl },
       });
 
       // 12 adjuntos aceptables y DISTINTOS (nombres distintos → bytes distintos → sin dedup).
@@ -816,7 +816,7 @@ describe('procesarAdjuntosDelMail', () => {
       responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, secuencia);
       responder = await respondTo(bus.connection, COMMAND, {
         status: 'success',
-        data: { fileId: 8000, uploadUrl },
+        data: { id: 8000, uploadUrl },
       });
 
       const doce = Array.from({ length: 12 }, (_, index) =>
@@ -847,7 +847,7 @@ describe('procesarAdjuntosDelMail', () => {
       responderQuery = await respondToQuery(bus.connection, QUERY_METHOD, SIN_MATCH);
       responder = await respondTo(bus.connection, COMMAND, {
         status: 'success',
-        data: { fileId: 6000, uploadUrl },
+        data: { id: 6000, uploadUrl },
       });
 
       const resultado = await procesarAdjuntosDelMail(

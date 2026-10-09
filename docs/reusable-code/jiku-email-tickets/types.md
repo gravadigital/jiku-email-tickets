@@ -809,7 +809,7 @@ diverge from it without anything failing.
 
 ```ts
 type FileUploadRequestPayload = z.infer<typeof fileUploadRequestSchema>; // { fileName, mimeType, fileSize, checksum }
-type FileUploadReply = z.infer<typeof fileUploadReplySchema>;           // { fileId, uploadUrl }
+type FileUploadReply = z.infer<typeof fileUploadReplySchema>;           // { id, uploadUrl }
 ```
 
 ---

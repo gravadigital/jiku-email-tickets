@@ -322,7 +322,7 @@ describe('la consulta del slug va antes de los adjuntos', () => {
     // podia responder.
     const uploads = await core('files.request-upload', {
       status: 'success',
-      data: { fileId: 900, uploadUrl: 'http://127.0.0.1:9/no-se-usa' },
+      data: { id: 900, uploadUrl: 'http://127.0.0.1:9/no-se-usa' },
     });
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
 

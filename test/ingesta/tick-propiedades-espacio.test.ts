@@ -571,7 +571,7 @@ describe('runTick — la redaccion se conserva sobre el log completo, con el esp
     const http = await startHttpServer();
     const uploads = await respondTo(bus.connection, 'files.request-upload', {
       status: 'success' as const,
-      data: { fileId: 7, uploadUrl: http.url },
+      data: { id: 7, uploadUrl: http.url },
     });
     const altas = await respondTo(bus.connection, 'requirements.new', [
       { status: 'success' as const, data: { id: 900 } },

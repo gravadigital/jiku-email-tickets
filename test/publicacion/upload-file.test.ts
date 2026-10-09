@@ -97,7 +97,7 @@ describe('requestFileUpload', () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, {
       status: 'success',
-      data: { fileId: 99, uploadUrl: 'https://storage.example/put/xyz' },
+      data: { id: 99, uploadUrl: 'https://storage.example/put/xyz' },
     });
 
     const result = await requestFileUpload(
@@ -127,7 +127,7 @@ describe('requestFileUpload', () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, {
       status: 'success',
-      data: { fileId: 1, uploadUrl: 'https://storage.example/put/1' },
+      data: { id: 1, uploadUrl: 'https://storage.example/put/1' },
     });
 
     await requestFileUpload(
@@ -376,7 +376,7 @@ describe('requestFileUpload', () => {
 
     responder = await respondTo(bus.connection, COMMAND, {
       status: 'success',
-      data: { fileId: 5, uploadUrl: 'https://storage.example/put/xyz' },
+      data: { id: 5, uploadUrl: 'https://storage.example/put/xyz' },
     });
     await requestFileUpload(
       { filename: 'a.png', mimeType: 'image/png', content: Buffer.from('x'), checksum: 'c1' },
@@ -403,7 +403,7 @@ describe('requestFileUpload', () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, {
       status: 'success',
-      data: { fileId: 1, uploadUrl: 'https://storage.example/put/1' },
+      data: { id: 1, uploadUrl: 'https://storage.example/put/1' },
     });
 
     await requestFileUpload(
@@ -431,7 +431,7 @@ describe('requestFileUpload', () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, {
       status: 'success',
-      data: { fileId: 1, uploadUrl: 'https://storage.example/put/1' },
+      data: { id: 1, uploadUrl: 'https://storage.example/put/1' },
     });
 
     await requestFileUpload(
@@ -452,7 +452,7 @@ describe('requestFileUpload', () => {
     capture = createLogCapture();
     responder = await respondTo(bus.connection, COMMAND, {
       status: 'success',
-      data: { fileId: 1, uploadUrl: 'https://storage.example/put/1' },
+      data: { id: 1, uploadUrl: 'https://storage.example/put/1' },
     });
 
     await requestFileUpload(

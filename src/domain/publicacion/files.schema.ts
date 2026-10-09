@@ -45,9 +45,14 @@ export const fileUploadRequestSchema = z
  *
  * Existe por el mismo hallazgo verificado que motiva `newRequirementReplySchema`: `command<T>()`
  * devuelve `reply.data` TAL CUAL, sin comprobar que coincida con `T`. Un `core` que respondiera
- * `{ status: 'success', data: {} }` produciria un resultado con `fileId: undefined` -- formalmente
+ * `{ status: 'success', data: {} }` produciria un resultado con `id: undefined` -- formalmente
  * presente, materialmente inutil -- sin que nada falle si no se valida. Por eso una respuesta sin
- * `fileId`/`uploadUrl` usables es un FALLO (`respuesta_ilegible`), no un exito con hueco.
+ * `id`/`uploadUrl` usables es un FALLO (`respuesta_ilegible`), no un exito con hueco.
+ *
+ * `id` Y NO `fileId`, porque asi lo nombra el contrato del bus (`core/docs/apis/core.yaml`, que
+ * responde `{ id, uploadUrl, expiresIn }`). `fileId` es el nombre que la api le pone en HTTP para el
+ * navegador: el conector habla con core por el bus, no con la api. Hasta la verificacion contra el
+ * core real este schema pedia `fileId`, y TODA subida terminaba en `respuesta_ilegible`.
  *
  * `uploadUrl` usa `z.string().min(1)` y NO `z.string().url()`: la URL prefirmada de S3 puede
  * incluir query params de firma que algunos validadores de URL rechazan por longitud o
@@ -56,7 +61,7 @@ export const fileUploadRequestSchema = z
  */
 export const fileUploadReplySchema = z
   .object({
-    fileId: z.number().int().positive(),
+    id: z.number().int().positive(),
     uploadUrl: z.string().min(1),
   })
   // Sin `.strict()` aca, a proposito y por la razon inversa a la del payload: la respuesta la
