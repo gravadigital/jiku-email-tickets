@@ -307,15 +307,13 @@ describe('Dockerfile', () => {
   });
 
   // TS-6 (S-032)
-  it('names the pinned jiku-ts@edd1064 build in the TEMPORAL note, and keeps the three vendor copies', () => {
-    // La nota TEMPORAL es la que dice POR QUE `vendor/` viaja en la imagen y CUANDO se borra. Si
-    // siguiera nombrando el 1.1.0, quien lea el Dockerfile buscaria publicar un minor que ya no es
-    // el que hace falta (REQ-008 consume el build de jiku-ts@edd1064, con el Espacio KV).
+  it('installs the SDK from the registry: no vendor copy and no TEMPORAL note left', () => {
+    // Con `@gravadigital/jiku@1.1.0` publicado, `vendor/` se borro. Una copia que sobreviva rompe
+    // el build (no hay nada que copiar) y una nota TEMPORAL que sobreviva describe algo que ya no es.
     const comments = lines.filter((line) => line.isComment).map((line) => line.text);
 
-    expect(comments.some((line) => line.includes('jiku-ts@edd1064'))).toBe(true);
-    expect(comments.filter((line) => line.includes('1.1.0'))).toEqual([]);
-    expect(directiveLines(lines, 'COPY').filter((line) => line.text === 'COPY vendor ./vendor')).toHaveLength(3);
+    expect(comments.filter((line) => line.includes('TEMPORAL'))).toEqual([]);
+    expect(directiveLines(lines, 'COPY').filter((line) => line.text.includes('vendor'))).toEqual([]);
   });
 
   it('clears the npm cache in the same layer that installs, or the layer keeps it', () => {

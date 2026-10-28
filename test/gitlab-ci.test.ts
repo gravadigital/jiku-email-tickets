@@ -315,7 +315,6 @@ describe('.gitlab-ci.yml', () => {
       'src/**/*',
       'test/**/*',
       'scripts/**/*',
-      'vendor/**/*',
       'package.json',
       'package-lock.json',
       'tsconfig*.json',

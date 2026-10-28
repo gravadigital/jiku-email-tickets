@@ -156,9 +156,9 @@ ingress. No puede desplegarse afuera y alcanzar NATS.
 
 **El SDK `@gravadigital/jiku` es la dependencia central.** Reemplaza el cliente NATS propio,
 la obtencion del token de Zitadel (RFC 7523) y su refresh en background, y el prefijo de inbox. Las
-clases de error del SDK son lo que distingue *que sistema rechazo* en el log. Se consume del **build
-local de `jiku-ts@edd1064`** (`vendor/gravadigital-jiku-1.0.0-edd1064.tgz`, el `npm pack` sin
-publicar, que declara `1.0.0`). El KV entra por **`client.kv()`**, y sus clases de error
+clases de error del SDK son lo que distingue *que sistema rechazo* en el log. Se consume del **registry,
+`^1.1.0`**, la primera version publicada con el Espacio KV (antes, del `npm pack` de
+`jiku-ts@edd1064` en `vendor/`). El KV entra por **`client.kv()`**, y sus clases de error
 (`JikuNoBucket`, `JikuKVPermissionDenied`, `JikuBucketFull`) salen de la entrada principal: el
 conector **no** declara ninguna libreria de KV ni de JetStream (ADR-002). Sigue valiendo que haya una
 sola copia de `nats-core` en el arbol —la del SDK—, sin la cual un `instanceof` contra una clase de
