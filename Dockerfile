@@ -26,14 +26,7 @@ FROM node:22-alpine AS test
 WORKDIR /app
 # `package*.json` + `npm ci` ANTES de `COPY . .`: invertirlo hace que cualquier cambio de codigo
 # invalide la capa de instalacion de dependencias.
-# TEMPORAL (REQ-008 / S-032): `vendor/` viaja junto a `package*.json` porque el rango del SDK
-# apunta a un tarball local, el `npm pack` del build de jiku-ts@edd1064 (el que trae el Espacio KV,
-# `client.kv()`), mientras ese SDK no este publicado en el registry. Sin esta copia, `npm ci` falla
-# con ENOENT sobre el .tgz y la imagen NO SE CONSTRUYE — verificado corriendo el build. Cuando el
-# SDK con el Espacio KV se publique, el rango vuelve al registry, `vendor/` se elimina y estas tres
-# copias se borran con el.
 COPY package*.json ./
-COPY vendor ./vendor
 RUN npm ci
 COPY . .
 
@@ -43,8 +36,6 @@ COPY . .
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-# Ver la nota TEMPORAL de la etapa `test`.
-COPY vendor ./vendor
 RUN npm ci
 COPY . .
 RUN npm run build
@@ -70,8 +61,6 @@ COPY --from=builder /app/dist ./dist
 # ERR_PACKAGE_IMPORT_NOT_DEFINED. Los prefijos apuntan a ./dist/*, asi que `dist/` tiene que quedar
 # hermano de este archivo.
 COPY package*.json ./
-# Ver la nota TEMPORAL de la etapa `test`.
-COPY vendor ./vendor
 
 # `npm ci --omit=dev` y nunca `npm install`: la imagen instala exactamente el lockfile que la suite
 # verifico. Sin devDependencies, la imagen no lleva vitest, testcontainers, typescript ni

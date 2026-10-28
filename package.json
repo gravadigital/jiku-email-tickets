@@ -21,7 +21,7 @@
     "test:teardown": "vitest run && node scripts/verify-teardown.mjs"
   },
   "dependencies": {
-    "@gravadigital/jiku": "file:vendor/gravadigital-jiku-1.0.0-edd1064.tgz",
+    "@gravadigital/jiku": "^1.1.0",
     "@t3-oss/env-core": "^0.13.11",
     "dotenv": "^17.4.2",
     "html-to-text": "^10.0.1",

@@ -90,10 +90,9 @@ mano**, justo lo que el monorepo de Jiku existe para evitar (ADR-012 de Jiku).
 >    diagnóstico del arranque es por `instanceof`, nunca por el mensaje.
 > 2. **El KV deja de existir como librería en el árbol** (`@nats-io/kv`, `@nats-io/jetstream`): el
 >    conector no la declara ni la importa, así que *"MUST NOT declarar `nats`"* ahora también la cubre.
-> 3. **El SDK se consume del build local de `jiku-ts@edd1064`**
->    (`vendor/gravadigital-jiku-1.0.0-edd1064.tgz`) hasta que se publique, como antes se consumió el
->    1.1.0 vendoreado. Declara versión `1.0.0`, así que la regla `^1.0.0` se sigue cumpliendo; como
->    `npm ls` no distingue el build del publicado, un test afirma sobre lo instalado.
+> 3. **El SDK se consume del registry, `^1.1.0`**: la primera versión publicada con el Espacio KV.
+>    Entre S-032 y su publicación se consumió del `npm pack` de `jiku-ts@edd1064` en `vendor/`, que
+>    declaraba `1.0.0`; un test sigue afirmando sobre lo instalado, no sobre el rango.
 >
 > **Historia:** entre S-023 y S-032 el KV entró por un re-export de `@nats-io/kv` en el subpath
 > `./nats` de un build 1.1.0 vendoreado; `jiku-ts` nunca tuvo ese re-export. Ya no rige.

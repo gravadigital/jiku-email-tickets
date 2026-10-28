@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,34 +64,22 @@ describe('package.json', () => {
   });
 
   // TS-1 (S-032)
-  it('declares the bus SDK as the pinned jiku-ts@edd1064 build, and it is the only tarball', () => {
-    // REQ-008 necesita el Espacio KV del SDK (`client.kv()`), que existe en `jiku-ts` desde el
-    // commit edd1064 pero no esta publicado. Mientras tanto el rango apunta al `npm pack` de ese
-    // commit, y el NOMBRE del tarball lleva el commit: el build declara la version 1.0.0, igual que
-    // el paquete publicado que no tiene `client.kv()`, asi que la version sola no los distingue.
-    //
-    // El `file:` es TEMPORAL (la misma excepcion que regia para el 1.1.0 de S-023/S-024, anotada en
-    // el Dockerfile): cuando el SDK con el Espacio KV se publique, esto vuelve a un rango del
-    // registry y `vendor/` se borra.
-    expect(manifest.dependencies?.['@gravadigital/jiku']).toBe(
-      'file:vendor/gravadigital-jiku-1.0.0-edd1064.tgz',
-    );
-
-    // Un solo tarball: dejar el 1.1.0 al lado haria posible volver a apuntarle por error, y es el
-    // build cuyo re-export del KV crudo esta story elimina.
-    expect(readdirSync(join(PROJECT_ROOT, 'vendor')).sort()).toEqual(['gravadigital-jiku-1.0.0-edd1064.tgz']);
+  it('declares the bus SDK from the registry, at the first release with the KV space', () => {
+    // El Espacio KV (`client.kv()`) se publico en `@gravadigital/jiku@1.1.0`. Hasta entonces el
+    // rango apuntaba a un `npm pack` de jiku-ts@edd1064 en `vendor/`; ya no hay tarball local, y
+    // `vendor/` no tiene que volver: un `file:` esconde del registry que version se consume.
+    expect(manifest.dependencies?.['@gravadigital/jiku']).toBe('^1.1.0');
+    expect(existsSync(join(PROJECT_ROOT, 'vendor'))).toBe(false);
   });
 
   // TS-2 (S-032)
-  it('pins the SDK tarball in the lockfile with its integrity', () => {
-    // El `file:` solo no fija NADA: sin la integrity del lockfile, reemplazar el tarball por otro
-    // con el mismo nombre pasaria `npm ci` sin que nadie se entere.
+  it('pins the SDK in the lockfile to the npm registry, with its integrity', () => {
     const lock = JSON.parse(readFileSync(join(PROJECT_ROOT, 'package-lock.json'), 'utf8')) as PackageLock;
-    const tarball = 'file:vendor/gravadigital-jiku-1.0.0-edd1064.tgz';
+    const sdk = lock.packages['node_modules/@gravadigital/jiku'];
 
-    expect(lock.packages['']?.dependencies?.['@gravadigital/jiku']).toBe(tarball);
-    expect(lock.packages['node_modules/@gravadigital/jiku']?.resolved).toBe(tarball);
-    expect(lock.packages['node_modules/@gravadigital/jiku']?.integrity).toMatch(/^sha512-/);
+    expect(lock.packages['']?.dependencies?.['@gravadigital/jiku']).toBe('^1.1.0');
+    expect(sdk?.resolved).toMatch(/^https:\/\/registry\.npmjs\.org\/@gravadigital\/jiku\/-\/jiku-1\./);
+    expect(sdk?.integrity).toMatch(/^sha512-/);
   });
 
   // TS-3 (S-032)

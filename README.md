@@ -474,10 +474,10 @@ no corre ningún release y los tags siguen en la imagen anterior.
 el tag de versión se sobrescribe con la imagen nueva.
 
 **Qué dispara el pipeline.** `rules:changes` no admite negación, así que "sólo docs" se expresa
-como una allowlist de rutas de código (`src/`, `test/`, `scripts/`, `vendor/`, `package*.json`,
-`tsconfig*.json`, `vitest.config.ts`, `Dockerfile`, `.dockerignore`, `version.txt` y el propio
-`.gitlab-ci.yml`). El primer push de una rama nueva siempre dispara, aunque sea sólo de docs. Una
-entrada nueva en la raíz del repo hace fallar `test/gitlab-ci.test.ts` hasta que se clasifique en
+como una allowlist de rutas de código (`src/`, `test/`, `scripts/`, `package*.json`, `tsconfig*.json`,
+`vitest.config.ts`, `Dockerfile`, `.dockerignore`, `version.txt` y el propio `.gitlab-ci.yml`).
+El primer push de una rama nueva siempre dispara, aunque sea sólo de docs. Una entrada nueva en la
+raíz del repo hace fallar `test/gitlab-ci.test.ts` hasta que se clasifique en
 la allowlist o en su lista de exclusiones.
 
 **Precondiciones del runner.** Executor Docker **privilegiado** (para `docker:dind`) y Container
