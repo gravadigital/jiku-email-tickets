@@ -34,7 +34,10 @@ const EXCLUDED_ROOT_ENTRIES = [
   // Nombres exactos y no `.git*`: ese patron tambien matchea `.gitlab-ci.yml`, que SI dispara CI.
   '.git',
   '.gitignore',
+  // Los workflows de GitHub Actions: no le cambian nada al pipeline de GitLab.
+  '.github',
   // Existen en disco sin estar en git.
+  '.secrets',
   'node_modules',
   'dist',
   'coverage',
