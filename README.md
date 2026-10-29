@@ -484,6 +484,34 @@ la allowlist o en su lista de exclusiones.
 Registry habilitado en el proyecto. No hace falta ninguna variable ni secreto propio: todo sale de
 las variables predefinidas de GitLab (`CI_REGISTRY*`).
 
+## Integración continua (GitHub Actions)
+
+El repo también vive en [GitHub](https://github.com/gravadigital/jiku-email-tickets), con los
+workflows de [`.github/workflows/`](.github/workflows/) armados sobre la misma base que jiku-docs.
+Publican en Docker Hub, en `gravadigital/jiku-email-tickets`. El pipeline de GitLab no cambia.
+
+| Workflow | Cuándo corre | Qué se publica |
+|---|---|---|
+| `ci.yml` | Push a `main` o `dev`, y cada pull request | Nada |
+| `dev-images.yml` | Push a `dev` (o a mano) | `:dev` y `:dev-<sha>` |
+| `release.yml` | Push de un tag `vX.Y.Z` | `:X.Y.Z`, `:X.Y` y `:latest` |
+
+Los tres corren la suite completa con `npm run test:teardown`. El runner trae Docker, así que no
+hace falta dind. Los cambios que tocan sólo `*.md` o `docs/` no disparan nada.
+
+**Cómo publicar una versión.** Subir `version.txt`, mover `[Unreleased]` de
+[`CHANGELOG.md`](CHANGELOG.md) a la sección de la versión, mergear a `main` y taggear:
+
+```sh
+git tag -a v1.0.2 -m "v1.0.2"
+git push github v1.0.2
+```
+
+`release.yml` falla antes de construir nada si el tag no coincide con `version.txt` o si
+`CHANGELOG.md` no tiene la sección `## [X.Y.Z]`.
+
+**Secretos del repo.** `DOCKERHUB_USERNAME` y `DOCKERHUB_TOKEN`, los mismos que usa jiku-docs.
+
 ## Imports absolutos
 
 Los imports internos usan las subpath imports nativas de Node, con la extensión `.js` que ESM exige:

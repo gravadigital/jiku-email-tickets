@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+    # Docs-only changes do not need the full suite, the same rule .gitlab-ci.yml expresses with its
+    # allowlist. CHANGELOG.md and README.md fall under '**.md'.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The engines floor (>=22.12) and the image's base (node:22-alpine) are the same major.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # The whole suite, with no filters: real NATS through Testcontainers and
+      # test/docker-image.test.ts, which builds and runs the image (Docker is available on the
+      # runner). test:teardown then checks the NATS container is gone.
+      - name: Test
+        run: npm run test:teardown
+
+      - name: Docker build
+        run: docker build --target production -t jiku-email-tickets:ci .
