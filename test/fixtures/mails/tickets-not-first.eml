@@ -1,0 +1,10 @@
+Message-Id: <tickets-not-first-001@fixtures.local>
+From: "Cliente" <cliente@cliente.com>
+To: Ana Uno <ana@cliente.com>, Beto Dos <beto@cliente.com>,
+ Soporte <soporte@cliente.com>, tickets+alfa@grava.io, Carla Tres <carla@cliente.com>
+Cc: Dario <dario@cliente.com>
+Subject: Falla de integracion
+Content-Type: text/plain; charset=utf-8
+MIME-Version: 1.0
+
+Mail sin Delivered-To, con tickets+alfa en el quinto lugar del To.

@@ -29,6 +29,10 @@ contenido sintético (un PDF y un PNG mínimo válido, generados para este prop�
   sólo el primero (CA-8), no unirlos con `', '` como el servicio existente.
 - `to-fallback.eml` — sin `Delivered-To`, con `To` como único candidato (CA-7).
 - `no-recipient.eml` — sin `Delivered-To` ni `To`: `recipient` vacío es válido (CA-9).
+- `tickets-not-first.eml` — sin `Delivered-To`, con `tickets+alfa@grava.io` en el **quinto**
+  lugar del `To` y un `Cc`. Reproduce (con datos sintéticos) un mail real que se descartó como
+  `sin_slug`: Mailu no escribe `Delivered-To`, así que `recipient` es el `To` entero y de ahí sólo
+  se aísla la primera dirección. El ruteo cae a `addressees` (`listAddressees`) para encontrarlo.
 - `both-text-and-html.eml` — `multipart/alternative` con parte `text/plain` **y** `text/html`: gana
   el texto plano (CA-12).
 - `single-reference.eml` — un solo `References` sin `In-Reply-To`, para probar que

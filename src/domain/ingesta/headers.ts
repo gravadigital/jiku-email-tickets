@@ -1,7 +1,7 @@
 import type { AddressObject, ParsedMail } from 'mailparser';
 
 /**
- * Funciones puras sobre headers de mail: `referenceIds`, `recipient` y `senderEmail`.
+ * Funciones puras sobre headers de mail: `referenceIds`, `recipient`, `addressees` y `senderEmail`.
  *
  * Ports del servicio existente (`grava-gestion/mail-integration` v1.0.0, Arq-9), con dos ajustes
  * obligatorios: la correccion del `Delivered-To` multiple (ver `pickRecipient`), y las adaptaciones
@@ -60,6 +60,32 @@ export function pickRecipient(parsed: Pick<ParsedMail, 'headers' | 'to'>): strin
   if (fromTo !== undefined) return fromTo;
 
   return '';
+}
+
+/**
+ * Todas las direcciones de `To` y despues `Cc`, aisladas (sin nombre de display), en orden de
+ * aparicion. Los grupos (`Equipo: a@x, b@x;`) se aplanan.
+ *
+ * Existe para el fallback del ruteo, NO reemplaza a `pickRecipient`: Mailu no escribe
+ * `Delivered-To`, asi que `recipient` cae al `.text` del `To` y `extractAddress` aisla de ahi solo
+ * la PRIMERA direccion. Si el cliente pone a otra persona primero, el subaddress queda fuera
+ * (visto en produccion). `recipient` no cambia (CA-8); el ruteo lo prueba primero y solo despues
+ * recorre esta lista.
+ */
+export function listAddressees(parsed: Pick<ParsedMail, 'to' | 'cc'>): string[] {
+  const addresses: string[] = [];
+  for (const header of [parsed.to, parsed.cc]) {
+    if (header === undefined) continue;
+    for (const object of Array.isArray(header) ? header : [header]) {
+      for (const entry of object.value) {
+        const members = entry.group ?? [entry];
+        for (const member of members) {
+          if (member.address) addresses.push(member.address);
+        }
+      }
+    }
+  }
+  return addresses;
 }
 
 /** El mail entre `<` y `>` de un `From: Nombre <mail>`. */

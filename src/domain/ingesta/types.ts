@@ -24,6 +24,8 @@ export interface IncomingMail {
   readonly referenceIds: string[];
   /** Crudo: primer `Delivered-To`, con `To` como fallback. Vacio es valido. */
   readonly recipient: string;
+  /** Todas las direcciones de `To` y `Cc`, aisladas y en orden. Solo para el fallback del ruteo. */
+  readonly addressees: string[];
   /** Aislado de `Nombre <mail>`. Nadie lo lee en v1 y nunca se loguea. */
   readonly senderEmail: string;
   /** Sin prefijos `Re:`/`Fwd:`/`RV:`. Vacio es valido. */

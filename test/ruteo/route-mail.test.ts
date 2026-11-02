@@ -63,7 +63,7 @@ describe('camino feliz: la intencion de alta (S-032)', () => {
     expect('motivo' in result).toBe(false);
   });
 
-  it('rutea solo por recipient: pickRecipient ya descarto To/Cc antes de llegar aca', () => {
+  it('sin addressees rutea solo por recipient', () => {
     // TS-7
     const result = routeMail({ referenceIds: [], recipient: 'tickets+alfa@grava.io' }, { subaddressPrefix });
     expect(result).toEqual({ ok: false, intencion: 'alta', slug: 'alfa' });
@@ -188,6 +188,48 @@ describe('intencion de comentario (S-027)', () => {
     // descartes.
     const result = routeMail(
       { referenceIds: ['<a@x>'], recipient: 'tickets+beta@grava.io' },
+      { subaddressPrefix },
+    );
+    expect(result).toEqual({ ok: false, intencion: 'comentario' });
+  });
+});
+
+/**
+ * Fallback a To/Cc: Mailu no escribe `Delivered-To`, asi que `recipient` cae al PRIMER `To`. Si el
+ * cliente pone a otra persona primero, el slug esta en `addressees` y no en `recipient`.
+ */
+describe('fallback a addressees cuando recipient no tiene slug', () => {
+  it('toma el slug de la primera direccion de addressees con subaddress', () => {
+    const result = routeMail(
+      {
+        referenceIds: [],
+        recipient: 'Ana Uno <ana@cliente.com>',
+        addressees: ['ana@cliente.com', 'soporte@cliente.com', 'TICKETS+Alfa@grava.io', 'tickets+beta@grava.io'],
+      },
+      { subaddressPrefix },
+    );
+    expect(result).toEqual({ ok: false, intencion: 'alta', slug: 'alfa' });
+  });
+
+  it('recipient con slug gana sobre addressees', () => {
+    const result = routeMail(
+      { referenceIds: [], recipient: 'tickets+alfa@grava.io', addressees: ['tickets+beta@grava.io'] },
+      { subaddressPrefix },
+    );
+    expect(result).toEqual({ ok: false, intencion: 'alta', slug: 'alfa' });
+  });
+
+  it('sin slug en recipient ni en addressees sigue siendo sin_slug', () => {
+    const result = routeMail(
+      { referenceIds: [], recipient: 'ana@cliente.com', addressees: ['ana@cliente.com', 'tickets+@grava.io'] },
+      { subaddressPrefix },
+    );
+    expect(result).toEqual({ ok: false, motivo: 'sin_slug' });
+  });
+
+  it('una respuesta sigue siendo intencion de comentario aunque addressees tenga slug', () => {
+    const result = routeMail(
+      { referenceIds: ['<a@x>'], recipient: 'ana@cliente.com', addressees: ['tickets+alfa@grava.io'] },
       { subaddressPrefix },
     );
     expect(result).toEqual({ ok: false, intencion: 'comentario' });

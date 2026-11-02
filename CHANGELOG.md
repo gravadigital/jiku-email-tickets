@@ -10,6 +10,15 @@ tenga su sección. El detalle de cada story está en [`docs/changelog/`](docs/ch
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-02
+
+### Fixed
+
+- **Un mail con `tickets+<slug>@` que no es el primer destinatario ya no se descarta como
+  `sin_slug`.** Mailu no escribe `Delivered-To`, así que el ruteo usaba sólo la primera dirección
+  del `To`. Ahora, si esa no tiene slug, recorre el resto del `To` y el `Cc` y usa la primera con
+  subaddress. Sigue sin cubrir `tickets+<slug>@` en Cco, que no aparece en ningún header.
+
 ## [1.0.1] - 2026-10-28
 
 ### Changed
