@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { simpleParser } from 'mailparser';
 import { describe, expect, it } from 'vitest';
 
-import { extractAddress, mergeReferenceIds, pickRecipient } from '#domain/ingesta/headers.js';
+import { extractAddress, listAddressees, mergeReferenceIds, pickRecipient } from '#domain/ingesta/headers.js';
 
 const FIXTURES_DIR = fileURLToPath(new URL('../fixtures/mails/', import.meta.url));
 
@@ -77,6 +77,34 @@ describe('pickRecipient', () => {
     const parsed = { headers, to: undefined } as Parameters<typeof pickRecipient>[0];
 
     expect(() => pickRecipient(parsed)).not.toThrow();
+  });
+});
+
+describe('listAddressees', () => {
+  it('lists every To address, bare and in order, then Cc', async () => {
+    const parsed = await simpleParser(fixture('tickets-not-first.eml'), { skipHtmlToText: true });
+    expect(listAddressees(parsed)).toEqual([
+      'ana@cliente.com',
+      'beto@cliente.com',
+      'soporte@cliente.com',
+      'tickets+alfa@grava.io',
+      'carla@cliente.com',
+      'dario@cliente.com',
+    ]);
+  });
+
+  it('flattens address groups', async () => {
+    const parsed = await simpleParser(
+      Buffer.from(
+        'Message-Id: <g@x>\r\nTo: Equipo: ana@cliente.com, tickets+alfa@grava.io;\r\n\r\nx\r\n',
+      ),
+      { skipHtmlToText: true },
+    );
+    expect(listAddressees(parsed)).toEqual(['ana@cliente.com', 'tickets+alfa@grava.io']);
+  });
+
+  it('returns an empty array when there is neither To nor Cc', () => {
+    expect(listAddressees({ to: undefined, cc: undefined })).toEqual([]);
   });
 });
 

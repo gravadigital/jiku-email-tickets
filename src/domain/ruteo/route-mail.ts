@@ -49,7 +49,8 @@ function escapeRegExp(value: string): string {
  *    la direccion de dependencias que esta cabecera documenta.
  * 2. Aislar el email del `recipient` crudo (`extractAddress`, CA-3), aplicar
  *    `^<prefijo>\+([^@]+)@` case-insensitive, normalizar el slug capturado a minusculas. Si el
- *    `recipient` esta vacio, no matchea, o el slug queda vacio -> `sin_slug` (CA-5, CA-11). El slug
+ *    Si `recipient` no da slug, se prueba el mismo patron sobre cada direccion de `addressees`
+ *    (To y Cc) y gana la primera que matchee. Si ninguna da slug -> `sin_slug` (CA-5, CA-11). El slug
  *    se captura ENTERO entre `+` y `@`, sin validar su forma (CA-5): si puede ser clave del KV lo
  *    decide `lookupTicket()` (`isStorableSlug()`), no esta funcion.
  * 3. Hay slug -> LA INTENCION DE ALTA (`{ ok: false, intencion: 'alta', slug }`, REQ-008 / S-032),
@@ -62,17 +63,22 @@ function escapeRegExp(value: string): string {
  *    `lookupTicket()`, que es quien decide `slug_no_mapeado` o `slug_no_consultable`.
  */
 export function routeMail(
-  mail: Pick<IncomingMail, 'referenceIds' | 'recipient'>,
+  mail: Pick<IncomingMail, 'referenceIds' | 'recipient'> & Partial<Pick<IncomingMail, 'addressees'>>,
   config: Pick<RuteoConfig, 'subaddressPrefix'>,
 ): RouteResult {
   if (mail.referenceIds.length > 0) {
     return { ok: false, intencion: 'comentario' };
   }
 
-  const address = extractAddress(mail.recipient);
   const subaddressPattern = new RegExp(`^${escapeRegExp(config.subaddressPrefix)}\\+([^@]+)@`, 'i');
-  const match = address.match(subaddressPattern);
-  const capturedSlug = match?.[1];
+  const slugOf = (address: string): string | undefined => address.match(subaddressPattern)?.[1];
+
+  // `recipient` primero; si no trae slug, la primera direccion de To/Cc que lo tenga. Mailu no
+  // escribe `Delivered-To`, asi que de `recipient` sale la PRIMERA direccion del `To`, y un cliente
+  // que pone a otra persona primero dejaba el subaddress fuera del ruteo (`sin_slug` en produccion).
+  const capturedSlug =
+    slugOf(extractAddress(mail.recipient)) ??
+    (mail.addressees ?? []).map(slugOf).find((slug) => slug !== undefined);
 
   if (!capturedSlug) {
     return { ok: false, motivo: 'sin_slug' };

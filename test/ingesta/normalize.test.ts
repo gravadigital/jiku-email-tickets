@@ -87,11 +87,22 @@ describe('normalize', () => {
     expect(result.recipient).not.toContain(', ');
   });
 
+  it('keeps recipient as the raw To text and exposes every To/Cc address in addressees', async () => {
+    // `recipient` no cambia (CA-7/CA-8): sin Delivered-To es el `.text` del To entero, y
+    // `extractAddress` aisla de ahi solo la PRIMERA direccion. El fallback vive en `addressees`.
+    const { logger } = testLoggerWithCapture();
+    const result = await normalize(fixture('tickets-not-first.eml'), logger);
+    expect(result.recipient.startsWith('"Ana Uno" <ana@cliente.com>, ')).toBe(true);
+    expect(result.addressees).toContain('tickets+alfa@grava.io');
+    expect(result.addressees).toHaveLength(6);
+  });
+
   it('leaves recipient empty and still normalizes when neither header is present', async () => {
     // TS-17
     const { logger } = testLoggerWithCapture();
     const result = await normalize(fixture('no-recipient.eml'), logger);
     expect(result.recipient).toBe('');
+    expect(result.addressees).toEqual([]);
     expect(result.messageId).toBeTruthy();
   });
 

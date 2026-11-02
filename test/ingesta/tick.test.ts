@@ -739,6 +739,25 @@ describe('runTick — sin_slug se descarta sin slug en la linea (CA-1, CA-2, CA-
   });
 });
 
+describe('runTick — el slug se busca en todo el To si el primero no lo tiene', () => {
+  it('un mail sin Delivered-To con tickets+ en el medio del To no se descarta como sin_slug', async () => {
+    // `beta` no esta mapeado: el descarte por `slug_no_mapeado` con el slug prueba que el ruteo lo
+    // encontro, sin publicar un alta.
+    const { logger, capture } = testLoggerWithCapture();
+    const source = fakeMailSource({
+      uidsUnseen: [1],
+      sources: new Map([
+        [1, mailTo({ uid: 1, recipient: 'Ana <ana@cliente.com>, soporte@cliente.com, tickets+beta@grava.io' })],
+      ]),
+    });
+
+    await runTick(source, BASE_CONFIG, logger, bus.client, SPACE);
+
+    const discardLine = capture.lines().find((l) => l['msg'] === 'mail descartado');
+    expect(discardLine).toMatchObject({ motivo: 'slug_no_mapeado', slug: 'beta' });
+  });
+});
+
 describe('runTick — slug_no_mapeado incluye el slug en la linea (CA-1, CA-2, CA-3, CA-4, CA-7)', () => {
   // TS-3
   it('un mail a un slug no mapeado se descarta como slug_no_mapeado, con el slug', async () => {

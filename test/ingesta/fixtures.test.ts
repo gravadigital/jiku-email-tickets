@@ -53,6 +53,9 @@ describe('test/fixtures/mails/*.eml', () => {
       // S-029: la respuesta que ARRASTRA el adjunto del original — el caso que motiva REQ-006, y el
       // unico fixture con `References` poblado Y un adjunto con bytes reales al mismo tiempo.
       'reply-with-dragged-attachment.eml',
+      // Sin Delivered-To y con `tickets+alfa` en el quinto lugar del To: el mail real que se
+      // descarto como `sin_slug` en produccion (Mailu no escribe Delivered-To).
+      'tickets-not-first.eml',
     ].sort();
 
     expect(fixtureFiles()).toEqual(expected);
